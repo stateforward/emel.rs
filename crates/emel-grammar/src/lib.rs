@@ -1,6 +1,7 @@
 //! GBNF parsing and constrained-generation building blocks.
 
 #![forbid(unsafe_code)]
+#![allow(missing_docs, dead_code)]
 
 /// A validated grammar source, retained as UTF-8 for parsing and diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,3 +20,5 @@ impl GrammarSource {
         &self.0
     }
 }
+pub(crate) mod rule_parser;
+pub(crate) mod sampler;

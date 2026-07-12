@@ -1,6 +1,7 @@
 //! Tensor contracts shared by model implementations and kernels.
 
 #![forbid(unsafe_code)]
+#![allow(missing_docs, dead_code)]
 
 /// The element representation used by a tensor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,3 +46,4 @@ impl TensorLayout {
         self.element_type
     }
 }
+pub(crate) mod view;

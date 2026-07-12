@@ -27,6 +27,9 @@ dependencies = [
 [[package]]
 name = "emel-batch"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-core"
@@ -35,22 +38,37 @@ version = "0.1.0"
 [[package]]
 name = "emel-diarization"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-embeddings"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-gguf"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-grammar"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-graph"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-inspect"
@@ -62,30 +80,51 @@ dependencies = [
 [[package]]
 name = "emel-io"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-kernels"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-logits"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-memory"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-model"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-speech"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-tensor"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "emel-text"
@@ -97,6 +136,9 @@ dependencies = [
 [[package]]
 name = "emel-token"
 version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
 
 [[package]]
 name = "proc-macro2"
