@@ -1,0 +1,58 @@
+[package]
+name = "emel"
+description = "Portable local inference components."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = [
+    "batch",
+    "diarization",
+    "embeddings",
+    "gguf",
+    "graph",
+    "logits",
+    "memory",
+    "model",
+    "speech",
+    "text",
+    "token",
+]
+batch = ["dep:emel-batch"]
+diarization = ["dep:emel-diarization"]
+embeddings = ["dep:emel-embeddings"]
+gguf = ["dep:emel-gguf"]
+graph = ["dep:emel-graph"]
+logits = ["dep:emel-logits"]
+memory = ["dep:emel-memory"]
+model = ["dep:emel-model"]
+speech = ["dep:emel-speech"]
+text = ["dep:emel-text"]
+token = ["dep:emel-token"]
+
+[dependencies]
+emel-core.workspace = true
+emel-grammar.workspace = true
+emel-io.workspace = true
+emel-kernels.workspace = true
+emel-tensor.workspace = true
+emel-batch = { workspace = true, optional = true }
+emel-diarization = { workspace = true, optional = true }
+emel-embeddings = { workspace = true, optional = true }
+emel-gguf = { workspace = true, optional = true }
+emel-graph = { workspace = true, optional = true }
+emel-logits = { workspace = true, optional = true }
+emel-memory = { workspace = true, optional = true }
+emel-model = { workspace = true, optional = true }
+emel-speech = { workspace = true, optional = true }
+emel-text = { workspace = true, optional = true }
+emel-token = { workspace = true, optional = true }
+
+[lints]
+workspace = true

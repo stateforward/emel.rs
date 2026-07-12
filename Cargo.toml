@@ -1,0 +1,77 @@
+[workspace]
+members = [
+    "crates/emel-core",
+    "crates/emel-tensor",
+    "crates/emel-kernels",
+    "crates/emel-io",
+    "crates/emel-grammar",
+    "crates/emel-batch",
+    "crates/emel-embeddings",
+    "crates/emel-gguf",
+    "crates/emel-graph",
+    "crates/emel-logits",
+    "crates/emel-memory",
+    "crates/emel-model",
+    "crates/emel-token",
+    "crates/emel-text",
+    "crates/emel-speech",
+    "crates/emel-diarization",
+    "crates/emel",
+    "tools/emel-inspect",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/stateforward/emel.rs"
+homepage = "https://github.com/stateforward/emel.rs"
+keywords = ["inference", "machine-learning", "state-machine"]
+categories = ["science", "algorithms"]
+
+[workspace.dependencies]
+emel-core = { path = "crates/emel-core", version = "0.1.0" }
+emel-tensor = { path = "crates/emel-tensor", version = "0.1.0" }
+emel-kernels = { path = "crates/emel-kernels", version = "0.1.0" }
+emel-io = { path = "crates/emel-io", version = "0.1.0" }
+emel-grammar = { path = "crates/emel-grammar", version = "0.1.0" }
+emel-batch = { path = "crates/emel-batch", version = "0.1.0" }
+emel-embeddings = { path = "crates/emel-embeddings", version = "0.1.0" }
+emel-gguf = { path = "crates/emel-gguf", version = "0.1.0" }
+emel-graph = { path = "crates/emel-graph", version = "0.1.0" }
+emel-logits = { path = "crates/emel-logits", version = "0.1.0" }
+emel-memory = { path = "crates/emel-memory", version = "0.1.0" }
+emel-model = { path = "crates/emel-model", version = "0.1.0" }
+emel-token = { path = "crates/emel-token", version = "0.1.0" }
+emel-text = { path = "crates/emel-text", version = "0.1.0" }
+emel-speech = { path = "crates/emel-speech", version = "0.1.0" }
+emel-diarization = { path = "crates/emel-diarization", version = "0.1.0" }
+emel = { path = "crates/emel", version = "0.1.0" }
+sml = { package = "stateforward-sml", path = "../../sml/sml.rs", version = "1.0.0" }
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unsafe_code = "warn"
+unused_crate_dependencies = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.dev]
+debug = "full"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.profiling]
+inherits = "release"
+debug = "full"
+strip = "none"
