@@ -37,4 +37,4 @@ cargo lint
 cargo test-all
 ```
 
-`sml.rs` remains a separately versioned workspace. During the port, this workspace uses its local path dependency; release builds should replace it with the published `stateforward-sml` version.
+`sml.rs` remains separately versioned and is consumed from crates.io as `stateforward-sml`.

@@ -119,6 +119,8 @@ dependencies = [
 [[package]]
 name = "stateforward-sml"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7fa98638b8689969c5b9a54b779fc53bf0b302c54e6a90a26f4a9f795ce50a4"
 dependencies = [
  "stateforward-sml-macros",
 ]
@@ -126,6 +128,8 @@ dependencies = [
 [[package]]
 name = "stateforward-sml-macros"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "50a37f3bdbe7a1dd841ceb571524a856c03c584956883b12e19a5a4cae63b4a9"
 dependencies = [
  "proc-macro2",
  "quote",
