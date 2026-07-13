@@ -39,7 +39,7 @@ cargo lint
 cargo test-all
 ```
 
-<!-- benchmark, parity, and fuzz commands implemented by scripts/bench.sh, scripts/paritychecker.sh, and scripts/fuzz.sh -->
+<!-- benchmark, parity, fuzz, and coverage commands implemented by scripts/bench.sh, scripts/paritychecker.sh, scripts/fuzz.sh, and scripts/coverage.sh -->
 
 `scripts/paritychecker.sh` refreshes the checked-in snapshot from the pinned
 llama.cpp reference, performs live parity, and verifies the resulting snapshot
@@ -55,5 +55,11 @@ and smoke-tests all isolated `cargo-fuzz` GGUF targets for ten seconds each. It
 requires nightly Rust and `cargo-fuzz`; use `--target`, `--seconds`, or
 `--build-only` to narrow a local run. Pull requests run the smoke suite, while a
 separate weekly workflow preserves the evolving corpus and runs longer campaigns.
+
+`scripts/coverage.sh` enforces at least 90% line coverage and 50% branch coverage
+for the completed `emel-gguf` production sources. Generated `sm.rs` state-machine
+plumbing is excluded. Branch instrumentation uses the pinned nightly toolchain
+and `cargo-llvm-cov` version named by the script; CI stores the JSON report as an
+artifact. Raise or broaden the gate as additional scaffold crates are ported.
 
 `sml.rs` remains separately versioned and is consumed from crates.io as `stateforward-sml`.
