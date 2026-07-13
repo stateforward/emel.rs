@@ -1,8 +1,11 @@
 //! End-to-end coverage for the public GGUF loader lifecycle.
 
-use emel_gguf::{Error, KvEntry, Loader, LoaderState, MAGIC, TensorInfo, VERSION, load};
+use emel_gguf::event::{Bind, Error, Load, Parse, ParseDone, Probe, ProbeDone};
+use emel_gguf::{Loader, LoaderState};
 use sml as _;
 
+const MAGIC: [u8; 4] = *b"GGUF";
+const VERSION: u32 = 3;
 const TYPE_UINT32: u32 = 4;
 const TYPE_STRING: u32 = 8;
 const TYPE_ARRAY: u32 = 9;
@@ -11,6 +14,49 @@ const ALIGNMENT: u32 = 32;
 const ALIGNMENT_KEY: &str = "general.alignment";
 const TOKENS_KEY: &str = "tokenizer.tokens";
 const TENSOR_NAME: &str = "weights.f32";
+
+trait LoaderTestExt {
+    fn probe(&mut self, file_image: &[u8]) -> Result<ProbeDone, Error>;
+    fn bind(&mut self) -> Result<(), Error>;
+    fn bind_with_capacity(
+        &mut self,
+        metadata_bytes: usize,
+        metadata_entries: usize,
+        tensors: usize,
+    ) -> Result<(), Error>;
+    fn parse<'a>(&mut self, file_image: &'a [u8]) -> Result<ParseDone<'a>, Error>;
+}
+
+impl LoaderTestExt for Loader {
+    fn probe(&mut self, file_image: &[u8]) -> Result<ProbeDone, Error> {
+        self.process_event(Probe::new(file_image))
+    }
+
+    fn bind(&mut self) -> Result<(), Error> {
+        self.process_event(Bind::exact())
+    }
+
+    fn bind_with_capacity(
+        &mut self,
+        metadata_bytes: usize,
+        metadata_entries: usize,
+        tensors: usize,
+    ) -> Result<(), Error> {
+        self.process_event(Bind::with_capacity(
+            metadata_bytes,
+            metadata_entries,
+            tensors,
+        ))
+    }
+
+    fn parse<'a>(&mut self, file_image: &'a [u8]) -> Result<ParseDone<'a>, Error> {
+        self.process_event(Parse::new(file_image))
+    }
+}
+
+fn load(file_image: &[u8]) -> Result<ParseDone<'_>, Error> {
+    Loader::new().process_event(Load::new(file_image))
+}
 
 fn append_u32(bytes: &mut Vec<u8>, value: u32) {
     bytes.extend_from_slice(&value.to_le_bytes());
@@ -126,37 +172,37 @@ fn probe_bind_parse_lifecycle_populates_bound_storage() {
 
     let requirements = loader.probe(&file).expect("valid probe");
     assert_eq!(loader.state(), LoaderState::Probed);
-    assert_eq!(requirements.tensor_count, 1);
-    assert_eq!(requirements.kv_count, 2);
-    assert_eq!(requirements.max_key_bytes, 17);
-    assert_eq!(requirements.max_value_bytes, 35);
-    assert_eq!(requirements.tensor_data_bytes, 24);
+    assert_eq!(requirements.tensor_count(), 1);
+    assert_eq!(requirements.metadata_count(), 2);
+    assert_eq!(requirements.max_key_bytes(), 17);
+    assert_eq!(requirements.max_value_bytes(), 35);
+    assert_eq!(requirements.tensor_data_bytes(), 24);
 
     loader.bind().expect("storage binds");
     assert_eq!(loader.state(), LoaderState::Bound);
     let model = loader.parse(&file).expect("valid parse");
     assert_eq!(loader.state(), LoaderState::Parsed);
 
-    let entries = model.kv_entries();
-    assert_eq!(model.key(&entries[0]), Some(ALIGNMENT_KEY.as_bytes()));
-    assert_eq!(entries[0].value_type, TYPE_UINT32);
-    assert_eq!(read_u32(model.value(&entries[0]).unwrap()), ALIGNMENT);
-    assert_eq!(model.key(&entries[1]), Some(TOKENS_KEY.as_bytes()));
-    assert_eq!(entries[1].value_type, TYPE_ARRAY);
-    assert_eq!(entries[1].value_length, 35);
-    let tokens = model.value(&entries[1]).unwrap();
+    let entries = model.metadata().collect::<Vec<_>>();
+    assert_eq!(entries[0].key(), ALIGNMENT_KEY.as_bytes());
+    assert_eq!(entries[0].value_type(), TYPE_UINT32);
+    assert_eq!(read_u32(entries[0].value()), ALIGNMENT);
+    assert_eq!(entries[1].key(), TOKENS_KEY.as_bytes());
+    assert_eq!(entries[1].value_type(), TYPE_ARRAY);
+    assert_eq!(entries[1].value().len(), 35);
+    let tokens = entries[1].value();
     assert_eq!(read_u32(&tokens[..4]), TYPE_STRING);
     assert_eq!(read_u64(&tokens[4..12]), 2);
 
-    let tensor = &model.tensors()[0];
-    assert_eq!(model.tensor_name(tensor), Some(TENSOR_NAME.as_bytes()));
-    assert_eq!(tensor.tensor_type, GGML_TYPE_F32);
-    assert_eq!(tensor.dimension_count, 2);
-    assert_eq!(tensor.dimensions, [2, 3, 1, 1]);
-    assert_eq!(tensor.data_offset, 0);
-    assert_eq!(tensor.data_size, 24);
-    assert!(tensor.file_offset > tensor.data_offset);
-    assert_eq!(model.tensor_data(tensor).unwrap().len(), 24);
+    let tensor = model.tensors().next().expect("one tensor");
+    assert_eq!(tensor.name(), TENSOR_NAME.as_bytes());
+    assert_eq!(tensor.tensor_type(), GGML_TYPE_F32);
+    assert_eq!(tensor.dimension_count(), 2);
+    assert_eq!(tensor.dimensions(), [2, 3, 1, 1]);
+    assert_eq!(tensor.data_offset(), 0);
+    assert_eq!(tensor.data_size(), 24);
+    assert!(tensor.file_offset() > tensor.data_offset());
+    assert_eq!(tensor.data().len(), 24);
 }
 
 #[test]
@@ -190,9 +236,9 @@ fn bind_and_parse_report_capacity_and_format_failures() {
     let requirements = loader.probe(&valid).unwrap();
     assert_eq!(
         loader.bind_with_capacity(
-            requirements.required_kv_arena_bytes().unwrap() - 1,
-            requirements.kv_count as usize,
-            requirements.tensor_count as usize,
+            requirements.required_metadata_bytes().unwrap() - 1,
+            requirements.metadata_count() as usize,
+            requirements.tensor_count() as usize,
         ),
         Err(Error::Capacity)
     );
@@ -246,7 +292,7 @@ fn parse_revalidates_an_image_after_storage_was_bound() {
 fn one_shot_load_parses_a_valid_image() {
     let file = valid_gguf();
     let model = load(&file).expect("one-shot load");
-    assert_eq!(model.requirements().tensor_count, 1);
+    assert_eq!(model.probe().tensor_count(), 1);
     assert_eq!(model.tensors().len(), 1);
 }
 
@@ -254,10 +300,7 @@ fn one_shot_load_parses_a_valid_image() {
 fn public_diagnostics_and_borrowed_ranges_are_stable() {
     let loader = Loader::default();
     assert_eq!(loader.state(), LoaderState::Uninitialized);
-    assert_eq!(
-        format!("{loader:?}"),
-        "Loader { state: Uninitialized, requirements: Requirements { tensor_count: 0, kv_count: 0, max_key_bytes: 0, max_value_bytes: 0, tensor_data_bytes: 0 }, .. }"
-    );
+    assert_eq!(format!("{loader:?}"), "Loader { state: Uninitialized, .. }");
 
     for (error, message) in [
         (Error::InvalidRequest, "invalid GGUF loader request"),
@@ -272,39 +315,8 @@ fn public_diagnostics_and_borrowed_ranges_are_stable() {
 
     let file = valid_gguf();
     let model = load(&file).expect("valid model");
-    assert_eq!(model.file_image(), file);
-    assert_eq!(
-        model.key(&KvEntry {
-            key_offset: u32::MAX,
-            key_length: 1,
-            ..KvEntry::default()
-        }),
-        None
-    );
-    assert_eq!(
-        model.value(&KvEntry {
-            value_offset: u32::MAX,
-            value_length: 1,
-            ..KvEntry::default()
-        }),
-        None
-    );
-    assert_eq!(
-        model.tensor_name(&TensorInfo {
-            name_offset: u32::MAX,
-            name_length: 1,
-            ..TensorInfo::default()
-        }),
-        None
-    );
-    assert_eq!(
-        model.tensor_data(&TensorInfo {
-            file_offset: u64::MAX,
-            data_size: 1,
-            ..TensorInfo::default()
-        }),
-        None
-    );
+    assert_eq!(model.metadata().len(), 2);
+    assert_eq!(model.tensors().len(), 1);
 }
 
 #[test]
@@ -312,10 +324,10 @@ fn accepts_llama_cpp_supported_versions_and_metadata_only_files() {
     for version in [2, 3] {
         let file = empty_gguf(version);
         let model = load(&file).expect("metadata-only GGUF loads");
-        assert_eq!(model.requirements().tensor_count, 0);
-        assert_eq!(model.requirements().kv_count, 0);
-        assert!(model.tensors().is_empty());
-        assert!(model.kv_entries().is_empty());
+        assert_eq!(model.probe().tensor_count(), 0);
+        assert_eq!(model.probe().metadata_count(), 0);
+        assert_eq!(model.tensors().len(), 0);
+        assert_eq!(model.metadata().len(), 0);
     }
 }
 
@@ -357,8 +369,9 @@ fn supports_current_llama_cpp_quantized_tensor_layouts() {
     ] {
         let file = single_tensor_gguf(tensor_type, block_size, type_size);
         let model = load(&file).expect("llama.cpp tensor type loads");
-        assert_eq!(model.tensors()[0].tensor_type, tensor_type);
-        assert_eq!(model.tensors()[0].data_size, type_size as u64);
+        let tensor = model.tensors().next().expect("one tensor");
+        assert_eq!(tensor.tensor_type(), tensor_type);
+        assert_eq!(tensor.data_size(), type_size as u64);
     }
 }
 
@@ -434,17 +447,17 @@ fn probes_an_external_real_model_fixture() {
     let path = std::env::var_os("EMEL_GGUF_FIXTURE").expect("EMEL_GGUF_FIXTURE is set");
     let bytes = std::fs::read(path).expect("fixture is readable");
     let model = load(&bytes).expect("fixture loads");
-    let requirements = model.requirements();
-    assert!(requirements.tensor_count > 0);
-    assert!(requirements.kv_count > 0);
-    assert!(requirements.max_key_bytes > 0);
-    assert!(requirements.max_value_bytes > 0);
+    let requirements = model.probe();
+    assert!(requirements.tensor_count() > 0);
+    assert!(requirements.metadata_count() > 0);
+    assert!(requirements.max_key_bytes() > 0);
+    assert!(requirements.max_value_bytes() > 0);
     assert_eq!(
         model.tensors().len(),
-        usize::try_from(requirements.tensor_count).unwrap()
+        usize::try_from(requirements.tensor_count()).unwrap()
     );
     assert_eq!(
-        model.kv_entries().len(),
-        usize::try_from(requirements.kv_count).unwrap()
+        model.metadata().len(),
+        usize::try_from(requirements.metadata_count()).unwrap()
     );
 }

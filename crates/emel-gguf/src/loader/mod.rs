@@ -85,12 +85,6 @@ pub struct Gguf<'a> {
 }
 
 impl<'a> Gguf<'a> {
-    /// Returns the immutable input image backing tensor payloads and names.
-    #[must_use]
-    pub const fn file_image(&self) -> &'a [u8] {
-        self.file_image
-    }
-
     /// Returns the requirements computed during probing.
     #[must_use]
     pub const fn requirements(&self) -> Requirements {
@@ -321,16 +315,4 @@ impl Loader {
         self.machine.context().result()?;
         self.machine.context().parsed(file_image)
     }
-}
-
-/// Probes, binds, and parses a GGUF image in one operation.
-///
-/// # Errors
-///
-/// Returns the first probe, allocation, or parse failure.
-pub fn load(file_image: &[u8]) -> Result<Gguf<'_>, Error> {
-    let mut loader = Loader::new();
-    loader.probe(file_image)?;
-    loader.bind()?;
-    loader.parse(file_image)
 }
