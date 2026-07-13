@@ -1,593 +1,404 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Explicit SML lifecycle for the GGUF loader.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
+    clippy::needless_lifetimes,
+    reason = "SML-generated action and guard signatures mirror structural event lifetimes"
 )]
 
 use sml::sml;
 
-// --- machine GgufLoader from emel.cpp/src/emel/gguf/loader/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventBindRuntime;
+use super::{Error, Gguf, KvEntry, Requirements, TensorInfo, detail};
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventParseRuntime;
-
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventProbeRuntime;
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EventBindRuntime {
+    pub(super) kv_arena_bytes: usize,
+    pub(super) kv_entry_capacity: usize,
+    pub(super) tensor_capacity: usize,
+}
 
 sml! {
     GgufLoader {
-        "probe_request_decision"_s <= *"uninitialized"_s + event<EventProbeRuntime> / begin_probe_from_uninitialized,
-        "probe_request_decision"_s <= "probed"_s + event<EventProbeRuntime> / begin_probe_from_probed,
-        "probe_request_decision"_s <= "bound"_s + event<EventProbeRuntime> / begin_probe_from_bound,
-        "probe_request_decision"_s <= "parsed"_s + event<EventProbeRuntime> / begin_probe_from_parsed,
-        "probe_request_decision"_s <= "errored"_s + event<EventProbeRuntime> / begin_probe_from_errored,
-        "probe_outcome_dispatch"_s <= "probe_request_decision"_s + completion<EventProbeRuntime> [probe_valid_request] / exec_probe,
-        "probe_outcome_dispatch"_s <= "probe_request_decision"_s + completion<EventProbeRuntime> [probe_invalid_request] / mark_probe_invalid_request,
-        "probe_requirements_dispatch"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_none] / commit_probe_requirements,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_invalid_request] / publish_probe_error_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_model_invalid] / publish_probe_error_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_capacity] / publish_probe_error_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_parse_failed] / publish_probe_error_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_internal_error] / publish_probe_error_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_untracked] / publish_probe_error_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_outcome_dispatch"_s + completion<EventProbeRuntime> [probe_error_unknown] / publish_probe_error_from_probe_outcome_dispatch,
-        "probed"_s <= "probe_requirements_dispatch"_s + completion<EventProbeRuntime> / publish_probe_done,
-        "bind_request_decision"_s <= "probed"_s + event<EventBindRuntime> / begin_bind_from_probed,
-        "bind_request_decision"_s <= "bound"_s + event<EventBindRuntime> / begin_bind_from_bound,
-        "bind_request_decision"_s <= "parsed"_s + event<EventBindRuntime> / begin_bind_from_parsed,
-        "bind_outcome_dispatch"_s <= "uninitialized"_s + event<EventBindRuntime> / mark_bind_invalid_request_from_uninitialized,
-        "bind_outcome_dispatch"_s <= "errored"_s + event<EventBindRuntime> / mark_bind_invalid_request_from_errored,
-        "bind_request_shape_decision"_s <= "bind_request_decision"_s + completion<EventBindRuntime>,
-        "bind_capacity_decision"_s <= "bind_request_shape_decision"_s + completion<EventBindRuntime> [bind_valid_request],
-        "bind_outcome_dispatch"_s <= "bind_request_shape_decision"_s + completion<EventBindRuntime> [bind_invalid_request] / mark_bind_invalid_request_from_bind_request_shape_decision,
-        "bind_outcome_dispatch"_s <= "bind_request_shape_decision"_s + completion<EventBindRuntime> / mark_bind_invalid_request_from_bind_request_shape_decision,
-        "bind_outcome_dispatch"_s <= "bind_capacity_decision"_s + completion<EventBindRuntime> [bind_capacity_sufficient] / exec_bind,
-        "bind_outcome_dispatch"_s <= "bind_capacity_decision"_s + completion<EventBindRuntime> [bind_capacity_insufficient] / mark_bind_capacity_from_bind_capacity_decision,
-        "bind_outcome_dispatch"_s <= "bind_capacity_decision"_s + completion<EventBindRuntime> / mark_bind_capacity_from_bind_capacity_decision,
-        "bound"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_none] / publish_bind_done,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_invalid_request] / publish_bind_error_from_bind_outcome_dispatch,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_model_invalid] / publish_bind_error_from_bind_outcome_dispatch,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_capacity] / publish_bind_error_from_bind_outcome_dispatch,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_parse_failed] / publish_bind_error_from_bind_outcome_dispatch,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_internal_error] / publish_bind_error_from_bind_outcome_dispatch,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_untracked] / publish_bind_error_from_bind_outcome_dispatch,
-        "errored"_s <= "bind_outcome_dispatch"_s + completion<EventBindRuntime> [bind_error_unknown] / publish_bind_error_from_bind_outcome_dispatch,
-        "parse_request_decision"_s <= "bound"_s + event<EventParseRuntime> / begin_parse_from_bound,
-        "parse_request_decision"_s <= "parsed"_s + event<EventParseRuntime> / begin_parse_from_parsed,
-        "parse_outcome_dispatch"_s <= "uninitialized"_s + event<EventParseRuntime> / mark_parse_invalid_request_from_uninitialized,
-        "parse_outcome_dispatch"_s <= "probed"_s + event<EventParseRuntime> / mark_parse_invalid_request_from_probed,
-        "parse_outcome_dispatch"_s <= "errored"_s + event<EventParseRuntime> / mark_parse_invalid_request_from_errored,
-        "parse_file_image_decision"_s <= "parse_request_decision"_s + completion<EventParseRuntime>,
-        "parse_bound_storage_decision"_s <= "parse_file_image_decision"_s + completion<EventParseRuntime> [parse_has_file_image],
-        "parse_outcome_dispatch"_s <= "parse_file_image_decision"_s + completion<EventParseRuntime> [parse_missing_file_image] / mark_parse_invalid_request_from_parse_file_image_decision,
-        "parse_outcome_dispatch"_s <= "parse_file_image_decision"_s + completion<EventParseRuntime> / mark_parse_invalid_request_from_parse_file_image_decision,
-        "parse_capacity_decision"_s <= "parse_bound_storage_decision"_s + completion<EventParseRuntime> [parse_has_bound_storage],
-        "parse_outcome_dispatch"_s <= "parse_bound_storage_decision"_s + completion<EventParseRuntime> [parse_missing_bound_storage] / mark_parse_invalid_request_from_parse_bound_storage_decision,
-        "parse_outcome_dispatch"_s <= "parse_bound_storage_decision"_s + completion<EventParseRuntime> / mark_parse_invalid_request_from_parse_bound_storage_decision,
-        "parse_outcome_dispatch"_s <= "parse_capacity_decision"_s + completion<EventParseRuntime> [parse_bound_capacity_sufficient] / exec_parse,
-        "parse_outcome_dispatch"_s <= "parse_capacity_decision"_s + completion<EventParseRuntime> [parse_bound_capacity_insufficient] / mark_parse_capacity_from_parse_capacity_decision,
-        "parse_outcome_dispatch"_s <= "parse_capacity_decision"_s + completion<EventParseRuntime> / mark_parse_capacity_from_parse_capacity_decision,
-        "parsed"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_none] / publish_parse_done,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_invalid_request] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_model_invalid] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_capacity] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_parse_failed] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_internal_error] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_untracked] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "parse_outcome_dispatch"_s + completion<EventParseRuntime> [parse_error_unknown] / publish_parse_error_from_parse_outcome_dispatch,
-        "errored"_s <= "uninitialized"_s + unexpected_event<_> / on_unexpected_from_uninitialized,
-        "errored"_s <= "probed"_s + unexpected_event<_> / on_unexpected_from_probed,
-        "errored"_s <= "bound"_s + unexpected_event<_> / on_unexpected_from_bound,
-        "errored"_s <= "parsed"_s + unexpected_event<_> / on_unexpected_from_parsed,
-        "errored"_s <= "errored"_s + unexpected_event<_> / on_unexpected_from_errored,
-        "errored"_s <= "probe_request_decision"_s + unexpected_event<_> / on_unexpected_from_probe_request_decision,
-        "errored"_s <= "probe_outcome_dispatch"_s + unexpected_event<_> / on_unexpected_from_probe_outcome_dispatch,
-        "errored"_s <= "probe_requirements_dispatch"_s + unexpected_event<_> / on_unexpected_from_probe_requirements_dispatch,
-        "errored"_s <= "bind_request_decision"_s + unexpected_event<_> / on_unexpected_from_bind_request_decision,
-        "errored"_s <= "bind_request_shape_decision"_s + unexpected_event<_> / on_unexpected_from_bind_request_shape_decision,
-        "errored"_s <= "bind_capacity_decision"_s + unexpected_event<_> / on_unexpected_from_bind_capacity_decision,
-        "errored"_s <= "bind_outcome_dispatch"_s + unexpected_event<_> / on_unexpected_from_bind_outcome_dispatch,
-        "errored"_s <= "parse_request_decision"_s + unexpected_event<_> / on_unexpected_from_parse_request_decision,
-        "errored"_s <= "parse_file_image_decision"_s + unexpected_event<_> / on_unexpected_from_parse_file_image_decision,
-        "errored"_s <= "parse_bound_storage_decision"_s + unexpected_event<_> / on_unexpected_from_parse_bound_storage_decision,
-        "errored"_s <= "parse_capacity_decision"_s + unexpected_event<_> / on_unexpected_from_parse_capacity_decision,
-        "errored"_s <= "parse_outcome_dispatch"_s + unexpected_event<_> / on_unexpected_from_parse_outcome_dispatch,
+        "probe_execution_pending"_s <= *"uninitialized"_s + ProbeRequest(&'a [u8]) [probe_request_valid] / begin_probe,
+        "probe_execution_pending"_s <= "probed"_s + ProbeRequest(&'a [u8]) [probe_request_valid] / begin_probe,
+        "probe_execution_pending"_s <= "bound"_s + ProbeRequest(&'a [u8]) [probe_request_valid] / begin_probe,
+        "probe_execution_pending"_s <= "parsed"_s + ProbeRequest(&'a [u8]) [probe_request_valid] / begin_probe,
+        "probe_execution_pending"_s <= "errored"_s + ProbeRequest(&'a [u8]) [probe_request_valid] / begin_probe,
+        "errored"_s <= "uninitialized"_s + ProbeRequest(&'a [u8]) [probe_request_invalid] / mark_probe_invalid,
+        "errored"_s <= "probed"_s + ProbeRequest(&'a [u8]) [probe_request_invalid] / mark_probe_invalid,
+        "errored"_s <= "bound"_s + ProbeRequest(&'a [u8]) [probe_request_invalid] / mark_probe_invalid,
+        "errored"_s <= "parsed"_s + ProbeRequest(&'a [u8]) [probe_request_invalid] / mark_probe_invalid,
+        "errored"_s <= "errored"_s + ProbeRequest(&'a [u8]) [probe_request_invalid] / mark_probe_invalid,
+
+        "probed"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_ok] / commit_probe,
+        "errored"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_invalid_request] / publish_probe_error,
+        "errored"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_model_invalid] / publish_probe_error,
+        "errored"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_capacity] / publish_probe_error,
+        "errored"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_parse_failed] / publish_probe_error,
+        "errored"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_internal] / publish_probe_error,
+        "errored"_s <= "probe_execution_pending"_s + ProbeResult(Result<Requirements, Error>) [probe_result_untracked] / publish_probe_error,
+
+        "bind_capacity_decision"_s <= "probed"_s + BindRequest(EventBindRuntime) / begin_bind,
+        "bind_capacity_decision"_s <= "bound"_s + BindRequest(EventBindRuntime) / begin_bind,
+        "bind_capacity_decision"_s <= "parsed"_s + BindRequest(EventBindRuntime) / begin_bind,
+        "errored"_s <= "uninitialized"_s + BindRequest(EventBindRuntime) / mark_bind_invalid,
+        "errored"_s <= "errored"_s + BindRequest(EventBindRuntime) / mark_bind_invalid,
+        "bind_allocation_pending"_s <= "bind_capacity_decision"_s + completion<BindRequest>(EventBindRuntime) [bind_capacity_sufficient],
+        "errored"_s <= "bind_capacity_decision"_s + completion<BindRequest>(EventBindRuntime) [bind_capacity_insufficient] / mark_bind_capacity,
+
+        "bound"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_ok] / commit_bind,
+        "errored"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_invalid_request] / publish_bind_error,
+        "errored"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_model_invalid] / publish_bind_error,
+        "errored"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_capacity] / publish_bind_error,
+        "errored"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_parse_failed] / publish_bind_error,
+        "errored"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_internal] / publish_bind_error,
+        "errored"_s <= "bind_allocation_pending"_s + BindResult(Result<BoundStorage, Error>) [bind_result_untracked] / publish_bind_error,
+
+        "parse_request_decision"_s <= "bound"_s + ParseRequest(&'a [u8]) / begin_parse,
+        "parse_request_decision"_s <= "parsed"_s + ParseRequest(&'a [u8]) / begin_parse,
+        "errored"_s <= "uninitialized"_s + ParseRequest(&'a [u8]) / mark_parse_invalid,
+        "errored"_s <= "probed"_s + ParseRequest(&'a [u8]) / mark_parse_invalid,
+        "errored"_s <= "errored"_s + ParseRequest(&'a [u8]) / mark_parse_invalid,
+        "parse_bound_storage_decision"_s <= "parse_request_decision"_s + completion<ParseRequest>(&'a [u8]) [parse_has_file_image],
+        "errored"_s <= "parse_request_decision"_s + completion<ParseRequest>(&'a [u8]) [parse_missing_file_image] / mark_parse_invalid,
+        "parse_capacity_decision"_s <= "parse_bound_storage_decision"_s + completion<ParseRequest>(&'a [u8]) [parse_has_bound_storage],
+        "errored"_s <= "parse_bound_storage_decision"_s + completion<ParseRequest>(&'a [u8]) [parse_missing_bound_storage] / mark_parse_invalid,
+        "parse_execution_pending"_s <= "parse_capacity_decision"_s + completion<ParseRequest>(&'a [u8]) [parse_bound_capacity_sufficient],
+        "errored"_s <= "parse_capacity_decision"_s + completion<ParseRequest>(&'a [u8]) [parse_bound_capacity_insufficient] / mark_parse_capacity,
+
+        "parsed"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_ok],
+        "errored"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_invalid_request] / publish_parse_error,
+        "errored"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_model_invalid] / publish_parse_error,
+        "errored"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_capacity] / publish_parse_error,
+        "errored"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_parse_failed] / publish_parse_error,
+        "errored"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_internal] / publish_parse_error,
+        "errored"_s <= "parse_execution_pending"_s + ParseResult(Result<(), Error>) [parse_result_untracked] / publish_parse_error,
+
+        "errored"_s <= "uninitialized"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "probed"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "bound"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "parsed"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "errored"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "probe_execution_pending"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "bind_capacity_decision"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "bind_allocation_pending"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "parse_request_decision"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "parse_bound_storage_decision"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "parse_capacity_decision"_s + unexpected_event<_> / on_unexpected,
+        "errored"_s <= "parse_execution_pending"_s + unexpected_event<_> / on_unexpected,
     }
 }
 
-/// Context for `GgufLoader` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
-pub struct GgufLoaderContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+#[derive(Debug)]
+pub(super) struct BoundStorage {
+    kv_arena: Vec<u8>,
+    kv_entries: Vec<KvEntry>,
+    tensors: Vec<TensorInfo>,
+}
+
+impl BoundStorage {
+    pub(super) fn allocate(event: EventBindRuntime) -> Result<Self, Error> {
+        Ok(Self {
+            kv_arena: zeroed_vec(event.kv_arena_bytes)?,
+            kv_entries: zeroed_vec(event.kv_entry_capacity)?,
+            tensors: zeroed_vec(event.tensor_capacity)?,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct GgufLoaderContext {
+    pub(super) probed: Requirements,
+    error: Option<Error>,
+    bound: Option<BoundStorage>,
+}
+
+impl GgufLoaderContext {
+    pub(super) const fn new() -> Self {
+        Self {
+            probed: Requirements {
+                tensor_count: 0,
+                kv_count: 0,
+                max_key_bytes: 0,
+                max_value_bytes: 0,
+                tensor_data_bytes: 0,
+            },
+            error: None,
+            bound: None,
+        }
+    }
+
+    pub(super) fn result(&self) -> Result<(), Error> {
+        self.error.map_or(Ok(()), Err)
+    }
+
+    pub(super) fn execute_parse(&mut self, file_image: &[u8]) -> Result<(), Error> {
+        let bound = self
+            .bound
+            .as_mut()
+            .expect("parse execution state guarantees bound storage");
+        detail::parse(
+            file_image,
+            self.probed,
+            &mut bound.kv_arena,
+            &mut bound.kv_entries,
+            &mut bound.tensors,
+        )
+    }
+
+    pub(super) fn parsed<'a>(&self, file_image: &'a [u8]) -> Result<Gguf<'a>, Error> {
+        let bound = self.bound.as_ref().ok_or(Error::Internal)?;
+        Ok(Gguf {
+            file_image,
+            requirements: self.probed,
+            kv_arena: bound.kv_arena.clone(),
+            kv_entries: bound.kv_entries
+                [..usize::try_from(self.probed.kv_count).map_err(|_| Error::Capacity)?]
+                .to_vec(),
+            tensors: bound.tensors
+                [..usize::try_from(self.probed.tensor_count).map_err(|_| Error::Capacity)?]
+                .to_vec(),
+        })
+    }
+
+    const fn begin(&mut self) {
+        self.error = None;
+    }
+
+    const fn mark(&mut self, error: Error) {
+        self.error = Some(error);
+    }
+
+    fn capacity_sufficient(&self, event: EventBindRuntime) -> bool {
+        event.tensor_capacity >= self.probed.tensor_count as usize
+            && event.kv_entry_capacity >= self.probed.kv_count as usize
+            && self
+                .probed
+                .required_kv_arena_bytes()
+                .is_ok_and(|required| event.kv_arena_bytes >= required)
+    }
+
+    fn bound_capacity_sufficient(&self) -> bool {
+        self.bound.as_ref().is_some_and(|bound| {
+            bound.tensors.len() >= self.probed.tensor_count as usize
+                && bound.kv_entries.len() >= self.probed.kv_count as usize
+                && self
+                    .probed
+                    .required_kv_arena_bytes()
+                    .is_ok_and(|required| bound.kv_arena.len() >= required)
+        })
+    }
+}
+
+fn zeroed_vec<T: Clone + Default>(length: usize) -> Result<Vec<T>, Error> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(length)
+        .map_err(|_| Error::Capacity)?;
+    values.resize(length, T::default());
+    Ok(values)
+}
+
+fn result_is<T>(result: &Result<T, Error>, expected: Error) -> bool {
+    result.as_ref().err() == Some(&expected)
 }
 
 impl GgufLoaderStateMachineContext for GgufLoaderContext {
-    fn begin_bind_from_bound(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_bind_from_parsed(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_bind_from_probed(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_parse_from_bound(&mut self, _event: &EventParseRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_parse
-        todo!("TODO: port action `begin_parse` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_parse_from_parsed(&mut self, _event: &EventParseRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_parse
-        todo!("TODO: port action `begin_parse` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_probe_from_bound(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_probe
-        todo!("TODO: port action `begin_probe` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_probe_from_errored(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_probe
-        todo!("TODO: port action `begin_probe` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_probe_from_parsed(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_probe
-        todo!("TODO: port action `begin_probe` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_probe_from_probed(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_probe
-        todo!("TODO: port action `begin_probe` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn begin_probe_from_uninitialized(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::begin_probe
-        todo!("TODO: port action `begin_probe` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn bind_capacity_insufficient(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_capacity_insufficient
-        todo!(
-            "TODO: port guard `bind_capacity_insufficient` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_capacity_sufficient(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_capacity_sufficient
-        todo!(
-            "TODO: port guard `bind_capacity_sufficient` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_error_capacity(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_capacity
-        todo!(
-            "TODO: port guard `bind_error_capacity` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_error_internal_error(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_internal_error
-        todo!(
-            "TODO: port guard `bind_error_internal_error` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_error_invalid_request(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_invalid_request
-        todo!(
-            "TODO: port guard `bind_error_invalid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_error_model_invalid(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_model_invalid
-        todo!(
-            "TODO: port guard `bind_error_model_invalid` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_error_none(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_none
-        todo!("TODO: port guard `bind_error_none` from emel.cpp/src/emel/gguf/loader/guards.hpp")
-    }
-    fn bind_error_parse_failed(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_parse_failed
-        todo!(
-            "TODO: port guard `bind_error_parse_failed` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_error_unknown(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_unknown
-        todo!("TODO: port guard `bind_error_unknown` from emel.cpp/src/emel/gguf/loader/guards.hpp")
-    }
-    fn bind_error_untracked(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_error_untracked
-        todo!(
-            "TODO: port guard `bind_error_untracked` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_invalid_request(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_invalid_request
-        todo!(
-            "TODO: port guard `bind_invalid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn bind_valid_request(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::bind_valid_request
-        todo!("TODO: port guard `bind_valid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp")
-    }
-    fn commit_probe_requirements(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::commit_probe_requirements
-        todo!(
-            "TODO: port action `commit_probe_requirements` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn exec_bind(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::exec_bind
-        todo!("TODO: port action `exec_bind` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn exec_parse(&mut self, _event: &EventParseRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::exec_parse
-        todo!("TODO: port action `exec_parse` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn exec_probe(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::exec_probe
-        todo!("TODO: port action `exec_probe` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn mark_bind_capacity_from_bind_capacity_decision(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_bind_capacity
-        todo!(
-            "TODO: port action `mark_bind_capacity` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_bind_invalid_request_from_bind_request_shape_decision(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_bind_invalid_request
-        todo!(
-            "TODO: port action `mark_bind_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_bind_invalid_request_from_errored(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_bind_invalid_request
-        todo!(
-            "TODO: port action `mark_bind_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_bind_invalid_request_from_uninitialized(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_bind_invalid_request
-        todo!(
-            "TODO: port action `mark_bind_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_parse_capacity_from_parse_capacity_decision(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_parse_capacity
-        todo!(
-            "TODO: port action `mark_parse_capacity` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_parse_invalid_request_from_errored(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_parse_invalid_request
-        todo!(
-            "TODO: port action `mark_parse_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_parse_invalid_request_from_parse_bound_storage_decision(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_parse_invalid_request
-        todo!(
-            "TODO: port action `mark_parse_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_parse_invalid_request_from_parse_file_image_decision(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_parse_invalid_request
-        todo!(
-            "TODO: port action `mark_parse_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_parse_invalid_request_from_probed(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_parse_invalid_request
-        todo!(
-            "TODO: port action `mark_parse_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_parse_invalid_request_from_uninitialized(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_parse_invalid_request
-        todo!(
-            "TODO: port action `mark_parse_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn mark_probe_invalid_request(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::mark_probe_invalid_request
-        todo!(
-            "TODO: port action `mark_probe_invalid_request` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_bind_capacity_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_bind_outcome_dispatch(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_bind_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_bind_request_shape_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_bound(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_parse_bound_storage_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_parse_capacity_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_parse_file_image_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_parse_outcome_dispatch(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_parse_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_probe_outcome_dispatch(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_probe_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_probe_requirements_dispatch(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_probed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn on_unexpected_from_uninitialized(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/gguf/loader/actions.hpp")
-    }
-    fn parse_bound_capacity_insufficient(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_bound_capacity_insufficient
-        todo!(
-            "TODO: port guard `parse_bound_capacity_insufficient` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_bound_capacity_sufficient(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_bound_capacity_sufficient
-        todo!(
-            "TODO: port guard `parse_bound_capacity_sufficient` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_capacity(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_capacity
-        todo!(
-            "TODO: port guard `parse_error_capacity` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_internal_error(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_internal_error
-        todo!(
-            "TODO: port guard `parse_error_internal_error` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_invalid_request(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_invalid_request
-        todo!(
-            "TODO: port guard `parse_error_invalid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_model_invalid(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_model_invalid
-        todo!(
-            "TODO: port guard `parse_error_model_invalid` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_none(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_none
-        todo!("TODO: port guard `parse_error_none` from emel.cpp/src/emel/gguf/loader/guards.hpp")
-    }
-    fn parse_error_parse_failed(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_parse_failed
-        todo!(
-            "TODO: port guard `parse_error_parse_failed` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_unknown(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_unknown
-        todo!(
-            "TODO: port guard `parse_error_unknown` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_error_untracked(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_error_untracked
-        todo!(
-            "TODO: port guard `parse_error_untracked` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_has_bound_storage(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_has_bound_storage
-        todo!(
-            "TODO: port guard `parse_has_bound_storage` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_has_file_image(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_has_file_image
-        todo!(
-            "TODO: port guard `parse_has_file_image` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_missing_bound_storage(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_missing_bound_storage
-        todo!(
-            "TODO: port guard `parse_missing_bound_storage` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn parse_missing_file_image(&self, _event: &EventParseRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::parse_missing_file_image
-        todo!(
-            "TODO: port guard `parse_missing_file_image` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_capacity(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_capacity
-        todo!(
-            "TODO: port guard `probe_error_capacity` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_internal_error(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_internal_error
-        todo!(
-            "TODO: port guard `probe_error_internal_error` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_invalid_request(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_invalid_request
-        todo!(
-            "TODO: port guard `probe_error_invalid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_model_invalid(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_model_invalid
-        todo!(
-            "TODO: port guard `probe_error_model_invalid` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_none(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_none
-        todo!("TODO: port guard `probe_error_none` from emel.cpp/src/emel/gguf/loader/guards.hpp")
-    }
-    fn probe_error_parse_failed(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_parse_failed
-        todo!(
-            "TODO: port guard `probe_error_parse_failed` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_unknown(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_unknown
-        todo!(
-            "TODO: port guard `probe_error_unknown` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_error_untracked(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_error_untracked
-        todo!(
-            "TODO: port guard `probe_error_untracked` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_invalid_request(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_invalid_request
-        todo!(
-            "TODO: port guard `probe_invalid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn probe_valid_request(&self, _event: &EventProbeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/guards.hpp::probe_valid_request
-        todo!(
-            "TODO: port guard `probe_valid_request` from emel.cpp/src/emel/gguf/loader/guards.hpp"
-        )
-    }
-    fn publish_bind_done(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::publish_bind_done
-        todo!(
-            "TODO: port action `publish_bind_done` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn publish_bind_error_from_bind_outcome_dispatch(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::publish_bind_error
-        todo!(
-            "TODO: port action `publish_bind_error` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn publish_parse_done(&mut self, _event: &EventParseRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::publish_parse_done
-        todo!(
-            "TODO: port action `publish_parse_done` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn publish_parse_error_from_parse_outcome_dispatch(
-        &mut self,
-        _event: &EventParseRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::publish_parse_error
-        todo!(
-            "TODO: port action `publish_parse_error` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn publish_probe_done(&mut self, _event: &EventProbeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::publish_probe_done
-        todo!(
-            "TODO: port action `publish_probe_done` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
-    }
-    fn publish_probe_error_from_probe_outcome_dispatch(
-        &mut self,
-        _event: &EventProbeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gguf/loader/actions.hpp::publish_probe_error
-        todo!(
-            "TODO: port action `publish_probe_error` from emel.cpp/src/emel/gguf/loader/actions.hpp"
-        )
+    fn begin_probe<'a>(&mut self, _event: &'a [u8]) -> Result<(), ()> {
+        self.begin();
+        Ok(())
+    }
+
+    fn probe_request_valid<'a>(&self, event: &'a [u8]) -> Result<bool, ()> {
+        Ok(!event.is_empty())
+    }
+
+    fn probe_request_invalid<'a>(&self, event: &'a [u8]) -> Result<bool, ()> {
+        Ok(event.is_empty())
+    }
+
+    fn mark_probe_invalid<'a>(&mut self, _event: &'a [u8]) -> Result<(), ()> {
+        self.mark(Error::InvalidRequest);
+        Ok(())
+    }
+
+    fn probe_result_ok(&self, event: &Result<Requirements, Error>) -> Result<bool, ()> {
+        Ok(event.is_ok())
+    }
+
+    fn probe_result_invalid_request(
+        &self,
+        event: &Result<Requirements, Error>,
+    ) -> Result<bool, ()> {
+        Ok(result_is(event, Error::InvalidRequest))
+    }
+
+    fn probe_result_model_invalid(&self, event: &Result<Requirements, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::ModelInvalid))
+    }
+
+    fn probe_result_capacity(&self, event: &Result<Requirements, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Capacity))
+    }
+
+    fn probe_result_parse_failed(&self, event: &Result<Requirements, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::ParseFailed))
+    }
+
+    fn probe_result_internal(&self, event: &Result<Requirements, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Internal))
+    }
+
+    fn probe_result_untracked(&self, event: &Result<Requirements, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Untracked))
+    }
+
+    fn commit_probe(&mut self, event: Result<Requirements, Error>) -> Result<(), ()> {
+        self.probed = event.expect("probe_result_ok guard guarantees requirements");
+        self.bound = None;
+        Ok(())
+    }
+
+    fn publish_probe_error(&mut self, event: Result<Requirements, Error>) -> Result<(), ()> {
+        self.mark(event.expect_err("probe error guard guarantees an error"));
+        Ok(())
+    }
+
+    fn begin_bind(&mut self, _event: EventBindRuntime) -> Result<(), ()> {
+        self.begin();
+        Ok(())
+    }
+
+    fn mark_bind_invalid(&mut self, _event: EventBindRuntime) -> Result<(), ()> {
+        self.mark(Error::InvalidRequest);
+        Ok(())
+    }
+
+    fn bind_capacity_sufficient(&self, event: &EventBindRuntime) -> Result<bool, ()> {
+        Ok(self.capacity_sufficient(*event))
+    }
+
+    fn bind_capacity_insufficient(&self, event: &EventBindRuntime) -> Result<bool, ()> {
+        Ok(!self.capacity_sufficient(*event))
+    }
+
+    fn mark_bind_capacity(&mut self, _event: EventBindRuntime) -> Result<(), ()> {
+        self.mark(Error::Capacity);
+        Ok(())
+    }
+
+    fn bind_result_ok(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(event.is_ok())
+    }
+
+    fn bind_result_invalid_request(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::InvalidRequest))
+    }
+
+    fn bind_result_model_invalid(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::ModelInvalid))
+    }
+
+    fn bind_result_capacity(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Capacity))
+    }
+
+    fn bind_result_parse_failed(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::ParseFailed))
+    }
+
+    fn bind_result_internal(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Internal))
+    }
+
+    fn bind_result_untracked(&self, event: &Result<BoundStorage, Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Untracked))
+    }
+
+    fn commit_bind(&mut self, event: Result<BoundStorage, Error>) -> Result<(), ()> {
+        self.bound = Some(event.expect("bind_result_ok guard guarantees storage"));
+        Ok(())
+    }
+
+    fn publish_bind_error(&mut self, event: Result<BoundStorage, Error>) -> Result<(), ()> {
+        self.mark(event.expect_err("bind error guard guarantees an error"));
+        Ok(())
+    }
+
+    fn begin_parse<'a>(&mut self, _event: &'a [u8]) -> Result<(), ()> {
+        self.begin();
+        Ok(())
+    }
+
+    fn mark_parse_invalid<'a>(&mut self, _event: &'a [u8]) -> Result<(), ()> {
+        self.mark(Error::InvalidRequest);
+        Ok(())
+    }
+
+    fn parse_has_file_image<'a>(&self, event: &'a [u8]) -> Result<bool, ()> {
+        Ok(!event.is_empty())
+    }
+
+    fn parse_missing_file_image<'a>(&self, event: &'a [u8]) -> Result<bool, ()> {
+        Ok(event.is_empty())
+    }
+
+    fn parse_has_bound_storage<'a>(&self, _event: &'a [u8]) -> Result<bool, ()> {
+        Ok(self.bound.is_some())
+    }
+
+    fn parse_missing_bound_storage<'a>(&self, _event: &'a [u8]) -> Result<bool, ()> {
+        Ok(self.bound.is_none())
+    }
+
+    fn parse_bound_capacity_sufficient<'a>(&self, _event: &'a [u8]) -> Result<bool, ()> {
+        Ok(self.bound_capacity_sufficient())
+    }
+
+    fn parse_bound_capacity_insufficient<'a>(&self, _event: &'a [u8]) -> Result<bool, ()> {
+        Ok(!self.bound_capacity_sufficient())
+    }
+
+    fn mark_parse_capacity<'a>(&mut self, _event: &'a [u8]) -> Result<(), ()> {
+        self.mark(Error::Capacity);
+        Ok(())
+    }
+
+    fn parse_result_ok(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(event.is_ok())
+    }
+
+    fn parse_result_invalid_request(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::InvalidRequest))
+    }
+
+    fn parse_result_model_invalid(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::ModelInvalid))
+    }
+
+    fn parse_result_capacity(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Capacity))
+    }
+
+    fn parse_result_parse_failed(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::ParseFailed))
+    }
+
+    fn parse_result_internal(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Internal))
+    }
+
+    fn parse_result_untracked(&self, event: &Result<(), Error>) -> Result<bool, ()> {
+        Ok(result_is(event, Error::Untracked))
+    }
+
+    fn publish_parse_error(&mut self, event: Result<(), Error>) -> Result<(), ()> {
+        self.mark(event.expect_err("parse error guard guarantees an error"));
+        Ok(())
+    }
+
+    fn on_unexpected(&mut self) -> Result<(), ()> {
+        self.mark(Error::Internal);
+        Ok(())
     }
 }
