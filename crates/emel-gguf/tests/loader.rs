@@ -1,7 +1,7 @@
 //! End-to-end coverage for the public GGUF loader lifecycle.
 
+use emel_gguf::Loader;
 use emel_gguf::event::{Bind, Error, Load, Parse, ParseDone, Probe, ProbeDone};
-use emel_gguf::{Loader, LoaderState};
 use sml as _;
 
 const MAGIC: [u8; 4] = *b"GGUF";
@@ -168,10 +168,8 @@ fn read_u64(bytes: &[u8]) -> u64 {
 fn probe_bind_parse_lifecycle_populates_bound_storage() {
     let file = valid_gguf();
     let mut loader = Loader::new();
-    assert_eq!(loader.state(), LoaderState::Uninitialized);
 
     let requirements = loader.probe(&file).expect("valid probe");
-    assert_eq!(loader.state(), LoaderState::Probed);
     assert_eq!(requirements.tensor_count(), 1);
     assert_eq!(requirements.metadata_count(), 2);
     assert_eq!(requirements.max_key_bytes(), 17);
@@ -179,9 +177,7 @@ fn probe_bind_parse_lifecycle_populates_bound_storage() {
     assert_eq!(requirements.tensor_data_bytes(), 24);
 
     loader.bind().expect("storage binds");
-    assert_eq!(loader.state(), LoaderState::Bound);
     let model = loader.parse(&file).expect("valid parse");
-    assert_eq!(loader.state(), LoaderState::Parsed);
 
     let entries = model.metadata().collect::<Vec<_>>();
     assert_eq!(entries[0].key(), ALIGNMENT_KEY.as_bytes());
@@ -209,9 +205,7 @@ fn probe_bind_parse_lifecycle_populates_bound_storage() {
 fn probe_rejects_empty_input_and_can_recover() {
     let mut loader = Loader::new();
     assert_eq!(loader.probe(&[]), Err(Error::InvalidRequest));
-    assert_eq!(loader.state(), LoaderState::Errored);
     assert!(loader.probe(&valid_gguf()).is_ok());
-    assert_eq!(loader.state(), LoaderState::Probed);
 }
 
 #[test]
@@ -285,7 +279,6 @@ fn parse_revalidates_an_image_after_storage_was_bound() {
         loader.parse(&duplicate_keys),
         Err(Error::ModelInvalid)
     ));
-    assert_eq!(loader.state(), LoaderState::Errored);
 }
 
 #[test]
@@ -297,10 +290,9 @@ fn one_shot_load_parses_a_valid_image() {
 }
 
 #[test]
-fn public_diagnostics_and_borrowed_ranges_are_stable() {
+fn public_diagnostics_and_event_views_are_stable() {
     let loader = Loader::default();
-    assert_eq!(loader.state(), LoaderState::Uninitialized);
-    assert_eq!(format!("{loader:?}"), "Loader { state: Uninitialized, .. }");
+    assert_eq!(format!("{loader:?}"), "Loader { .. }");
 
     for (error, message) in [
         (Error::InvalidRequest, "invalid GGUF loader request"),

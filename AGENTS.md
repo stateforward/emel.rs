@@ -266,9 +266,10 @@ record, guard, action, or detail internals across crate boundaries. Cross-crate
 runtime interaction MUST use the component's public actors and typed events.
 
 The `emel-gguf` public surface MUST remain limited to its exported `Loader`
-actor, actor state type, and `event` module. Other crates and tools MUST dispatch
-GGUF events to the loader actor and MUST NOT receive visibility into the private
-loader implementation.
+actor and `event` module. Other crates and tools MUST dispatch GGUF events to
+the loader actor and MUST NOT receive visibility into the private loader
+implementation. NEVER expose actor state inspection across crate boundaries;
+consumers MUST infer progress from typed event outcomes.
 
 ALWAYS dispatch cross-machine events through the owning machine's public
 `process_event` wrapper.

@@ -136,9 +136,9 @@ fn range(bytes: &[u8], offset: u32, length: u32) -> Option<&[u8]> {
     bytes.get(start..start.checked_add(length)?)
 }
 
-/// Stable lifecycle states exposed by [`Loader`].
+/// Internal stable lifecycle states used for loader diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LoaderState {
+enum LoaderState {
     /// No successful probe has completed.
     Uninitialized,
     /// Requirements have been discovered.
@@ -218,7 +218,7 @@ impl Loader {
 
     /// Returns the current stable lifecycle state.
     #[must_use]
-    pub fn state(&self) -> LoaderState {
+    fn state(&self) -> LoaderState {
         match self.machine.state() {
             GgufLoaderStates::Uninitialized => LoaderState::Uninitialized,
             GgufLoaderStates::Probed => LoaderState::Probed,

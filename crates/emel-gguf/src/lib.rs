@@ -8,7 +8,7 @@ pub mod event;
 mod actor;
 mod loader;
 
-pub use actor::{Loader, State as LoaderState};
+pub use actor::Loader;
 
 /// The GGUF file magic.
 pub(crate) const MAGIC: [u8; 4] = *b"GGUF";

@@ -5,23 +5,6 @@ use core::fmt;
 use crate::event::{self, Event};
 use crate::loader;
 
-/// Stable lifecycle states exposed by [`Loader`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum State {
-    /// No successful probe has completed.
-    Uninitialized,
-    /// Requirements have been discovered.
-    Probed,
-    /// Metadata and tensor-record storage has been bound.
-    Bound,
-    /// The image has been parsed into bound storage.
-    Parsed,
-    /// The most recent event failed.
-    Errored,
-    /// The actor is processing an internal decision state.
-    Processing,
-}
-
 /// Stateful GGUF loader actor.
 pub struct Loader {
     inner: loader::Loader,
@@ -39,19 +22,6 @@ impl Loader {
     /// Dispatches one typed event run-to-completion.
     pub fn process_event<E: Event>(&mut self, event: E) -> E::Output {
         event.dispatch(self)
-    }
-
-    /// Returns the current stable lifecycle state.
-    #[must_use]
-    pub fn state(&self) -> State {
-        match self.inner.state() {
-            loader::LoaderState::Uninitialized => State::Uninitialized,
-            loader::LoaderState::Probed => State::Probed,
-            loader::LoaderState::Bound => State::Bound,
-            loader::LoaderState::Parsed => State::Parsed,
-            loader::LoaderState::Errored => State::Errored,
-            loader::LoaderState::Processing => State::Processing,
-        }
     }
 
     pub(crate) fn probe(
@@ -100,9 +70,6 @@ impl Default for Loader {
 
 impl fmt::Debug for Loader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Loader")
-            .field("state", &self.state())
-            .finish_non_exhaustive()
+        formatter.debug_struct("Loader").finish_non_exhaustive()
     }
 }

@@ -2,8 +2,8 @@
 
 mod common;
 
+use emel_gguf::Loader;
 use emel_gguf::event::ProbeDone;
-use emel_gguf::{Loader, LoaderState};
 use libfuzzer_sys::fuzz_target;
 
 use common::{LoaderExt as _, MAX_INPUT_BYTES, requirements_are_bounded, validate_model};
@@ -17,7 +17,6 @@ fuzz_target!(|data: &[u8]| {
 
     let mut loader = Loader::new();
     let mut requirements = bounded_probe(&mut loader, data);
-    assert_stable(&loader);
 
     for (index, action) in data.iter().copied().take(MAX_ACTIONS).enumerate() {
         let shortened_length = data.len().saturating_sub(index.saturating_add(1));
@@ -33,8 +32,6 @@ fuzz_target!(|data: &[u8]| {
             6 => requirements = bounded_probe(&mut loader, &[]),
             _ => unreachable!(),
         }
-
-        assert_stable(&loader);
     }
 });
 
@@ -62,8 +59,4 @@ fn parse_and_validate(loader: &mut Loader, data: &[u8]) {
     if let Ok(model) = loader.parse(data) {
         validate_model(&model);
     }
-}
-
-fn assert_stable(loader: &Loader) {
-    assert_ne!(loader.state(), LoaderState::Processing);
 }
