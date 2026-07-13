@@ -39,7 +39,7 @@ cargo lint
 cargo test-all
 ```
 
-<!-- benchmark and parity commands implemented by scripts/bench.sh and scripts/paritychecker.sh -->
+<!-- benchmark, parity, and fuzz commands implemented by scripts/bench.sh, scripts/paritychecker.sh, and scripts/fuzz.sh -->
 
 `scripts/paritychecker.sh` refreshes the checked-in snapshot from the pinned
 llama.cpp reference, performs live parity, and verifies the resulting snapshot
@@ -49,5 +49,11 @@ or the `--no-snapshot`, `--no-live`, and `--no-update` switches to select phases
 `scripts/bench.sh` runs the dependency-light benchmark runner. Add `--snapshot`
 to compare with the current architecture baseline, or `--snapshot --update` to
 refresh it after an intentional performance change.
+
+`scripts/fuzz.sh` regenerates a shared corpus from the llama.cpp parity fixtures
+and smoke-tests all isolated `cargo-fuzz` GGUF targets for ten seconds each. It
+requires nightly Rust and `cargo-fuzz`; use `--target`, `--seconds`, or
+`--build-only` to narrow a local run. Pull requests run the smoke suite, while a
+separate weekly workflow preserves the evolving corpus and runs longer campaigns.
 
 `sml.rs` remains separately versioned and is consumed from crates.io as `stateforward-sml`.

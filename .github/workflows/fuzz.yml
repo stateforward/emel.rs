@@ -1,0 +1,47 @@
+name: Scheduled fuzzing
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-gguf-fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  gguf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.tool_cache }}/cargo-fuzz
+          key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
+      - run: echo "${{ runner.tool_cache }}/cargo-fuzz/bin" >> "$GITHUB_PATH"
+      - name: Install cargo-fuzz
+        run: |
+          if ! command -v cargo-fuzz >/dev/null 2>&1; then
+            cargo +nightly install --root "${{ runner.tool_cache }}/cargo-fuzz" \
+              --version "$CARGO_FUZZ_VERSION" cargo-fuzz --locked
+          fi
+      - uses: actions/cache@v4
+        with:
+          path: target/fuzz/gguf-corpus
+          key: gguf-corpus-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            gguf-corpus-${{ runner.os }}-
+      - run: scripts/fuzz.sh --seconds 300
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: scheduled-gguf-fuzz-artifacts-${{ github.sha }}
+          path: fuzz/artifacts
+          if-no-files-found: ignore

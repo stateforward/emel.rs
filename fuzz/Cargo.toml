@@ -1,0 +1,37 @@
+[package]
+name = "emel-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+emel-gguf = { path = "../crates/emel-gguf" }
+libfuzzer-sys = "0.4.13"
+
+[[bin]]
+name = "gguf_loader"
+path = "fuzz_targets/gguf_loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gguf_load"
+path = "fuzz_targets/gguf_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gguf_lifecycle"
+path = "fuzz_targets/gguf_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+resolver = "3"
