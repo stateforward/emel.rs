@@ -1,0 +1,7 @@
+# bench_host_arch: aarch64
+# benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
+gguf/probe/metadata_64 ns_per_op=4647.000 iter=1000 runs=5
+gguf/load/metadata_64 ns_per_op=9054.250 iter=1000 runs=5
+gguf/probe/tensors_64 ns_per_op=4586.791 iter=1000 runs=5
+gguf/parse/tensors_64 ns_per_op=4472.167 iter=1000 runs=5
+gguf/load/tensors_64 ns_per_op=8860.208 iter=1000 runs=5

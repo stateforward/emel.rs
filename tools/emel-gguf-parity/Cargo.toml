@@ -1,0 +1,15 @@
+[package]
+name = "emel-gguf-parity"
+description = "Canonical GGUF parity output and fixtures for the llama.cpp differential gate."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+emel-gguf.workspace = true
+
+[lints]
+workspace = true

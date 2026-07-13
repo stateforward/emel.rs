@@ -26,6 +26,8 @@ Rust port of the companion `emel.cpp` project, organized as independently builda
 | `emel-diarization` | Speaker-diarization components. |
 | `emel` | Feature-gated public façade. |
 | `emel-inspect` | Model-inspection command-line tool. |
+| `emel-bench` | Dependency-light performance snapshot runner. |
+| `emel-gguf-parity` | Differential GGUF loader runner against pinned llama.cpp. |
 
 ## Development
 
@@ -36,5 +38,16 @@ cargo check-all
 cargo lint
 cargo test-all
 ```
+
+<!-- benchmark and parity commands implemented by scripts/bench.sh and scripts/paritychecker.sh -->
+
+`scripts/paritychecker.sh` refreshes the checked-in snapshot from the pinned
+llama.cpp reference, performs live parity, and verifies the resulting snapshot
+by default. Use `--snapshot-only` for the fast Rust-only gate without a C++ build,
+or the `--no-snapshot`, `--no-live`, and `--no-update` switches to select phases.
+
+`scripts/bench.sh` runs the dependency-light benchmark runner. Add `--snapshot`
+to compare with the current architecture baseline, or `--snapshot --update` to
+refresh it after an intentional performance change.
 
 `sml.rs` remains separately versioned and is consumed from crates.io as `stateforward-sml`.

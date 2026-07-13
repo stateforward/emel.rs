@@ -32,6 +32,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "emel-bench"
+version = "0.1.0"
+dependencies = [
+ "emel-gguf",
+]
+
+[[package]]
 name = "emel-core"
 version = "0.1.0"
 
@@ -54,6 +61,13 @@ name = "emel-gguf"
 version = "0.1.0"
 dependencies = [
  "stateforward-sml",
+]
+
+[[package]]
+name = "emel-gguf-parity"
+version = "0.1.0"
+dependencies = [
+ "emel-gguf",
 ]
 
 [[package]]

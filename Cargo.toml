@@ -18,6 +18,8 @@ members = [
     "crates/emel-diarization",
     "crates/emel",
     "tools/emel-inspect",
+    "tools/emel-bench",
+    "tools/emel-gguf-parity",
 ]
 resolver = "3"
 
