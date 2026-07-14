@@ -464,7 +464,18 @@ ALWAYS keep benchmark cases focused and dependency-light.
 
 ALWAYS keep snapshot baselines under `snapshots/`.
 
-NEVER accept or update snapshot baselines without explicit user consent.
+FOR THE CURRENT `emel.cpp`-to-`emel.rs` port, until the user declares snapshot
+baselines frozen, ALWAYS create or update the relevant parity and benchmark
+baselines without requesting separate consent.
+
+ALWAYS record the source identity, fixture or benchmark configuration, and
+validation evidence for every created or updated baseline.
+
+ALWAYS include a created or updated baseline in the same atomic commit as the
+behavior, fixture, benchmark, or parity case that requires it.
+
+AFTER the user declares snapshot baselines frozen, NEVER accept or update them
+without explicit user consent.
 
 ALWAYS hard-fail when a required quality tool is missing.
 
