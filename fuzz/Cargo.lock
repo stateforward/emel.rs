@@ -116,18 +116,18 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "stateforward-sml"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7fa98638b8689969c5b9a54b779fc53bf0b302c54e6a90a26f4a9f795ce50a4"
+checksum = "535fb9d5b5f5619ef4cb49d54f94af0422402c83aaa47dd3e7da06ec93341102"
 dependencies = [
  "stateforward-sml-macros",
 ]
 
 [[package]]
 name = "stateforward-sml-macros"
-version = "1.0.0"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50a37f3bdbe7a1dd841ceb571524a856c03c584956883b12e19a5a4cae63b4a9"
+checksum = "643762aee94cccb8a08bf7ddb26b6d422ceb52a2ed27e81b5f5c787d29c59ffa"
 dependencies = [
  "proc-macro2",
  "quote",
