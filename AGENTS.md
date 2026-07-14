@@ -376,6 +376,30 @@ contract and the user has approved the boundary.
 Every `unsafe` block MUST document its safety invariants and have focused tests
 that exercise the boundary.
 
+The sole currently approved unsafe exception is the private target-gated
+`crates/emel-io/src/mmap/platform/` module required for true native file-backed
+mapping. This exception is not precedent or standing authority for unsafe code
+in any other crate, module, actor, test, tool, or future implementation.
+
+Within that one module, unsafe is limited to native Unix map, unmap, and advise
+calls; native Windows mapping-handle, map, unmap, and prefetch calls; checked
+pointer arithmetic; and one immutable `slice::from_raw_parts` conversion.
+ALWAYS keep the crate deny-by-default for unsafe code and allow it only on that
+private module.
+
+The mmap exception requires private ownership of every native resource; no raw
+pointer, native handle, mutable slice, or platform operation in public API; no
+aliasing, re-entry, or escaped mapped view; exclusive actor access for release;
+and an unchanged, untruncated mapped file for the complete mapping lifetime.
+Every unsafe operation MUST state which invariant makes that exact operation
+sound. Target-gated focused tests, hostile-input tests, teardown and partial-
+release tests, and a fresh blind review MUST cover the boundary.
+
+NEVER infer permission for a read-into-`Vec<u8>` fallback, another unsafe
+module, a wider lint allowance, or a public raw-pointer API from this exception.
+Any change to this exact unsafe surface or its invariants requires new explicit
+user approval and an `AGENTS.md` update before source implementation.
+
 ALWAYS isolate any foreign-function integration in a dedicated boundary crate
 or module. Safe workspace crates MUST consume a safe wrapper.
 
