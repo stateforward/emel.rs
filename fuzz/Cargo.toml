@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 emel-gguf = { path = "../crates/emel-gguf" }
+emel-io = { path = "../crates/emel-io" }
 libfuzzer-sys = "0.4.13"
 
 [[bin]]
@@ -28,6 +29,13 @@ bench = false
 [[bin]]
 name = "gguf_lifecycle"
 path = "fuzz_targets/gguf_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_io_read"
+path = "fuzz_targets/emel_io_read.rs"
 test = false
 doc = false
 bench = false

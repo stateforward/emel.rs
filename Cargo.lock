@@ -36,6 +36,7 @@ name = "emel-bench"
 version = "0.1.0"
 dependencies = [
  "emel-gguf",
+ "emel-io",
 ]
 
 [[package]]

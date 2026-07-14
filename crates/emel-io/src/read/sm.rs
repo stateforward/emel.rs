@@ -1,949 +1,867 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Private explicit state machine for read validation, copy, and publication.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
+    reason = "SML-generated state enums contain completion machinery without Eq"
 )]
+
+use core::cell::{Cell, RefCell};
 
 use sml::sml;
 
-// --- machine IoRead from emel.cpp/src/emel/io/read/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailReadTensorBatchRuntime;
+use super::event::{
+    Callback, Error, ReadTensorBatchDone, ReadTensorBatchError, ReadTensorDone, ReadTensorError,
+    SourceError, TensorRead,
+};
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailReadTensorRuntime;
+pub(super) const MAX_FILE_INDEX: u16 = 65_534;
+pub(super) const MAX_FILE_PATH_BYTES: usize = 4_095;
+pub(super) const MAX_READ_BYTES: u64 = 1_u64 << 40;
+pub(super) const MAX_READ_BATCH_TENSORS: usize = 65_536;
+pub(super) const PLATFORM_SUPPORTED: bool = cfg!(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows",
+    target_family = "unix"
+));
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReadStatus {
+    pub(super) result: Result<ReadTensorDone, Error>,
+}
+
+impl ReadStatus {
+    pub(super) const fn new() -> Self {
+        Self {
+            result: Err(Error::InternalError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BatchStatus {
+    pub(super) result: Result<ReadTensorBatchDone, ReadTensorBatchError>,
+}
+
+impl BatchStatus {
+    pub(super) const fn new() -> Self {
+        Self {
+            result: Err(ReadTensorBatchError::new(Error::InternalError, 0)),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ReadRuntime<'dispatch, 'data> {
+    pub(super) tensor_id: i32,
+    pub(super) file_index: u16,
+    pub(super) file_offset: u64,
+    pub(super) byte_size: u64,
+    pub(super) file_path: &'data str,
+    pub(super) source: Option<&'data [u8]>,
+    pub(super) source_error: Option<SourceError>,
+    pub(super) target: &'dispatch RefCell<&'dispatch mut [u8]>,
+    pub(super) on_done: Option<Callback<'data, ReadTensorDone>>,
+    pub(super) on_error: Option<Callback<'data, ReadTensorError>>,
+    pub(super) platform_supported: bool,
+    pub(super) status: &'dispatch Cell<ReadStatus>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TensorBatchRuntime<'dispatch, 'data> {
+    pub(super) tensors: &'data [TensorRead<'data>],
+    pub(super) on_done: Option<Callback<'data, ReadTensorBatchDone>>,
+    pub(super) on_error: Option<Callback<'data, ReadTensorBatchError>>,
+    pub(super) status: &'dispatch Cell<BatchStatus>,
+    pub(super) analysis: &'dispatch Cell<BatchAnalysis>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BatchFailureIndex {
+    index: u32,
+    found: u32,
+}
+
+impl BatchFailureIndex {
+    const fn record(self, index: u32) -> Self {
+        let take = 1 - self.found;
+        Self {
+            index: (self.index * (1 - take)) + (index * take),
+            found: 1,
+        }
+    }
+}
+
+/// Dispatch-local first-failure evidence, grouped by pinned validation phase.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct BatchAnalysis {
+    invalid_request: BatchFailureIndex,
+    unsupported_resource: BatchFailureIndex,
+    file_open_failed: BatchFailureIndex,
+    file_seek_failed: BatchFailureIndex,
+    file_read_failed: BatchFailureIndex,
+    short_read: BatchFailureIndex,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BatchSpanRuntime<'dispatch, 'data> {
+    span: &'data TensorRead<'data>,
+    index: u32,
+    analysis: &'dispatch Cell<BatchAnalysis>,
+}
+
+sml! {
+    BatchSpanClassifier {
+        // Per-span request validation.
+        "state_request_decision"_s <= *"state_ready"_s + EventClassifySpan(BatchSpanRuntime<'dispatch, 'data>),
+        "state_resource_decision"_s <= "state_request_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_request_valid],
+        "state_ready"_s <= "state_request_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_request_invalid] / effect_record_invalid_request,
+
+        // Per-span source validation.
+        "state_source_open_decision"_s <= "state_resource_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_resource_supported],
+        "state_ready"_s <= "state_resource_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_resource_unsupported] / effect_record_unsupported_resource,
+        "state_source_seek_decision"_s <= "state_source_open_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_open_succeeded],
+        "state_ready"_s <= "state_source_open_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_open_failed] / effect_record_file_open_failed,
+        "state_source_read_decision"_s <= "state_source_seek_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_seek_succeeded],
+        "state_ready"_s <= "state_source_seek_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_seek_failed] / effect_record_file_seek_failed,
+        "state_ready"_s <= "state_source_read_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_read_failed] / effect_record_file_read_failed,
+        "state_ready"_s <= "state_source_read_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_read_short] / effect_record_short_read,
+        "state_ready"_s <= "state_source_read_decision"_s + completion<EventClassifySpan>(BatchSpanRuntime<'dispatch, 'data>) [guard_source_read_succeeded],
+
+        // Explicit unexpected-event recovery.
+        "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_request_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_resource_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_source_open_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_source_seek_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_source_read_decision"_s + unexpected_event<_> / effect_on_unexpected,
+    }
+}
+
+impl From<BatchSpanClassifierError> for () {
+    // Preserve child transition/action failure through the parent's `?` path.
+    // The Reader boundary maps the resulting parent failure to InternalError.
+    fn from(_error: BatchSpanClassifierError) {}
+}
 
 sml! {
     IoRead {
-        "state_request_decision"_s <= *"state_ready"_s + event<DetailReadTensorRuntime> / effect_begin_read_tensor,
-        "state_file_path_decision"_s <= "state_request_decision"_s + completion<DetailReadTensorRuntime> [request_span_valid],
-        "state_invalid_request_error_decision"_s <= "state_request_decision"_s + completion<DetailReadTensorRuntime> [request_span_invalid] / effect_mark_invalid_request_from_state_request_decision,
-        "state_file_decision"_s <= "state_file_path_decision"_s + completion<DetailReadTensorRuntime> [file_path_valid],
-        "state_invalid_request_error_decision"_s <= "state_file_path_decision"_s + completion<DetailReadTensorRuntime> [file_path_invalid] / effect_mark_invalid_request_from_state_file_path_decision,
-        "state_length_decision"_s <= "state_file_decision"_s + completion<DetailReadTensorRuntime> [file_index_valid],
-        "state_unsupported_resource_error_decision"_s <= "state_file_decision"_s + completion<DetailReadTensorRuntime> [file_index_invalid] / effect_mark_unsupported_resource_from_state_file_decision,
-        "state_layout_decision"_s <= "state_length_decision"_s + completion<DetailReadTensorRuntime> [length_within_bounds],
-        "state_unsupported_resource_error_decision"_s <= "state_length_decision"_s + completion<DetailReadTensorRuntime> [length_overflow] / effect_mark_unsupported_resource_from_state_length_decision,
-        "state_target_buffer_decision"_s <= "state_layout_decision"_s + completion<DetailReadTensorRuntime> [layout_supported],
-        "state_unsupported_resource_error_decision"_s <= "state_layout_decision"_s + completion<DetailReadTensorRuntime> [layout_unsupported] / effect_mark_unsupported_resource_from_state_layout_decision,
-        "state_platform_decision"_s <= "state_target_buffer_decision"_s + completion<DetailReadTensorRuntime> [target_buffer_valid],
-        "state_invalid_request_error_decision"_s <= "state_target_buffer_decision"_s + completion<DetailReadTensorRuntime> [target_buffer_invalid] / effect_mark_invalid_request_from_state_target_buffer_decision,
-        "state_read_attempt_decision"_s <= "state_platform_decision"_s + completion<DetailReadTensorRuntime> [platform_read_supported] / effect_prepare_read_attempt,
-        "state_unsupported_platform_error_decision"_s <= "state_platform_decision"_s + completion<DetailReadTensorRuntime> [platform_read_unsupported] / effect_mark_unsupported_platform,
-        "state_file_open_decision"_s <= "state_read_attempt_decision"_s + completion<DetailReadTensorRuntime> [file_open_succeeded] / effect_prepare_read_copy,
-        "state_file_open_failed_error_decision"_s <= "state_read_attempt_decision"_s + completion<DetailReadTensorRuntime> [file_open_failed] / effect_mark_file_open_failed,
-        "state_file_read_decision"_s <= "state_file_open_decision"_s + completion<DetailReadTensorRuntime> [file_seek_succeeded],
-        "state_file_seek_failed_error_decision"_s <= "state_file_open_decision"_s + completion<DetailReadTensorRuntime> [file_seek_failed] / effect_mark_file_seek_failed,
-        "state_file_read_failed_error_decision"_s <= "state_file_read_decision"_s + completion<DetailReadTensorRuntime> [file_read_failed] / effect_mark_file_read_failed,
-        "state_short_read_error_decision"_s <= "state_file_read_decision"_s + completion<DetailReadTensorRuntime> [file_read_short] / effect_mark_short_read,
-        "state_done_callback"_s <= "state_file_read_decision"_s + completion<DetailReadTensorRuntime> [file_read_succeeded] / effect_mark_read_tensor_done,
-        "state_ready"_s <= "state_done_callback"_s + completion<DetailReadTensorRuntime> / effect_publish_read_tensor_done,
-        "state_batch_count_decision"_s <= "state_ready"_s + event<DetailReadTensorBatchRuntime> / effect_begin_read_tensor_batch,
-        "state_batch_request_decision"_s <= "state_batch_count_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_count_valid],
-        "state_batch_invalid_request_error_decision"_s <= "state_batch_count_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_count_invalid] / effect_mark_read_tensor_batch_count_invalid,
-        "state_batch_resource_decision"_s <= "state_batch_request_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_request_valid],
-        "state_batch_invalid_request_error_decision"_s <= "state_batch_request_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_request_invalid] / effect_mark_read_tensor_batch_invalid_request,
-        "state_batch_source_open_decision"_s <= "state_batch_resource_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_resource_supported],
-        "state_batch_unsupported_resource_error_decision"_s <= "state_batch_resource_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_resource_unsupported] / effect_mark_read_tensor_batch_unsupported_resource,
-        "state_batch_source_seek_decision"_s <= "state_batch_source_open_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_source_open_succeeded],
-        "state_batch_file_open_failed_error_decision"_s <= "state_batch_source_open_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_source_open_failed] / effect_mark_read_tensor_batch_file_open_failed,
-        "state_batch_file_read_decision"_s <= "state_batch_source_seek_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_source_seek_succeeded],
-        "state_batch_file_seek_failed_error_decision"_s <= "state_batch_source_seek_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_source_seek_failed] / effect_mark_read_tensor_batch_file_seek_failed,
-        "state_batch_file_read_failed_error_decision"_s <= "state_batch_file_read_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_file_read_failed] / effect_mark_read_tensor_batch_file_read_failed,
-        "state_batch_short_read_error_decision"_s <= "state_batch_file_read_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_file_read_short] / effect_mark_read_tensor_batch_short_read,
-        "state_batch_done_callback"_s <= "state_batch_file_read_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_file_read_succeeded] / effect_mark_read_tensor_batch_done,
-        "state_ready"_s <= "state_batch_done_callback"_s + completion<DetailReadTensorBatchRuntime> / effect_publish_read_tensor_batch_done,
-        "state_error_callback"_s <= "state_invalid_request_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_invalid_request_error_decision,
-        "state_ready"_s <= "state_invalid_request_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_invalid_request_error_decision,
-        "state_error_callback"_s <= "state_unsupported_resource_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_unsupported_resource_error_decision,
-        "state_ready"_s <= "state_unsupported_resource_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_unsupported_resource_error_decision,
-        "state_error_callback"_s <= "state_unsupported_platform_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_unsupported_platform_error_decision,
-        "state_ready"_s <= "state_unsupported_platform_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_unsupported_platform_error_decision,
-        "state_error_callback"_s <= "state_file_open_failed_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_file_open_failed_error_decision,
-        "state_ready"_s <= "state_file_open_failed_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_file_open_failed_error_decision,
-        "state_error_callback"_s <= "state_file_seek_failed_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_file_seek_failed_error_decision,
-        "state_ready"_s <= "state_file_seek_failed_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_file_seek_failed_error_decision,
-        "state_error_callback"_s <= "state_file_read_failed_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_file_read_failed_error_decision,
-        "state_ready"_s <= "state_file_read_failed_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_file_read_failed_error_decision,
-        "state_error_callback"_s <= "state_short_read_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_present] / effect_publish_read_tensor_error_from_state_short_read_error_decision,
-        "state_ready"_s <= "state_short_read_error_decision"_s + completion<DetailReadTensorRuntime> [error_callback_absent] / effect_record_read_tensor_error_from_state_short_read_error_decision,
-        "state_ready"_s <= "state_error_callback"_s + completion<DetailReadTensorRuntime> / effect_record_read_tensor_error_from_state_error_callback,
-        "state_batch_error_callback"_s <= "state_batch_invalid_request_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_present] / effect_publish_read_tensor_batch_error_from_state_batch_invalid_request_error_decision,
-        "state_ready"_s <= "state_batch_invalid_request_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_absent] / effect_record_read_tensor_batch_error_from_state_batch_invalid_request_error_decision,
-        "state_batch_error_callback"_s <= "state_batch_unsupported_resource_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_present] / effect_publish_read_tensor_batch_error_from_state_batch_unsupported_resource_error_decision,
-        "state_ready"_s <= "state_batch_unsupported_resource_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_absent] / effect_record_read_tensor_batch_error_from_state_batch_unsupported_resource_error_decision,
-        "state_batch_error_callback"_s <= "state_batch_file_open_failed_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_present] / effect_publish_read_tensor_batch_error_from_state_batch_file_open_failed_error_decision,
-        "state_ready"_s <= "state_batch_file_open_failed_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_absent] / effect_record_read_tensor_batch_error_from_state_batch_file_open_failed_error_decision,
-        "state_batch_error_callback"_s <= "state_batch_file_seek_failed_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_present] / effect_publish_read_tensor_batch_error_from_state_batch_file_seek_failed_error_decision,
-        "state_ready"_s <= "state_batch_file_seek_failed_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_absent] / effect_record_read_tensor_batch_error_from_state_batch_file_seek_failed_error_decision,
-        "state_batch_error_callback"_s <= "state_batch_file_read_failed_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_present] / effect_publish_read_tensor_batch_error_from_state_batch_file_read_failed_error_decision,
-        "state_ready"_s <= "state_batch_file_read_failed_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_absent] / effect_record_read_tensor_batch_error_from_state_batch_file_read_failed_error_decision,
-        "state_batch_error_callback"_s <= "state_batch_short_read_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_present] / effect_publish_read_tensor_batch_error_from_state_batch_short_read_error_decision,
-        "state_ready"_s <= "state_batch_short_read_error_decision"_s + completion<DetailReadTensorBatchRuntime> [batch_error_callback_absent] / effect_record_read_tensor_batch_error_from_state_batch_short_read_error_decision,
-        "state_ready"_s <= "state_batch_error_callback"_s + completion<DetailReadTensorBatchRuntime> / effect_record_read_tensor_batch_error_from_state_batch_error_callback,
-        "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected_from_state_ready,
-        "state_ready"_s <= "state_request_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_request_decision,
-        "state_ready"_s <= "state_file_path_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_path_decision,
-        "state_ready"_s <= "state_file_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_decision,
-        "state_ready"_s <= "state_length_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_length_decision,
-        "state_ready"_s <= "state_layout_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_layout_decision,
-        "state_ready"_s <= "state_target_buffer_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_target_buffer_decision,
-        "state_ready"_s <= "state_platform_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_platform_decision,
-        "state_ready"_s <= "state_read_attempt_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_read_attempt_decision,
-        "state_ready"_s <= "state_file_open_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_open_decision,
-        "state_ready"_s <= "state_file_read_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_read_decision,
-        "state_ready"_s <= "state_done_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_done_callback,
-        "state_ready"_s <= "state_invalid_request_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_invalid_request_error_decision,
-        "state_ready"_s <= "state_unsupported_resource_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_unsupported_resource_error_decision,
-        "state_ready"_s <= "state_unsupported_platform_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_unsupported_platform_error_decision,
-        "state_ready"_s <= "state_file_open_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_open_failed_error_decision,
-        "state_ready"_s <= "state_file_seek_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_seek_failed_error_decision,
-        "state_ready"_s <= "state_file_read_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_read_failed_error_decision,
-        "state_ready"_s <= "state_short_read_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_short_read_error_decision,
-        "state_ready"_s <= "state_error_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_error_callback,
-        "state_ready"_s <= "state_batch_count_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_count_decision,
-        "state_ready"_s <= "state_batch_request_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_request_decision,
-        "state_ready"_s <= "state_batch_resource_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_resource_decision,
-        "state_ready"_s <= "state_batch_source_open_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_source_open_decision,
-        "state_ready"_s <= "state_batch_source_seek_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_source_seek_decision,
-        "state_ready"_s <= "state_batch_file_read_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_file_read_decision,
-        "state_ready"_s <= "state_batch_done_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_done_callback,
-        "state_ready"_s <= "state_batch_invalid_request_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_invalid_request_error_decision,
-        "state_ready"_s <= "state_batch_unsupported_resource_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_unsupported_resource_error_decision,
-        "state_ready"_s <= "state_batch_file_open_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_file_open_failed_error_decision,
-        "state_ready"_s <= "state_batch_file_seek_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_file_seek_failed_error_decision,
-        "state_ready"_s <= "state_batch_file_read_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_file_read_failed_error_decision,
-        "state_ready"_s <= "state_batch_short_read_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_short_read_error_decision,
-        "state_ready"_s <= "state_batch_error_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_batch_error_callback,
+        // Single request validation.
+        "state_request_decision"_s <= *"state_ready"_s + ReadTensor(ReadRuntime<'dispatch, 'data>),
+        "state_path_decision"_s <= "state_request_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_request_valid],
+        "state_errored"_s <= "state_request_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_request_invalid] / effect_mark_invalid_request,
+        "state_resource_decision"_s <= "state_path_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_path_valid],
+        "state_errored"_s <= "state_path_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_path_invalid] / effect_mark_invalid_request,
+        "state_target_decision"_s <= "state_resource_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_resource_supported],
+        "state_errored"_s <= "state_resource_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_resource_unsupported] / effect_mark_unsupported_resource,
+        "state_platform_decision"_s <= "state_target_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_target_valid],
+        "state_errored"_s <= "state_target_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_target_invalid] / effect_mark_invalid_request,
+        "state_source_open_decision"_s <= "state_platform_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_platform_supported],
+        "state_errored"_s <= "state_platform_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_platform_unsupported] / effect_mark_unsupported_platform,
+
+        // Single source validation and copy.
+        "state_source_seek_decision"_s <= "state_source_open_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_open_succeeded],
+        "state_errored"_s <= "state_source_open_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_open_failed] / effect_mark_file_open_failed,
+        "state_source_read_decision"_s <= "state_source_seek_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_seek_succeeded],
+        "state_errored"_s <= "state_source_seek_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_seek_failed] / effect_mark_file_seek_failed,
+        "state_errored"_s <= "state_source_read_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_read_failed] / effect_mark_file_read_failed,
+        "state_errored"_s <= "state_source_read_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_read_short] / effect_mark_short_read,
+        "state_done_callback_decision"_s <= "state_source_read_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_source_read_succeeded] / effect_copy_tensor,
+
+        // Single callback publication.
+        "state_ready"_s <= "state_done_callback_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_done_callback_present] / effect_publish_done,
+        "state_ready"_s <= "state_done_callback_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_done_callback_absent],
+        "state_error_callback_decision"_s <= "state_errored"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_error_callback_present] / effect_publish_error,
+        "state_ready"_s <= "state_errored"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>) [guard_error_callback_absent],
+        "state_ready"_s <= "state_error_callback_decision"_s + completion<ReadTensor>(ReadRuntime<'dispatch, 'data>),
+
+        // Batch count and child classification.
+        "state_batch_count_decision"_s <= "state_ready"_s + ReadTensorBatch(TensorBatchRuntime<'dispatch, 'data>),
+        "state_batch_request_decision"_s <= "state_batch_count_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_count_valid] / effect_classify_batch,
+        "state_batch_errored"_s <= "state_batch_count_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_count_invalid] / effect_mark_batch_count_invalid,
+
+        // Batch phase-priority outcome selection.
+        "state_batch_resource_decision"_s <= "state_batch_request_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_requests_valid],
+        "state_batch_errored"_s <= "state_batch_request_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_requests_invalid] / effect_mark_batch_invalid_request,
+        "state_batch_source_open_decision"_s <= "state_batch_resource_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_resources_supported],
+        "state_batch_errored"_s <= "state_batch_resource_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_resources_unsupported] / effect_mark_batch_unsupported_resource,
+        "state_batch_source_seek_decision"_s <= "state_batch_source_open_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_open_succeeded],
+        "state_batch_errored"_s <= "state_batch_source_open_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_open_failed] / effect_mark_batch_file_open_failed,
+        "state_batch_source_read_decision"_s <= "state_batch_source_seek_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_seek_succeeded],
+        "state_batch_errored"_s <= "state_batch_source_seek_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_seek_failed] / effect_mark_batch_file_seek_failed,
+        "state_batch_errored"_s <= "state_batch_source_read_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_read_failed] / effect_mark_batch_file_read_failed,
+        "state_batch_errored"_s <= "state_batch_source_read_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_read_short] / effect_mark_batch_short_read,
+        "state_batch_done_callback_decision"_s <= "state_batch_source_read_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_source_read_succeeded] / effect_copy_batch,
+
+        // Batch callback publication.
+        "state_ready"_s <= "state_batch_done_callback_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_done_callback_present] / effect_publish_batch_done,
+        "state_ready"_s <= "state_batch_done_callback_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_done_callback_absent],
+        "state_batch_error_callback_decision"_s <= "state_batch_errored"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_error_callback_present] / effect_publish_batch_error,
+        "state_ready"_s <= "state_batch_errored"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>) [guard_batch_error_callback_absent],
+        "state_ready"_s <= "state_batch_error_callback_decision"_s + completion<ReadTensorBatch>(TensorBatchRuntime<'dispatch, 'data>),
+
+        // Explicit unexpected-event recovery.
+        "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_request_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_path_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_resource_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_target_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_platform_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_source_open_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_source_seek_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_source_read_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_done_callback_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_errored"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_error_callback_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_count_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_request_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_resource_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_source_open_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_source_seek_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_source_read_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_done_callback_decision"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_errored"_s + unexpected_event<_> / effect_on_unexpected,
+        "state_ready"_s <= "state_batch_error_callback_decision"_s + unexpected_event<_> / effect_on_unexpected,
     }
 }
 
-/// Context for `IoRead` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
-pub struct IoReadContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+#[derive(Clone, Copy, Debug, Default)]
+struct BatchClassifierContext;
+
+impl BatchSpanClassifierStateMachineContext for BatchClassifierContext {
+    fn guard_request_valid(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.span.byte_size > 0 && target_valid(event.span))
+    }
+
+    fn guard_request_invalid(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.span.byte_size == 0 || !target_valid(event.span))
+    }
+
+    fn guard_resource_supported(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(resource_supported(event.span))
+    }
+
+    fn guard_resource_unsupported(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!resource_supported(event.span))
+    }
+
+    fn guard_source_open_succeeded(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(source_open_succeeded(event.span))
+    }
+
+    fn guard_source_open_failed(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!source_open_succeeded(event.span))
+    }
+
+    fn guard_source_seek_succeeded(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(source_seek_succeeded(event.span))
+    }
+
+    fn guard_source_seek_failed(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!source_seek_succeeded(event.span))
+    }
+
+    fn guard_source_read_failed(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(source_read_failed(event.span))
+    }
+
+    fn guard_source_read_short(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(source_read_short(event.span))
+    }
+
+    fn guard_source_read_succeeded(&self, event: &BatchSpanRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(source_read_succeeded(event.span))
+    }
+
+    fn effect_record_invalid_request(&mut self, event: BatchSpanRuntime<'_, '_>) -> Result<(), ()> {
+        let mut analysis = event.analysis.get();
+        analysis.invalid_request = analysis.invalid_request.record(event.index);
+        event.analysis.set(analysis);
+        Ok(())
+    }
+
+    fn effect_record_unsupported_resource(
+        &mut self,
+        event: BatchSpanRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        let mut analysis = event.analysis.get();
+        analysis.unsupported_resource = analysis.unsupported_resource.record(event.index);
+        event.analysis.set(analysis);
+        Ok(())
+    }
+
+    fn effect_record_file_open_failed(
+        &mut self,
+        event: BatchSpanRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        let mut analysis = event.analysis.get();
+        analysis.file_open_failed = analysis.file_open_failed.record(event.index);
+        event.analysis.set(analysis);
+        Ok(())
+    }
+
+    fn effect_record_file_seek_failed(
+        &mut self,
+        event: BatchSpanRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        let mut analysis = event.analysis.get();
+        analysis.file_seek_failed = analysis.file_seek_failed.record(event.index);
+        event.analysis.set(analysis);
+        Ok(())
+    }
+
+    fn effect_record_file_read_failed(
+        &mut self,
+        event: BatchSpanRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        let mut analysis = event.analysis.get();
+        analysis.file_read_failed = analysis.file_read_failed.record(event.index);
+        event.analysis.set(analysis);
+        Ok(())
+    }
+
+    fn effect_record_short_read(&mut self, event: BatchSpanRuntime<'_, '_>) -> Result<(), ()> {
+        let mut analysis = event.analysis.get();
+        analysis.short_read = analysis.short_read.record(event.index);
+        event.analysis.set(analysis);
+        Ok(())
+    }
+
+    fn effect_on_unexpected(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
-impl IoReadStateMachineContext for IoReadContext {
-    fn batch_count_invalid(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_count_invalid
-        todo!("TODO: port guard `batch_count_invalid` from emel.cpp/src/emel/io/read/guards.hpp")
+/// Parent-owned persistent state: only the private per-span classifier actor.
+pub(super) struct Context {
+    batch_classifier: BatchClassifier,
+}
+
+impl Context {
+    pub(super) const fn new() -> Self {
+        Self {
+            batch_classifier: BatchClassifier::new(),
+        }
     }
-    fn batch_count_valid(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_count_valid
-        todo!("TODO: port guard `batch_count_valid` from emel.cpp/src/emel/io/read/guards.hpp")
+}
+
+/// Owned child actor used only for synchronous same-RTC batch classification.
+struct BatchClassifier {
+    machine: BatchSpanClassifierStateMachine<BatchClassifierContext>,
+}
+
+impl BatchClassifier {
+    const fn new() -> Self {
+        Self {
+            machine: BatchSpanClassifierStateMachine::new(BatchClassifierContext),
+        }
     }
-    fn batch_error_callback_absent(
+
+    fn process_event(&mut self, event: BatchSpanRuntime<'_, '_>) -> Result<(), ()> {
+        self.machine
+            .process_event(BatchSpanClassifierEvents::EventClassifySpan(event))?;
+        Ok(())
+    }
+}
+
+impl IoReadStateMachineContext for Context {
+    fn guard_request_valid(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.byte_size > 0)
+    }
+
+    fn guard_request_invalid(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.byte_size == 0)
+    }
+
+    fn guard_path_valid(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!event.file_path.is_empty()
+            && event.file_path.len() <= MAX_FILE_PATH_BYTES
+            && !event.file_path.as_bytes().contains(&0))
+    }
+
+    fn guard_path_invalid(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.file_path.is_empty()
+            || event.file_path.len() > MAX_FILE_PATH_BYTES
+            || event.file_path.as_bytes().contains(&0))
+    }
+
+    fn guard_resource_supported(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.file_index <= MAX_FILE_INDEX
+            && event.byte_size <= MAX_READ_BYTES
+            && usize::try_from(event.byte_size).is_ok()
+            && event.file_offset.checked_add(event.byte_size).is_some())
+    }
+
+    fn guard_resource_unsupported(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.file_index > MAX_FILE_INDEX
+            || event.byte_size > MAX_READ_BYTES
+            || usize::try_from(event.byte_size).is_err()
+            || event.file_offset.checked_add(event.byte_size).is_none())
+    }
+
+    fn guard_target_valid(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(u64::try_from(event.target.borrow().len()).is_ok_and(|len| len >= event.byte_size))
+    }
+
+    fn guard_target_invalid(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(u64::try_from(event.target.borrow().len()).map_or(true, |len| len < event.byte_size))
+    }
+
+    fn guard_platform_supported(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.platform_supported)
+    }
+
+    fn guard_platform_unsupported(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!event.platform_supported)
+    }
+
+    fn guard_source_open_succeeded(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.source_error != Some(SourceError::FileOpenFailed)
+            && (event.source_error.is_some() || event.source.is_some()))
+    }
+
+    fn guard_source_open_failed(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.source_error == Some(SourceError::FileOpenFailed)
+            || (event.source_error.is_none() && event.source.is_none()))
+    }
+
+    fn guard_source_seek_succeeded(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.source_error != Some(SourceError::FileSeekFailed)
+            && (event.source_error.is_some()
+                || event.source.is_some_and(|source| {
+                    u64::try_from(source.len()).is_ok_and(|len| event.file_offset <= len)
+                })))
+    }
+
+    fn guard_source_seek_failed(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.source_error == Some(SourceError::FileSeekFailed)
+            || (event.source_error.is_none()
+                && event.source.is_some_and(|source| {
+                    u64::try_from(source.len()).map_or(true, |len| event.file_offset > len)
+                })))
+    }
+
+    fn guard_source_read_failed(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(
+            event.source_error,
+            Some(SourceError::FileReadFailed | SourceError::Other)
+        ))
+    }
+
+    fn guard_source_read_short(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.source_error == Some(SourceError::ShortRead)
+            || (event.source_error.is_none()
+                && event.source.is_some_and(|source| {
+                    let source_len = source.len() as u64;
+                    event.file_offset <= source_len
+                        && event.byte_size > source_len - event.file_offset
+                })))
+    }
+
+    fn guard_source_read_succeeded(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.source_error.is_none()
+            && event.source.is_some_and(|source| {
+                let source_len = source.len() as u64;
+                event.file_offset <= source_len && event.byte_size <= source_len - event.file_offset
+            }))
+    }
+
+    fn guard_done_callback_present(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.on_done.is_some())
+    }
+
+    fn guard_done_callback_absent(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.on_done.is_none())
+    }
+
+    fn guard_error_callback_present(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.on_error.is_some())
+    }
+
+    fn guard_error_callback_absent(&self, event: &ReadRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.on_error.is_none())
+    }
+
+    fn effect_mark_invalid_request(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::InvalidRequest),
+        });
+        Ok(())
+    }
+
+    fn effect_mark_unsupported_resource(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::UnsupportedResource),
+        });
+        Ok(())
+    }
+
+    fn effect_mark_unsupported_platform(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::UnsupportedPlatform),
+        });
+        Ok(())
+    }
+
+    fn effect_mark_file_open_failed(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::FileOpenFailed),
+        });
+        Ok(())
+    }
+
+    fn effect_mark_file_seek_failed(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::FileSeekFailed),
+        });
+        Ok(())
+    }
+
+    fn effect_mark_file_read_failed(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::FileReadFailed),
+        });
+        Ok(())
+    }
+
+    fn effect_mark_short_read(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event.status.set(ReadStatus {
+            result: Err(Error::ShortRead),
+        });
+        Ok(())
+    }
+
+    fn effect_copy_tensor(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        let source = event.source.expect("read-success guard requires source");
+        let offset = usize::try_from(event.file_offset)
+            .expect("source-seek success guarantees an addressable offset");
+        let byte_size =
+            usize::try_from(event.byte_size).expect("resource guard guarantees addressable size");
+        event.target.borrow_mut()[..byte_size].copy_from_slice(&source[offset..offset + byte_size]);
+        event.status.set(ReadStatus {
+            result: Ok(ReadTensorDone::new(event.tensor_id, event.byte_size)),
+        });
+        Ok(())
+    }
+
+    fn effect_publish_done(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        event
+            .on_done
+            .expect("done-callback guard requires callback")
+            .publish(ReadTensorDone::new(event.tensor_id, event.byte_size));
+        Ok(())
+    }
+
+    fn effect_publish_error(&mut self, event: ReadRuntime<'_, '_>) -> Result<(), ()> {
+        let error = event
+            .status
+            .get()
+            .result
+            .expect_err("error state requires error");
+        event
+            .on_error
+            .expect("error-callback guard requires callback")
+            .publish(ReadTensorError::new(event.tensor_id, error));
+        Ok(())
+    }
+
+    fn guard_batch_count_valid(&self, event: &TensorBatchRuntime<'_, '_>) -> Result<bool, ()> {
+        let count = event.tensors.len();
+        Ok(count > 0 && count <= MAX_READ_BATCH_TENSORS && u32::try_from(count).is_ok())
+    }
+
+    fn guard_batch_count_invalid(&self, event: &TensorBatchRuntime<'_, '_>) -> Result<bool, ()> {
+        let count = event.tensors.len();
+        Ok(count == 0 || count > MAX_READ_BATCH_TENSORS || u32::try_from(count).is_err())
+    }
+
+    fn effect_classify_batch(&mut self, event: TensorBatchRuntime<'_, '_>) -> Result<(), ()> {
+        for (index, span) in (0_u32..).zip(event.tensors) {
+            self.batch_classifier.process_event(BatchSpanRuntime {
+                span,
+                index,
+                analysis: event.analysis,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn guard_batch_requests_valid(&self, event: &TensorBatchRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.analysis.get().invalid_request.found == 0)
+    }
+
+    fn guard_batch_requests_invalid(&self, event: &TensorBatchRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.analysis.get().invalid_request.found == 1)
+    }
+
+    fn guard_batch_resources_supported(
         &self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: &TensorBatchRuntime<'_, '_>,
     ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_error_callback_absent
-        todo!(
-            "TODO: port guard `batch_error_callback_absent` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
+        Ok(event.analysis.get().unsupported_resource.found == 0)
     }
-    fn batch_error_callback_present(
+
+    fn guard_batch_resources_unsupported(
         &self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: &TensorBatchRuntime<'_, '_>,
     ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_error_callback_present
-        todo!(
-            "TODO: port guard `batch_error_callback_present` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
+        Ok(event.analysis.get().unsupported_resource.found == 1)
     }
-    fn batch_file_read_failed(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_file_read_failed
-        todo!("TODO: port guard `batch_file_read_failed` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn batch_file_read_short(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_file_read_short
-        todo!("TODO: port guard `batch_file_read_short` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn batch_file_read_succeeded(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_file_read_succeeded
-        todo!(
-            "TODO: port guard `batch_file_read_succeeded` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
-    }
-    fn batch_request_invalid(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_request_invalid
-        todo!("TODO: port guard `batch_request_invalid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn batch_request_valid(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_request_valid
-        todo!("TODO: port guard `batch_request_valid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn batch_resource_supported(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_resource_supported
-        todo!(
-            "TODO: port guard `batch_resource_supported` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
-    }
-    fn batch_resource_unsupported(
+
+    fn guard_batch_source_open_succeeded(
         &self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: &TensorBatchRuntime<'_, '_>,
     ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_resource_unsupported
-        todo!(
-            "TODO: port guard `batch_resource_unsupported` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
+        Ok(event.analysis.get().file_open_failed.found == 0)
     }
-    fn batch_source_open_failed(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_source_open_failed
-        todo!(
-            "TODO: port guard `batch_source_open_failed` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
-    }
-    fn batch_source_open_succeeded(
+
+    fn guard_batch_source_open_failed(
         &self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: &TensorBatchRuntime<'_, '_>,
     ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_source_open_succeeded
-        todo!(
-            "TODO: port guard `batch_source_open_succeeded` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
+        Ok(event.analysis.get().file_open_failed.found == 1)
     }
-    fn batch_source_seek_failed(&self, _event: &DetailReadTensorBatchRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_source_seek_failed
-        todo!(
-            "TODO: port guard `batch_source_seek_failed` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
-    }
-    fn batch_source_seek_succeeded(
+
+    fn guard_batch_source_seek_succeeded(
         &self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: &TensorBatchRuntime<'_, '_>,
     ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::batch_source_seek_succeeded
-        todo!(
-            "TODO: port guard `batch_source_seek_succeeded` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
+        Ok(event.analysis.get().file_seek_failed.found == 0)
     }
-    fn effect_begin_read_tensor(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_begin_read_tensor
-        todo!(
-            "TODO: port action `effect_begin_read_tensor` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+
+    fn guard_batch_source_seek_failed(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.analysis.get().file_seek_failed.found == 1)
     }
-    fn effect_begin_read_tensor_batch(
+
+    fn guard_batch_source_read_failed(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.analysis.get().file_read_failed.found == 1)
+    }
+
+    fn guard_batch_source_read_short(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.analysis.get().short_read.found == 1)
+    }
+
+    fn guard_batch_source_read_succeeded(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        let analysis = event.analysis.get();
+        Ok(analysis.file_read_failed.found == 0 && analysis.short_read.found == 0)
+    }
+
+    fn guard_batch_done_callback_present(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.on_done.is_some())
+    }
+
+    fn guard_batch_done_callback_absent(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.on_done.is_none())
+    }
+
+    fn guard_batch_error_callback_present(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.on_error.is_some())
+    }
+
+    fn guard_batch_error_callback_absent(
+        &self,
+        event: &TensorBatchRuntime<'_, '_>,
+    ) -> Result<bool, ()> {
+        Ok(event.on_error.is_none())
+    }
+
+    fn effect_mark_batch_count_invalid(
         &mut self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_begin_read_tensor_batch
-        todo!(
-            "TODO: port action `effect_begin_read_tensor_batch` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+        event.status.set(BatchStatus {
+            result: Err(ReadTensorBatchError::new(Error::InvalidRequest, 0)),
+        });
+        Ok(())
     }
-    fn effect_mark_file_open_failed(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_file_open_failed
-        todo!(
-            "TODO: port action `effect_mark_file_open_failed` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_file_read_failed(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_file_read_failed
-        todo!(
-            "TODO: port action `effect_mark_file_read_failed` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_file_seek_failed(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_file_seek_failed
-        todo!(
-            "TODO: port action `effect_mark_file_seek_failed` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_invalid_request_from_state_file_path_decision(
+
+    fn effect_mark_batch_invalid_request(
         &mut self,
-        _event: &DetailReadTensorRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_invalid_request
-        todo!(
-            "TODO: port action `effect_mark_invalid_request` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+        let failed_index = event.analysis.get().invalid_request.index;
+        event.status.set(BatchStatus {
+            result: Err(ReadTensorBatchError::new(
+                Error::InvalidRequest,
+                failed_index,
+            )),
+        });
+        Ok(())
     }
-    fn effect_mark_invalid_request_from_state_request_decision(
+
+    fn effect_mark_batch_unsupported_resource(
         &mut self,
-        _event: &DetailReadTensorRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_invalid_request
-        todo!(
-            "TODO: port action `effect_mark_invalid_request` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+        let failed_index = event.analysis.get().unsupported_resource.index;
+        event.set_error(Error::UnsupportedResource, failed_index);
+        Ok(())
     }
-    fn effect_mark_invalid_request_from_state_target_buffer_decision(
+
+    fn effect_mark_batch_file_open_failed(
         &mut self,
-        _event: &DetailReadTensorRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_invalid_request
-        todo!(
-            "TODO: port action `effect_mark_invalid_request` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+        let failed_index = event.analysis.get().file_open_failed.index;
+        event.set_error(Error::FileOpenFailed, failed_index);
+        Ok(())
     }
-    fn effect_mark_read_tensor_batch_count_invalid(
+
+    fn effect_mark_batch_file_seek_failed(
         &mut self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_count_invalid
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_count_invalid` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+        let failed_index = event.analysis.get().file_seek_failed.index;
+        event.set_error(Error::FileSeekFailed, failed_index);
+        Ok(())
     }
-    fn effect_mark_read_tensor_batch_done(
+
+    fn effect_mark_batch_file_read_failed(
         &mut self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_done
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_done` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
+        let failed_index = event.analysis.get().file_read_failed.index;
+        event.set_error(Error::FileReadFailed, failed_index);
+        Ok(())
     }
-    fn effect_mark_read_tensor_batch_file_open_failed(
+
+    fn effect_mark_batch_short_read(
         &mut self,
-        _event: &DetailReadTensorBatchRuntime,
+        event: TensorBatchRuntime<'_, '_>,
     ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_file_open_failed
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_file_open_failed` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_read_tensor_batch_file_read_failed(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_file_read_failed
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_file_read_failed` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_read_tensor_batch_file_seek_failed(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_file_seek_failed
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_file_seek_failed` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_read_tensor_batch_invalid_request(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_invalid_request
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_invalid_request` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_read_tensor_batch_short_read(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_short_read
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_short_read` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_read_tensor_batch_unsupported_resource(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_batch_unsupported_resource
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_batch_unsupported_resource` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_read_tensor_done(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_read_tensor_done
-        todo!(
-            "TODO: port action `effect_mark_read_tensor_done` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_short_read(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_short_read
-        todo!(
-            "TODO: port action `effect_mark_short_read` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_platform(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_unsupported_platform
-        todo!(
-            "TODO: port action `effect_mark_unsupported_platform` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_resource_from_state_file_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_unsupported_resource
-        todo!(
-            "TODO: port action `effect_mark_unsupported_resource` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_resource_from_state_layout_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_unsupported_resource
-        todo!(
-            "TODO: port action `effect_mark_unsupported_resource` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_resource_from_state_length_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_mark_unsupported_resource
-        todo!(
-            "TODO: port action `effect_mark_unsupported_resource` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_on_unexpected_from_state_batch_count_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_done_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_error_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_file_open_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_file_read_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_file_read_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_file_seek_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_invalid_request_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_resource_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_short_read_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_source_open_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_source_seek_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_batch_unsupported_resource_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_done_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_error_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_open_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_open_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_path_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_read_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_read_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_seek_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_invalid_request_error_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_layout_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_length_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_platform_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_read_attempt_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_short_read_error_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_target_buffer_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_unsupported_platform_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_unsupported_resource_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/read/actions.hpp")
-    }
-    fn effect_prepare_read_attempt(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_prepare_read_attempt
-        todo!(
-            "TODO: port action `effect_prepare_read_attempt` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_prepare_read_copy(&mut self, _event: &DetailReadTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_prepare_read_copy
-        todo!(
-            "TODO: port action `effect_prepare_read_copy` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_done(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_done
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_done` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_error_from_state_batch_file_open_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_error_from_state_batch_file_read_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_error_from_state_batch_file_seek_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_error_from_state_batch_invalid_request_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_error_from_state_batch_short_read_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_batch_error_from_state_batch_unsupported_resource_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_done(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_done
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_done` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_file_open_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_file_read_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_file_seek_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_invalid_request_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_short_read_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_unsupported_platform_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_publish_read_tensor_error_from_state_unsupported_resource_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_publish_read_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_error_callback(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_file_open_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_file_read_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_file_seek_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_invalid_request_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_short_read_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_batch_error_from_state_batch_unsupported_resource_error_decision(
-        &mut self,
-        _event: &DetailReadTensorBatchRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_batch_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_batch_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_error_callback(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_file_open_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_file_read_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_file_seek_failed_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_invalid_request_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_short_read_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_unsupported_platform_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn effect_record_read_tensor_error_from_state_unsupported_resource_error_decision(
-        &mut self,
-        _event: &DetailReadTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/actions.hpp::effect_record_read_tensor_error
-        todo!(
-            "TODO: port action `effect_record_read_tensor_error` from emel.cpp/src/emel/io/read/actions.hpp"
-        )
-    }
-    fn error_callback_absent(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::error_callback_absent
-        todo!("TODO: port guard `error_callback_absent` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn error_callback_present(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::error_callback_present
-        todo!("TODO: port guard `error_callback_present` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_index_invalid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_index_invalid
-        todo!("TODO: port guard `file_index_invalid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_index_valid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_index_valid
-        todo!("TODO: port guard `file_index_valid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_open_failed(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_open_failed
-        todo!("TODO: port guard `file_open_failed` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_open_succeeded(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_open_succeeded
-        todo!("TODO: port guard `file_open_succeeded` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_path_invalid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_path_invalid
-        todo!("TODO: port guard `file_path_invalid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_path_valid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_path_valid
-        todo!("TODO: port guard `file_path_valid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_read_failed(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_read_failed
-        todo!("TODO: port guard `file_read_failed` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_read_short(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_read_short
-        todo!("TODO: port guard `file_read_short` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_read_succeeded(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_read_succeeded
-        todo!("TODO: port guard `file_read_succeeded` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_seek_failed(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_seek_failed
-        todo!("TODO: port guard `file_seek_failed` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn file_seek_succeeded(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::file_seek_succeeded
-        todo!("TODO: port guard `file_seek_succeeded` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn layout_supported(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::layout_supported
-        todo!("TODO: port guard `layout_supported` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn layout_unsupported(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::layout_unsupported
-        todo!("TODO: port guard `layout_unsupported` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn length_overflow(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::length_overflow
-        todo!("TODO: port guard `length_overflow` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn length_within_bounds(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::length_within_bounds
-        todo!("TODO: port guard `length_within_bounds` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn platform_read_supported(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::platform_read_supported
-        todo!(
-            "TODO: port guard `platform_read_supported` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
-    }
-    fn platform_read_unsupported(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::platform_read_unsupported
-        todo!(
-            "TODO: port guard `platform_read_unsupported` from emel.cpp/src/emel/io/read/guards.hpp"
-        )
-    }
-    fn request_span_invalid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::request_span_invalid
-        todo!("TODO: port guard `request_span_invalid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn request_span_valid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::request_span_valid
-        todo!("TODO: port guard `request_span_valid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn target_buffer_invalid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::target_buffer_invalid
-        todo!("TODO: port guard `target_buffer_invalid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
-    fn target_buffer_valid(&self, _event: &DetailReadTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/read/guards.hpp::target_buffer_valid
-        todo!("TODO: port guard `target_buffer_valid` from emel.cpp/src/emel/io/read/guards.hpp")
-    }
+        let failed_index = event.analysis.get().short_read.index;
+        event.set_error(Error::ShortRead, failed_index);
+        Ok(())
+    }
+
+    fn effect_copy_batch(&mut self, event: TensorBatchRuntime<'_, '_>) -> Result<(), ()> {
+        let mut bytes_copied = 0_u64;
+        for span in event.tensors {
+            let source = span.source.expect("batch-success guard requires source");
+            let source_offset = usize::try_from(span.file_offset)
+                .expect("batch source-seek success guarantees an addressable offset");
+            let byte_size = usize::try_from(span.byte_size)
+                .expect("batch resource guard guarantees addressable size");
+            span.target
+                .copy_from(&source[source_offset..source_offset + byte_size]);
+            bytes_copied += span.byte_size;
+        }
+        event.status.set(BatchStatus {
+            result: Ok(ReadTensorBatchDone::new(
+                u32::try_from(event.tensors.len()).expect("batch-count guard guarantees u32 count"),
+                bytes_copied,
+            )),
+        });
+        Ok(())
+    }
+
+    fn effect_publish_batch_done(&mut self, event: TensorBatchRuntime<'_, '_>) -> Result<(), ()> {
+        let done = event
+            .status
+            .get()
+            .result
+            .expect("done state requires result");
+        event
+            .on_done
+            .expect("batch-done callback guard requires callback")
+            .publish(done);
+        Ok(())
+    }
+
+    fn effect_publish_batch_error(&mut self, event: TensorBatchRuntime<'_, '_>) -> Result<(), ()> {
+        let error = event
+            .status
+            .get()
+            .result
+            .expect_err("error state requires error");
+        event
+            .on_error
+            .expect("batch-error callback guard requires callback")
+            .publish(error);
+        Ok(())
+    }
+
+    fn effect_on_unexpected(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+impl TensorBatchRuntime<'_, '_> {
+    fn set_error(&self, error: Error, failed_index: u32) {
+        self.status.set(BatchStatus {
+            result: Err(ReadTensorBatchError::new(error, failed_index)),
+        });
+    }
+}
+
+fn resource_supported(span: &TensorRead<'_>) -> bool {
+    !span.file_path.is_empty()
+        && span.file_path.len() <= MAX_FILE_PATH_BYTES
+        && !span.file_path.as_bytes().contains(&0)
+        && span.file_index <= MAX_FILE_INDEX
+        && span.byte_size <= MAX_READ_BYTES
+        && usize::try_from(span.byte_size).is_ok()
+        && span.file_offset.checked_add(span.byte_size).is_some()
+}
+
+fn target_valid(span: &TensorRead<'_>) -> bool {
+    span.target_bytes >= span.byte_size && (span.target.len() as u64) >= span.byte_size
+}
+
+fn source_open_succeeded(span: &TensorRead<'_>) -> bool {
+    span.source_error != Some(SourceError::FileOpenFailed)
+        && (span.source_error.is_some() || span.source.is_some())
+}
+
+fn source_seek_succeeded(span: &TensorRead<'_>) -> bool {
+    span.source_error != Some(SourceError::FileSeekFailed)
+        && (span.source_error.is_some()
+            || span
+                .source
+                .is_some_and(|source| span.file_offset <= source.len() as u64))
+}
+
+const fn source_read_failed(span: &TensorRead<'_>) -> bool {
+    matches!(
+        span.source_error,
+        Some(SourceError::FileReadFailed | SourceError::Other)
+    )
+}
+
+fn source_read_short(span: &TensorRead<'_>) -> bool {
+    span.source_error == Some(SourceError::ShortRead)
+        || (span.source_error.is_none()
+            && span.source.is_some_and(|source| {
+                let source_len = source.len() as u64;
+                span.file_offset <= source_len && span.byte_size > source_len - span.file_offset
+            }))
+}
+
+fn source_read_succeeded(span: &TensorRead<'_>) -> bool {
+    span.source_error.is_none()
+        && span.source.is_some_and(|source| {
+            let source_len = source.len() as u64;
+            span.file_offset <= source_len && span.byte_size <= source_len - span.file_offset
+        })
 }

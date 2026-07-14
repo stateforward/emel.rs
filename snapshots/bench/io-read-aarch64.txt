@@ -1,0 +1,9 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_tree: ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+# benchmark_fixture: public Reader/ReadTensor, immutable source bytes=1048576 fill=0xa5, caller target bytes=1048576
+# benchmark_validation: typed done checked each iteration, target equals source after measurement
+io/read/copy_1mib ns_per_op=13414.334 iter=1000 runs=5

@@ -31,11 +31,19 @@ name = "emel-fuzz"
 version = "0.0.0"
 dependencies = [
  "emel-gguf",
+ "emel-io",
  "libfuzzer-sys",
 ]
 
 [[package]]
 name = "emel-gguf"
+version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
+]
+
+[[package]]
+name = "emel-io"
 version = "0.1.0"
 dependencies = [
  "stateforward-sml",

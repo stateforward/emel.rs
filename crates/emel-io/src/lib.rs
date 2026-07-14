@@ -21,5 +21,5 @@ impl ModelSource {
 }
 pub(crate) mod loader;
 pub(crate) mod mmap;
-pub(crate) mod read;
+pub mod read;
 pub(crate) mod staged_read;

@@ -1,0 +1,437 @@
+//! Typed requests and outcomes for the read actor.
+
+use core::cell::{Cell, RefCell};
+use core::fmt;
+
+use super::Reader;
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Event accepted by [`Reader`].
+///
+/// This trait is sealed so external crates cannot bypass the actor boundary.
+pub trait Event: sealed::Sealed {
+    /// Result produced after the event runs to completion.
+    type Output;
+
+    #[doc(hidden)]
+    fn dispatch(self, actor: &mut Reader) -> Self::Output;
+}
+
+/// An allocation-free synchronous callback.
+///
+/// The callback borrows a caller-owned slot and invokes a plain function
+/// pointer before dispatch returns. It is never retained by the actor.
+#[derive(Clone, Copy)]
+pub struct Callback<'a, T: Copy> {
+    slot: &'a Cell<Option<T>>,
+    handler: fn(&Cell<Option<T>>, T),
+}
+
+impl<'a, T: Copy> Callback<'a, T> {
+    /// Creates a callback with caller-defined synchronous handling.
+    #[must_use]
+    pub const fn new(slot: &'a Cell<Option<T>>, handler: fn(&Cell<Option<T>>, T)) -> Self {
+        Self { slot, handler }
+    }
+
+    /// Creates a callback that stores the latest outcome in `slot`.
+    #[must_use]
+    pub const fn store(slot: &'a Cell<Option<T>>) -> Self {
+        Self::new(slot, store_outcome::<T>)
+    }
+
+    pub(crate) fn publish(self, outcome: T) {
+        (self.handler)(self.slot, outcome);
+    }
+}
+
+impl<T: Copy> fmt::Debug for Callback<'_, T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Callback").finish_non_exhaustive()
+    }
+}
+
+fn store_outcome<T: Copy>(slot: &Cell<Option<T>>, outcome: T) {
+    slot.set(Some(outcome));
+}
+
+/// Error reported by setup-time source acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SourceError {
+    /// The external source could not be opened.
+    FileOpenFailed,
+    /// The external source could not seek to the requested offset.
+    FileSeekFailed,
+    /// The external source failed while reading.
+    FileReadFailed,
+    /// The external source returned fewer bytes than requested.
+    ShortRead,
+    /// An external error not otherwise classified by this actor.
+    Other,
+}
+
+/// Read actor failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum Error {
+    /// A required request field or target buffer is invalid.
+    InvalidRequest,
+    /// The current target platform cannot execute the read copy.
+    UnsupportedPlatform,
+    /// A path, file index, length, or offset is unsupported.
+    UnsupportedResource,
+    /// The external source could not be opened.
+    FileOpenFailed,
+    /// The external source could not seek to the requested offset.
+    FileSeekFailed,
+    /// The external source failed while reading.
+    FileReadFailed,
+    /// The source contains fewer bytes than requested.
+    ShortRead,
+    /// The actor encountered an internal or unexpected event error.
+    InternalError,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidRequest => "invalid read request",
+            Self::UnsupportedPlatform => "unsupported read platform",
+            Self::UnsupportedResource => "unsupported read resource",
+            Self::FileOpenFailed => "read source open failed",
+            Self::FileSeekFailed => "read source seek failed",
+            Self::FileReadFailed => "read source failed",
+            Self::ShortRead => "read source was shorter than requested",
+            Self::InternalError => "internal read actor error",
+        })
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// Successful outcome of a [`ReadTensor`] event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadTensorDone {
+    tensor_id: i32,
+    bytes_copied: u64,
+}
+
+impl ReadTensorDone {
+    pub(crate) const fn new(tensor_id: i32, bytes_copied: u64) -> Self {
+        Self {
+            tensor_id,
+            bytes_copied,
+        }
+    }
+
+    /// Returns the caller-provided tensor identity.
+    #[must_use]
+    pub const fn tensor_id(self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the bytes copied into the caller-owned target.
+    #[must_use]
+    pub const fn bytes_copied(self) -> u64 {
+        self.bytes_copied
+    }
+}
+
+/// Error callback payload for a [`ReadTensor`] event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadTensorError {
+    tensor_id: i32,
+    error: Error,
+}
+
+impl ReadTensorError {
+    pub(crate) const fn new(tensor_id: i32, error: Error) -> Self {
+        Self { tensor_id, error }
+    }
+
+    /// Returns the caller-provided tensor identity.
+    #[must_use]
+    pub const fn tensor_id(self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the classified failure.
+    #[must_use]
+    pub const fn error(self) -> Error {
+        self.error
+    }
+}
+
+/// Request to copy one tensor range from immutable source bytes.
+#[derive(Debug)]
+pub struct ReadTensor<'a> {
+    pub(crate) tensor_id: i32,
+    pub(crate) file_index: u16,
+    pub(crate) file_offset: u64,
+    pub(crate) byte_size: u64,
+    pub(crate) file_path: &'a str,
+    pub(crate) source: Option<&'a [u8]>,
+    pub(crate) source_error: Option<SourceError>,
+    pub(crate) target: &'a mut [u8],
+    pub(crate) on_done: Option<Callback<'a, ReadTensorDone>>,
+    pub(crate) on_error: Option<Callback<'a, ReadTensorError>>,
+}
+
+impl<'a> ReadTensor<'a> {
+    /// Creates a read request. Filesystem work must already be complete.
+    #[must_use]
+    pub const fn new(
+        tensor_id: i32,
+        file_path: &'a str,
+        source: Option<&'a [u8]>,
+        target: &'a mut [u8],
+    ) -> Self {
+        let byte_size = target.len() as u64;
+        Self {
+            tensor_id,
+            file_index: 0,
+            file_offset: 0,
+            byte_size,
+            file_path,
+            source,
+            source_error: None,
+            target,
+            on_done: None,
+            on_error: None,
+        }
+    }
+
+    /// Sets the split-file index.
+    #[must_use]
+    pub const fn with_file_index(mut self, file_index: u16) -> Self {
+        self.file_index = file_index;
+        self
+    }
+
+    /// Sets the byte range within the immutable source.
+    #[must_use]
+    pub const fn with_range(mut self, file_offset: u64, byte_size: u64) -> Self {
+        self.file_offset = file_offset;
+        self.byte_size = byte_size;
+        self
+    }
+
+    /// Sets an externally produced source error.
+    #[must_use]
+    pub const fn with_source_error(mut self, error: SourceError) -> Self {
+        self.source_error = Some(error);
+        self
+    }
+
+    /// Installs a synchronous success callback.
+    #[must_use]
+    pub const fn on_done(mut self, callback: Callback<'a, ReadTensorDone>) -> Self {
+        self.on_done = Some(callback);
+        self
+    }
+
+    /// Installs a synchronous error callback.
+    #[must_use]
+    pub const fn on_error(mut self, callback: Callback<'a, ReadTensorError>) -> Self {
+        self.on_error = Some(callback);
+        self
+    }
+}
+
+impl sealed::Sealed for ReadTensor<'_> {}
+
+impl Event for ReadTensor<'_> {
+    type Output = Result<ReadTensorDone, Error>;
+
+    fn dispatch(self, actor: &mut Reader) -> Self::Output {
+        actor.read_tensor(self)
+    }
+}
+
+/// Caller-owned mutable target for one batch span.
+#[derive(Debug)]
+pub struct Target<'a> {
+    bytes: RefCell<&'a mut [u8]>,
+}
+
+impl<'a> Target<'a> {
+    /// Wraps a caller-owned mutable target for synchronous batch dispatch.
+    #[must_use]
+    pub const fn new(bytes: &'a mut [u8]) -> Self {
+        Self {
+            bytes: RefCell::new(bytes),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.bytes.borrow().len()
+    }
+
+    pub(crate) fn copy_from(&self, source: &[u8]) {
+        self.bytes.borrow_mut()[..source.len()].copy_from_slice(source);
+    }
+}
+
+/// One tensor span within a [`ReadTensorBatch`] event.
+#[derive(Debug)]
+pub struct TensorRead<'a> {
+    pub(crate) tensor_id: i32,
+    pub(crate) file_index: u16,
+    pub(crate) file_offset: u64,
+    pub(crate) byte_size: u64,
+    pub(crate) file_path: &'a str,
+    pub(crate) source: Option<&'a [u8]>,
+    pub(crate) source_error: Option<SourceError>,
+    pub(crate) target: &'a Target<'a>,
+    pub(crate) target_bytes: u64,
+}
+
+impl<'a> TensorRead<'a> {
+    /// Creates one caller-owned batch span.
+    #[must_use]
+    pub fn new(
+        tensor_id: i32,
+        file_path: &'a str,
+        source: Option<&'a [u8]>,
+        target: &'a Target<'a>,
+    ) -> Self {
+        let target_bytes = target.len() as u64;
+        Self {
+            tensor_id,
+            file_index: 0,
+            file_offset: 0,
+            byte_size: target_bytes,
+            file_path,
+            source,
+            source_error: None,
+            target,
+            target_bytes,
+        }
+    }
+
+    /// Sets the split-file index.
+    #[must_use]
+    pub const fn with_file_index(mut self, file_index: u16) -> Self {
+        self.file_index = file_index;
+        self
+    }
+
+    /// Sets the byte range within the immutable source.
+    #[must_use]
+    pub const fn with_range(mut self, file_offset: u64, byte_size: u64) -> Self {
+        self.file_offset = file_offset;
+        self.byte_size = byte_size;
+        self
+    }
+
+    /// Sets an externally produced source error.
+    #[must_use]
+    pub const fn with_source_error(mut self, error: SourceError) -> Self {
+        self.source_error = Some(error);
+        self
+    }
+}
+
+/// Successful outcome of a [`ReadTensorBatch`] event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadTensorBatchDone {
+    done_count: u32,
+    bytes_copied: u64,
+}
+
+impl ReadTensorBatchDone {
+    pub(crate) const fn new(done_count: u32, bytes_copied: u64) -> Self {
+        Self {
+            done_count,
+            bytes_copied,
+        }
+    }
+
+    /// Returns the number of copied tensor spans.
+    #[must_use]
+    pub const fn done_count(self) -> u32 {
+        self.done_count
+    }
+
+    /// Returns the total copied byte count.
+    #[must_use]
+    pub const fn bytes_copied(self) -> u64 {
+        self.bytes_copied
+    }
+}
+
+/// Error callback payload for a [`ReadTensorBatch`] event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadTensorBatchError {
+    error: Error,
+    failed_index: u32,
+}
+
+impl ReadTensorBatchError {
+    pub(crate) const fn new(error: Error, failed_index: u32) -> Self {
+        Self {
+            error,
+            failed_index,
+        }
+    }
+
+    /// Returns the classified failure.
+    #[must_use]
+    pub const fn error(self) -> Error {
+        self.error
+    }
+
+    /// Returns the first span with the classified failure.
+    #[must_use]
+    pub const fn failed_index(self) -> u32 {
+        self.failed_index
+    }
+}
+
+/// Request to copy a caller-built batch of tensor spans.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadTensorBatch<'a> {
+    pub(crate) tensors: &'a [TensorRead<'a>],
+    pub(crate) on_done: Option<Callback<'a, ReadTensorBatchDone>>,
+    pub(crate) on_error: Option<Callback<'a, ReadTensorBatchError>>,
+}
+
+impl<'a> ReadTensorBatch<'a> {
+    /// Creates a batch request over caller-owned spans.
+    #[must_use]
+    pub const fn new(tensors: &'a [TensorRead<'a>]) -> Self {
+        Self {
+            tensors,
+            on_done: None,
+            on_error: None,
+        }
+    }
+
+    /// Installs a synchronous success callback.
+    #[must_use]
+    pub const fn on_done(mut self, callback: Callback<'a, ReadTensorBatchDone>) -> Self {
+        self.on_done = Some(callback);
+        self
+    }
+
+    /// Installs a synchronous error callback.
+    #[must_use]
+    pub const fn on_error(mut self, callback: Callback<'a, ReadTensorBatchError>) -> Self {
+        self.on_error = Some(callback);
+        self
+    }
+}
+
+impl sealed::Sealed for ReadTensorBatch<'_> {}
+
+impl Event for ReadTensorBatch<'_> {
+    type Output = Result<ReadTensorBatchDone, ReadTensorBatchError>;
+
+    fn dispatch(self, actor: &mut Reader) -> Self::Output {
+        actor.read_tensor_batch(self)
+    }
+}

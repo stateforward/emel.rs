@@ -9,15 +9,15 @@ CORPUS_DIR="$BUILD_DIR/gguf-corpus"
 DURATION_SECONDS="${EMEL_FUZZ_SECONDS:-10}"
 MAX_LEN="${EMEL_FUZZ_MAX_LEN:-65536}"
 MODE="run"
-TARGETS=(gguf_loader gguf_load gguf_lifecycle)
+TARGETS=(gguf_loader gguf_load gguf_lifecycle emel_io_read)
 
 usage() {
   cat <<'USAGE'
 usage: scripts/fuzz.sh [OPTIONS]
 
-Seed and run the isolated cargo-fuzz targets for emel-gguf.
+Seed and run the isolated cargo-fuzz targets for emel-gguf and emel-io.
 
-  --target NAME   run one of: gguf_loader, gguf_load, gguf_lifecycle
+  --target NAME   run one of: gguf_loader, gguf_load, gguf_lifecycle, emel_io_read
   --seconds N     libFuzzer time budget per target (default: 10)
   --max-len N     maximum generated input size (default: 65536)
   --build-only    compile selected targets without running them
@@ -31,7 +31,7 @@ USAGE
 is_target() {
   local requested="$1"
   local target
-  for target in gguf_loader gguf_load gguf_lifecycle; do
+  for target in gguf_loader gguf_load gguf_lifecycle emel_io_read; do
     if [[ "$requested" == "$target" ]]; then
       return 0
     fi
@@ -94,7 +94,14 @@ seed_corpus() {
   echo "Prepared GGUF fuzz corpus with $seed_count parity seeds and $corpus_count total inputs"
 }
 
-if [[ "$MODE" != "build" ]]; then
+needs_gguf_corpus=false
+for target in "${TARGETS[@]}"; do
+  if [[ "$target" != "emel_io_read" ]]; then
+    needs_gguf_corpus=true
+  fi
+done
+
+if [[ "$MODE" != "build" ]] && $needs_gguf_corpus; then
   seed_corpus
 fi
 if [[ "$MODE" == "seed" ]]; then
@@ -115,7 +122,12 @@ for target in "${TARGETS[@]}"; do
     (cd "$FUZZ_DIR" && cargo fuzz build "$target")
   else
     echo "Fuzzing $target for ${DURATION_SECONDS}s with max_len=$MAX_LEN"
-    (cd "$FUZZ_DIR" && cargo fuzz run "$target" "$CORPUS_DIR" -- \
-      -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
+    if [[ "$target" == "emel_io_read" ]]; then
+      (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
+        -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
+    else
+      (cd "$FUZZ_DIR" && cargo fuzz run "$target" "$CORPUS_DIR" -- \
+        -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
+    fi
   fi
 done

@@ -6,10 +6,18 @@ use std::time::Instant;
 
 use emel_gguf::Loader;
 use emel_gguf::event::{Bind, Error, Load, Parse, Probe};
+use emel_io::read::Reader;
+use emel_io::read::event::ReadTensor;
 
 const ALIGNMENT: usize = 32;
 const MAGIC: [u8; 4] = *b"GGUF";
 const VERSION: u32 = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Suite {
+    Gguf,
+    IoRead,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Config {
@@ -36,13 +44,22 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = parse_config()?;
+    let (suite, config) = parse_config()?;
     println!("# bench_host_arch: {}", env::consts::ARCH);
+    println!("# bench_pointer_width: {}", usize::BITS);
     println!(
         "# benchmark_config: iterations={} runs={} sample_policy=median warmup_iterations={}",
         config.iterations, config.runs, config.warmup_iterations
     );
 
+    match suite {
+        Suite::Gguf => run_gguf(config)?,
+        Suite::IoRead => run_io_read(config)?,
+    }
+    Ok(())
+}
+
+fn run_gguf(config: Config) -> Result<(), Error> {
     let metadata = metadata_fixture();
     let tensors = tensor_fixture();
     print_case(
@@ -73,15 +90,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
+fn run_io_read(config: Config) -> Result<(), emel_io::read::event::Error> {
+    const COPY_BYTES: usize = 1024 * 1024;
+    println!("# source_repository: stateforward/emel.cpp");
+    println!("# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
+    println!("# source_tree: ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa");
+    println!(
+        "# benchmark_fixture: public Reader/ReadTensor, immutable source bytes=1048576 fill=0xa5, caller target bytes=1048576"
+    );
+    println!(
+        "# benchmark_validation: typed done checked each iteration, target equals source after measurement"
+    );
+    let source = vec![0xa5; COPY_BYTES];
+    let mut target = vec![0_u8; COPY_BYTES];
+    let mut reader = Reader::new();
+    let timing = measure(config, || {
+        let done = reader.process_event(ReadTensor::new(
+            1,
+            "benchmark.bin",
+            Some(black_box(&source)),
+            black_box(&mut target),
+        ))?;
+        black_box(done);
+        Ok(())
+    })?;
+    if target != source {
+        return Err(emel_io::read::event::Error::InternalError);
+    }
+    print_case("io/read/copy_1mib", timing, config);
+    Ok(())
+}
+
+fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
     let mut config = Config::default();
+    let mut suite = None;
     for argument in env::args().skip(1) {
         if argument == "gguf" {
+            suite = Some(Suite::Gguf);
+            continue;
+        }
+        if argument == "io-read" {
+            suite = Some(Suite::IoRead);
             continue;
         }
         if argument == "--help" || argument == "-h" {
             println!(
-                "usage: emel-bench [gguf] [--iterations=N] [--runs=N] [--warmup-iterations=N]"
+                "usage: emel-bench [gguf|io-read] [--iterations=N] [--runs=N] \
+                 [--warmup-iterations=N]"
             );
             std::process::exit(0);
         }
@@ -102,7 +157,7 @@ fn parse_config() -> Result<Config, Box<dyn std::error::Error>> {
     if config.iterations == 0 || config.runs == 0 || u32::try_from(config.iterations).is_err() {
         return Err("iterations and runs must be nonzero, and iterations must fit u32".into());
     }
-    Ok(config)
+    Ok((suite.unwrap_or(Suite::Gguf), config))
 }
 
 fn benchmark_probe(bytes: &[u8], config: Config) -> Result<f64, Error> {
@@ -133,7 +188,7 @@ fn benchmark_parse(bytes: &[u8], config: Config) -> Result<f64, Error> {
     })
 }
 
-fn measure(config: Config, mut operation: impl FnMut() -> Result<(), Error>) -> Result<f64, Error> {
+fn measure<E>(config: Config, mut operation: impl FnMut() -> Result<(), E>) -> Result<f64, E> {
     for _ in 0..config.warmup_iterations {
         operation()?;
     }

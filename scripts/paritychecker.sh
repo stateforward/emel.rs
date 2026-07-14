@@ -6,6 +6,11 @@ BUILD_DIR="${EMEL_GGUF_PARITY_BUILD_DIR:-$ROOT_DIR/target/gguf-parity}"
 FIXTURE_DIR="$BUILD_DIR/fixtures"
 REFERENCE_BUILD_DIR="$BUILD_DIR/llama-reference"
 SNAPSHOT="${EMEL_GGUF_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/gguf/manifest.txt}"
+IO_READ_SNAPSHOT="${EMEL_IO_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-read/manifest.txt}"
+IO_READ_BUILD_DIR="${EMEL_IO_READ_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-read-parity}"
+EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
+EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
+EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
 EXPECTED_REF="$(tr -d '[:space:]' <"$ROOT_DIR/tools/llama-gguf-reference/reference_ref.txt")"
 RUN_SNAPSHOT=true
 RUN_LIVE=true
@@ -27,7 +32,7 @@ then checked-in snapshot verification.
   --no-snapshot    disable checked-in snapshot verification
   --no-live        disable the separate live phase
   --no-update      disable snapshot refresh
-  --snapshot-only  run only the fast Rust-only snapshot gate
+  --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
 
@@ -218,6 +223,59 @@ update_snapshot() {
   echo "Updated GGUF parity snapshot from llama.cpp $EXPECTED_REF"
 }
 
+run_io_read_parity() {
+  local source_commit source_tree rust_output reference_output materialized_source
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/io)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_IO_TREE" ]]; then
+    echo "error: emel.cpp I/O reference identity drifted" >&2
+    echo "commit: $source_commit" >&2
+    echo "tree:   $source_tree" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- src/emel/io tests/io; then
+    echo "error: emel.cpp I/O reference files are dirty" >&2
+    exit 1
+  fi
+
+  materialized_source="$IO_READ_BUILD_DIR/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | \
+    tar -x -C "$materialized_source"
+
+  local cmake_args=(
+    -S "$ROOT_DIR/tools/emel-io-read-reference"
+    -B "$IO_READ_BUILD_DIR/reference-build"
+    -DCMAKE_BUILD_TYPE=Release
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  )
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$IO_READ_BUILD_DIR/reference-build" --parallel \
+    --target emel-io-read-reference
+
+  mkdir -p "$IO_READ_BUILD_DIR"
+  rust_output="$IO_READ_BUILD_DIR/rust.out"
+  reference_output="$IO_READ_BUILD_DIR/reference.out"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-io --example read_parity >"$rust_output"
+  "$IO_READ_BUILD_DIR/reference-build/emel-io-read-reference" >"$reference_output"
+  diff -u "$reference_output" "$rust_output"
+
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$IO_READ_SNAPSHOT")"
+    install -m 0644 "$reference_output" "$IO_READ_SNAPSHOT"
+    echo "Updated I/O read parity snapshot from emel.cpp $EMEL_CPP_COMMIT"
+  fi
+  if $RUN_SNAPSHOT; then
+    diff -u "$IO_READ_SNAPSHOT" "$rust_output"
+  fi
+  echo "I/O read parity passed (24 cases, emel.cpp $EMEL_CPP_COMMIT)"
+}
+
 if $RUN_UPDATE; then
   update_snapshot
 fi
@@ -229,3 +287,5 @@ fi
 if $RUN_SNAPSHOT; then
   check_snapshot
 fi
+
+run_io_read_parity

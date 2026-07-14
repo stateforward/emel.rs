@@ -1,0 +1,32 @@
+io-read-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_tree=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+source_files=src/emel/io/read/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,sm.hpp
+source_tests=tests/io/read/lifecycle_tests.cpp
+fixture_config=caller_owned_memory,platform_supported,synchronous_callbacks,distinct_batch_targets,mixed_batch_phase_precedence,batch_count_boundaries
+contract_delta=rust_typed_results_make_callbacks_optional
+case=single_success outcome=done tensor_id=7 bytes_copied=4 target=62636465 callback_tensor_id=7 callback_bytes_copied=4
+case=single_invalid_zero outcome=error error=invalid_request callback_error=invalid_request target=00000000
+case=single_invalid_path outcome=error error=invalid_request callback_error=invalid_request target=00000000
+case=single_unsupported_index outcome=error error=unsupported_resource callback_error=unsupported_resource target=00000000
+case=single_unsupported_length outcome=error error=unsupported_resource callback_error=unsupported_resource target=00000000
+case=single_unsupported_layout outcome=error error=unsupported_resource callback_error=unsupported_resource target=00000000
+case=single_invalid_target outcome=error error=invalid_request callback_error=invalid_request target=00000000
+case=single_file_open outcome=error error=file_open_failed callback_error=file_open_failed target=00000000
+case=single_file_seek outcome=error error=file_seek_failed callback_error=file_seek_failed target=00000000
+case=single_file_read outcome=error error=file_read_failed callback_error=file_read_failed target=00000000
+case=single_short_read outcome=error error=short_read callback_error=short_read target=00000000
+case=batch_success outcome=done done_count=2 bytes_copied=7 first_target=636465 second_target=7778797a callback_done_count=2 callback_bytes_copied=7
+case=batch_invalid_request outcome=error error=invalid_request failed_index=1 callback_error=invalid_request callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_unsupported_resource outcome=error error=unsupported_resource failed_index=1 callback_error=unsupported_resource callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_file_open outcome=error error=file_open_failed failed_index=1 callback_error=file_open_failed callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_file_seek outcome=error error=file_seek_failed failed_index=1 callback_error=file_seek_failed callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_file_read outcome=error error=file_read_failed failed_index=1 callback_error=file_read_failed callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_short_read outcome=error error=short_read failed_index=1 callback_error=short_read callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_mixed_short_then_file_read outcome=error error=file_read_failed failed_index=1 callback_error=file_read_failed callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_mixed_seek_then_open outcome=error error=file_open_failed failed_index=1 callback_error=file_open_failed callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_mixed_resource_then_invalid outcome=error error=invalid_request failed_index=1 callback_error=invalid_request callback_failed_index=1 first_target=00000000 second_target=00000000
+case=batch_same_phase_two_file_reads outcome=error error=file_read_failed failed_index=0 callback_error=file_read_failed callback_failed_index=0 first_target=00000000 second_target=00000000
+case=batch_count_exact_cap outcome=done done_count=65536 bytes_copied=65536 target=78 callback_done_count=65536 callback_bytes_copied=65536
+case=batch_count_over_cap outcome=error error=invalid_request failed_index=0 callback_error=invalid_request callback_failed_index=0
