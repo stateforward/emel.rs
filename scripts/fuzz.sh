@@ -9,13 +9,13 @@ CORPUS_DIR="$BUILD_DIR/gguf-corpus"
 DURATION_SECONDS="${EMEL_FUZZ_SECONDS:-10}"
 MAX_LEN="${EMEL_FUZZ_MAX_LEN:-65536}"
 MODE="run"
-TARGETS=(gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader)
+TARGETS=(gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor)
 
 usage() {
   cat <<'USAGE'
 usage: scripts/fuzz.sh [OPTIONS]
 
-Seed and run the isolated cargo-fuzz targets for emel-gguf and emel-io.
+Seed and run the isolated cargo-fuzz targets for emel-gguf, emel-io, and emel-model.
 
   --target NAME   run one configured fuzz target (see fuzz/Cargo.toml)
   --seconds N     libFuzzer time budget per target (default: 10)
@@ -96,7 +96,7 @@ seed_corpus() {
 
 needs_gguf_corpus=false
 for target in "${TARGETS[@]}"; do
-  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" && "$target" != "emel_io_loader" ]]; then
+  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" && "$target" != "emel_io_loader" && "$target" != "emel_model_tensor" ]]; then
     needs_gguf_corpus=true
   fi
 done
@@ -122,7 +122,7 @@ for target in "${TARGETS[@]}"; do
     (cd "$FUZZ_DIR" && cargo fuzz build "$target")
   else
     echo "Fuzzing $target for ${DURATION_SECONDS}s with max_len=$MAX_LEN"
-    if [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" || "$target" == "emel_io_loader" ]]; then
+    if [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" || "$target" == "emel_io_loader" || "$target" == "emel_model_tensor" ]]; then
       (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
         -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
     else

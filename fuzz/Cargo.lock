@@ -38,6 +38,7 @@ version = "0.0.0"
 dependencies = [
  "emel-gguf",
  "emel-io",
+ "emel-model",
  "libfuzzer-sys",
 ]
 
@@ -56,6 +57,13 @@ dependencies = [
  "rustix",
  "stateforward-sml",
  "windows-sys",
+]
+
+[[package]]
+name = "emel-model"
+version = "0.1.0"
+dependencies = [
+ "stateforward-sml",
 ]
 
 [[package]]

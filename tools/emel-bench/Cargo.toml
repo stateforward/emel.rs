@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 emel-gguf.workspace = true
 emel-io.workspace = true
+emel-model = { workspace = true, features = ["model-tensor-proof"] }
 
 [lints]
 workspace = true

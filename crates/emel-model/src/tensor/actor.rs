@@ -5,7 +5,9 @@ use core::fmt;
 
 use super::event::{self, Event};
 use super::sm::{
-    BindRuntime, CaptureRuntime, Context, EvictRuntime, ModelTensorEvents, ModelTensorStateMachine,
+    ApplyBoundRuntime, ApplyEffectErrorRuntime, ApplyOwnedRuntime, BindRuntime, BindStorageRuntime,
+    CaptureRuntime, Context, EvictRuntime, ModelTensorEvents, ModelTensorStateMachine,
+    PlanLoadRuntime,
 };
 
 /// Maximum tensor slots supported by one store.
@@ -77,6 +79,86 @@ impl<D> Store<D> {
         result.get()
     }
 
+    pub(crate) fn bind_storage(
+        &mut self,
+        event: event::BindStorage,
+    ) -> Result<event::BindStorageDone, event::BindStorageError> {
+        let result = RefCell::new(Err(event::BindStorageError::new(
+            event::Error::Internal,
+            event.storage,
+        )));
+        let _state =
+            self.machine
+                .process_event(ModelTensorEvents::BindStorage(BindStorageRuntime {
+                    result: &result,
+                }));
+        result.into_inner()
+    }
+
+    pub(crate) fn plan_load(
+        &mut self,
+        event: event::PlanLoad,
+    ) -> Result<event::PlanLoadDone, event::PlanLoadError> {
+        let result = RefCell::new(Err(event::PlanLoadError::new(
+            event::Error::Internal,
+            event.effects,
+        )));
+        let _state = self
+            .machine
+            .process_event(ModelTensorEvents::PlanLoad(PlanLoadRuntime {
+                strategy: event.strategy,
+                result: &result,
+            }));
+        result.into_inner()
+    }
+
+    pub(crate) fn apply_bound_effect_results(
+        &mut self,
+        event: event::ApplyBoundEffectResults,
+    ) -> Result<(), event::ApplyBoundEffectResultsError> {
+        let result = RefCell::new(Err(event::ApplyBoundEffectResultsError::new(
+            event::Error::Internal,
+            event.tensor_ids,
+        )));
+        let _state = self
+            .machine
+            .process_event(ModelTensorEvents::ApplyBound(ApplyBoundRuntime {
+                result: &result,
+            }));
+        result.into_inner()
+    }
+
+    pub(crate) fn apply_owned_effect_results(
+        &mut self,
+        event: event::ApplyOwnedEffectResults,
+    ) -> Result<(), event::ApplyOwnedEffectResultsError> {
+        let result = RefCell::new(Err(event::ApplyOwnedEffectResultsError::new(
+            event::Error::Internal,
+            event.results,
+        )));
+        let _state = self
+            .machine
+            .process_event(ModelTensorEvents::ApplyOwned(ApplyOwnedRuntime {
+                result: &result,
+            }));
+        result.into_inner()
+    }
+
+    pub(crate) fn apply_effect_error(
+        &mut self,
+        event: event::ApplyEffectError,
+    ) -> Result<(), event::Error> {
+        let result = Cell::new(Err(event::Error::Internal));
+        let _state =
+            self.machine
+                .process_event(ModelTensorEvents::ApplyError(ApplyEffectErrorRuntime {
+                    tensor_id: event.tensor_id,
+                    error: event.error,
+                    result: &result,
+                }));
+        result.get()
+    }
+
     pub(crate) fn evict_tensor(
         &mut self,
         event: event::EvictTensor,
@@ -114,6 +196,30 @@ impl<D> Store<D> {
         use super::sm::ModelTensorStates;
 
         self.machine.is(&ModelTensorStates::StateReady)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_awaiting_bound_results(&self) -> bool {
+        use super::sm::ModelTensorStates;
+
+        self.machine
+            .is(&ModelTensorStates::StateAwaitingBoundResults)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_awaiting_owned_results(&self) -> bool {
+        use super::sm::ModelTensorStates;
+
+        self.machine
+            .is(&ModelTensorStates::StateAwaitingOwnedResults)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_awaiting_mapped_results(&self) -> bool {
+        use super::sm::ModelTensorStates;
+
+        self.machine
+            .is(&ModelTensorStates::StateAwaitingMappedResults)
     }
 }
 

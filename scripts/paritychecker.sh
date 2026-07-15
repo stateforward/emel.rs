@@ -14,9 +14,12 @@ IO_STAGED_READ_SNAPSHOT="${EMEL_IO_STAGED_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapsh
 IO_STAGED_READ_BUILD_DIR="${EMEL_IO_STAGED_READ_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-staged-read-parity}"
 IO_LOADER_SNAPSHOT="${EMEL_IO_LOADER_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-loader/manifest.txt}"
 IO_LOADER_BUILD_DIR="${EMEL_IO_LOADER_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-loader-parity}"
+MODEL_TENSOR_SNAPSHOT="${EMEL_MODEL_TENSOR_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-tensor/manifest.txt}"
+MODEL_TENSOR_BUILD_DIR="${EMEL_MODEL_TENSOR_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-tensor-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+EMEL_CPP_MODEL_TENSOR_TREE=06306d4ffad3455fcf5df71dc692df52514b9865
 EXPECTED_REF="$(tr -d '[:space:]' <"$ROOT_DIR/tools/llama-gguf-reference/reference_ref.txt")"
 RUN_SNAPSHOT=true
 RUN_LIVE=true
@@ -42,7 +45,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, or io-loader (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, or model-tensor (default: all)
 
 Model paths are checked during the live phase. Without paths, the deterministic
 fixture corpus is used.
@@ -78,6 +81,7 @@ for argument in "$@"; do
     --suite=io-mmap) SUITE=io-mmap ;;
     --suite=io-staged-read) SUITE=io-staged-read ;;
     --suite=io-loader) SUITE=io-loader ;;
+    --suite=model-tensor) SUITE=model-tensor ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -102,6 +106,7 @@ RUN_IO_READ=false
 RUN_IO_MMAP=false
 RUN_IO_STAGED_READ=false
 RUN_IO_LOADER=false
+RUN_MODEL_TENSOR=false
 case "$SUITE" in
   all)
     RUN_GGUF=true
@@ -109,12 +114,14 @@ case "$SUITE" in
     RUN_IO_MMAP=true
     RUN_IO_STAGED_READ=true
     RUN_IO_LOADER=true
+    RUN_MODEL_TENSOR=true
     ;;
   gguf) RUN_GGUF=true ;;
   io-read) RUN_IO_READ=true ;;
   io-mmap) RUN_IO_MMAP=true ;;
   io-staged-read) RUN_IO_STAGED_READ=true ;;
   io-loader) RUN_IO_LOADER=true ;;
+  model-tensor) RUN_MODEL_TENSOR=true ;;
 esac
 
 fixture_models=()
@@ -468,6 +475,64 @@ run_io_loader_parity() {
   echo "I/O loader parity passed (16 cases, emel.cpp $EMEL_CPP_COMMIT)"
 }
 
+run_model_tensor_parity() {
+  local source_commit source_tree materialized_source rust_output reference_output
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/model/tensor)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_MODEL_TENSOR_TREE" ]]; then
+    echo "error: emel.cpp model tensor reference identity drifted" >&2
+    echo "commit: $source_commit" >&2
+    echo "tree:   $source_tree" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- src/emel/model/tensor tests/model/tensor; then
+    echo "error: emel.cpp model tensor reference files are dirty" >&2
+    exit 1
+  fi
+
+  materialized_source="$MODEL_TENSOR_BUILD_DIR/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | tar -x -C "$materialized_source"
+  local cmake_args=(
+    -S "$ROOT_DIR/tools/emel-model-tensor-reference"
+    -B "$MODEL_TENSOR_BUILD_DIR/reference-build"
+    -DCMAKE_BUILD_TYPE=Release
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  )
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$MODEL_TENSOR_BUILD_DIR/reference-build" --parallel \
+    --target emel-model-tensor-reference
+
+  mkdir -p "$MODEL_TENSOR_BUILD_DIR"
+  rust_output="$MODEL_TENSOR_BUILD_DIR/rust.out"
+  reference_output="$MODEL_TENSOR_BUILD_DIR/reference.out"
+  cargo run --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-model --example tensor_parity --features model-tensor-proof >"$rust_output"
+  "$MODEL_TENSOR_BUILD_DIR/reference-build/emel-model-tensor-reference" >"$reference_output"
+
+  grep -v '^extension=' "$rust_output" >"$MODEL_TENSOR_BUILD_DIR/rust.shared"
+  grep -v '^reference_observation=' "$reference_output" >"$MODEL_TENSOR_BUILD_DIR/reference.shared"
+  diff -u "$MODEL_TENSOR_BUILD_DIR/reference.shared" "$MODEL_TENSOR_BUILD_DIR/rust.shared"
+  grep -qx 'reference_observation=second_plan behavior=unexpected_recovery_to_ready' "$reference_output"
+  grep -qx 'reference_observation=unknown_strategy behavior=planned_as_io_load' "$reference_output"
+  grep -qx 'extension=typed_busy reference_behavior=unexpected_recovery_to_ready rust_error=busy phase=awaiting_bound' "$rust_output"
+  grep -qx 'extension=typed_unknown reference_behavior=planned_as_io_load rust_error=unsupported_strategy' "$rust_output"
+
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$MODEL_TENSOR_SNAPSHOT")"
+    install -m 0644 "$rust_output" "$MODEL_TENSOR_SNAPSHOT"
+    echo "Updated model tensor parity snapshot from emel.cpp $EMEL_CPP_COMMIT"
+  fi
+  if $RUN_SNAPSHOT; then
+    diff -u "$MODEL_TENSOR_SNAPSHOT" "$rust_output"
+  fi
+  echo "Model tensor shared parity passed with explicit Rust extensions (emel.cpp $EMEL_CPP_COMMIT)"
+}
+
 if $RUN_GGUF; then
   if $RUN_UPDATE; then
     update_snapshot
@@ -491,4 +556,7 @@ if $RUN_IO_STAGED_READ; then
 fi
 if $RUN_IO_LOADER; then
   run_io_loader_parity
+fi
+if $RUN_MODEL_TENSOR; then
+  run_model_tensor_parity
 fi

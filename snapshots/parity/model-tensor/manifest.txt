@@ -1,0 +1,23 @@
+model-tensor-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_tree=06306d4ffad3455fcf5df71dc692df52514b9865
+source_files=src/emel/model/tensor/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,sm.hpp
+source_tests=tests/model/tensor/lifecycle_tests.cpp
+fixture_config=public_actor_typed_events,owned_batches,two_tensors,supported_strategy_families_plus_rust_unknown_extension
+contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;mapped_success_deferred
+case=bind outcome=done active_extent=2
+case=plan_none outcome=done effect_count=2 first=none:0:1:4096:2 second=none:1:2:8192:3
+extension=typed_busy reference_behavior=unexpected_recovery_to_ready rust_error=busy phase=awaiting_bound
+case=apply_bound outcome=done first=resident:2 second=resident:3
+case=plan_read outcome=done effect_count=1 first=read_copy:0:5:16384:4
+case=apply_owned outcome=done lifecycle=resident buffer_bytes=4
+case=plan_external outcome=done effect_count=1 first=external_buffer:0:5:16384:4
+case=external_error outcome=error error=backend_error phase=ready
+case=plan_staged outcome=done effect_count=1 first=staged_read:0:5:16384:4
+case=staged_error outcome=error error=backend_error phase=ready
+case=invalid_bind outcome=error error=invalid_request preserved_offset=16384
+extension=typed_unknown reference_behavior=planned_as_io_load rust_error=unsupported_strategy
+case=plan_mapped outcome=done effect_count=1 first=mapped_file:0:5:16384:4
+case=mapped_error outcome=error error=backend_error phase=ready
+case=result_without_plan outcome=error error=invalid_request

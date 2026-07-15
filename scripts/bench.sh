@@ -7,6 +7,7 @@ BASELINE_DIR="${EMEL_BENCH_BASELINE_DIR:-$ROOT_DIR/snapshots/bench}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+EMEL_CPP_MODEL_TENSOR_TREE=06306d4ffad3455fcf5df71dc692df52514b9865
 SNAPSHOT_MODE=false
 UPDATE=false
 SUITE=gguf
@@ -20,7 +21,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -36,6 +37,7 @@ for argument in "$@"; do
     --suite=io-mmap) SUITE=io-mmap; runner_args[0]=io-mmap ;;
     --suite=io-staged-read) SUITE=io-staged-read; runner_args[0]=io-staged-read ;;
     --suite=io-loader) SUITE=io-loader; runner_args[0]=io-loader ;;
+    --suite=model-tensor) SUITE=model-tensor; runner_args[0]=model-tensor ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
   esac
@@ -53,7 +55,7 @@ if [[ -n "${EMEL_BENCH_RUNNER:-}" ]]; then
     exit 1
   fi
 else
-  cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release -p emel-bench
+  cargo build --locked --manifest-path "$ROOT_DIR/Cargo.toml" --release -p emel-bench
   RUNNER="$ROOT_DIR/target/release/emel-bench"
 fi
 mkdir -p "$BUILD_DIR"
@@ -245,6 +247,41 @@ elif [[ "$SUITE" == "io-loader" ]]; then
     $1=="io/loader/reference/read_copy_1mib" {c=field("ns_per_op")}
     END {printf "io/loader/read_copy_1mib rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n",r,c,r/c,it,runs}
   ' "$rust_current" "$reference_current" >"$CURRENT"
+elif [[ "$SUITE" == "model-tensor" ]]; then
+  "$RUNNER" "${runner_args[@]}" >"$CURRENT"
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/model/tensor)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_MODEL_TENSOR_TREE" ]]; then
+    echo "error: emel.cpp model tensor reference identity drifted" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- src/emel/model/tensor tests/model/tensor; then
+    echo "error: emel.cpp model tensor reference files are dirty" >&2
+    exit 1
+  fi
+  reference_root="$BUILD_DIR/model-tensor-reference"
+  materialized_source="$reference_root/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | tar -x -C "$materialized_source"
+  cmake_args=(-S "$ROOT_DIR/tools/emel-model-tensor-reference" -B "$reference_root/build"
+    -DCMAKE_BUILD_TYPE=Release "-DEMEL_CPP_SOURCE_DIR=$materialized_source")
+  if command -v ninja >/dev/null 2>&1; then cmake_args+=(-G Ninja); fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$reference_root/build" --parallel --target emel-model-tensor-reference
+  config_values="$(awk '/^# benchmark_config: / { for(i=3;i<=NF;i++){split($i,p,"=");v[p[1]]=p[2]} } END {print v["iterations"],v["runs"],v["warmup_iterations"]}' "$CURRENT")"
+  read -r iterations runs warmup_iterations <<<"$config_values"
+  reference_current="$CURRENT.reference"
+  "$reference_root/build/emel-model-tensor-reference" --benchmark \
+    "$iterations" "$runs" "$warmup_iterations" >"$reference_current"
+  rust_current="$CURRENT.rust"
+  mv "$CURRENT" "$rust_current"
+  awk '
+    function field(name, i,p){for(i=2;i<=NF;i++){split($i,p,"=");if(p[1]==name)return p[2]}return ""}
+    FNR==NR {if($0~/^#/){print;next} if($1=="model/tensor/rust/plan_mapped_64"){r=field("ns_per_op");it=field("iter");runs=field("runs")} next}
+    $1=="model/tensor/reference/plan_mapped_64" {c=field("ns_per_op")}
+    END {printf "model/tensor/plan_mapped_64 rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n",r,c,r/c,it,runs}
+  ' "$rust_current" "$reference_current" >"$CURRENT"
 else
   "$RUNNER" "${runner_args[@]}" >"$CURRENT"
 fi
@@ -299,7 +336,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" ]]; then
+if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -462,6 +499,10 @@ validate_io_loader_artifact() {
   bash "$ROOT_DIR/scripts/validate_io_loader_bench.sh" "$@"
 }
 
+validate_model_tensor_artifact() {
+  bash "$ROOT_DIR/scripts/validate_model_tensor_bench.sh" "$@"
+}
+
 if [[ "$SUITE" == "io-read" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   current_iterations="${current_config_values%% *}"
@@ -485,6 +526,11 @@ elif [[ "$SUITE" == "io-loader" ]]; then
   current_iterations="${current_config_values%% *}"
   current_runs="${current_config_values#* }"
   validate_io_loader_artifact "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
+elif [[ "$SUITE" == "model-tensor" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  current_iterations="${current_config_values%% *}"
+  current_runs="${current_config_values#* }"
+  validate_model_tensor_artifact "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
 fi
 
 if $UPDATE; then
@@ -589,10 +635,27 @@ elif [[ "$SUITE" == "io-loader" ]]; then
     [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
       echo "error: io-loader benchmark $field provenance differs from baseline" >&2; exit 1; }
   done
+elif [[ "$SUITE" == "model-tensor" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  baseline_config_values="$(validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width")"
+  baseline_iterations="${baseline_config_values%% *}"
+  baseline_runs="${baseline_config_values#* }"
+  validate_model_tensor_artifact "$BASELINE" "benchmark baseline" "$baseline_iterations" "$baseline_runs"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: model tensor benchmark architecture differs from baseline" >&2
+    exit 1
+  fi
+  for field in source_repository source_commit source_tree benchmark_fixture benchmark_validation contract_delta; do
+    [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
+      echo "error: model tensor benchmark $field differs from baseline" >&2
+      exit 1
+    }
+  done
 fi
 
 max_ratio="${EMEL_BENCH_MAX_REGRESSION_RATIO:-2.0}"
-if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" ]]; then
+if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" ]]; then
   awk -v max_ratio="$max_ratio" -v suite="$SUITE" '
     function value(name,    field_index, part) {
       for (field_index = 2; field_index <= NF; ++field_index) {

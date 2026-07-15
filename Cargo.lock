@@ -49,6 +49,7 @@ version = "0.1.0"
 dependencies = [
  "emel-gguf",
  "emel-io",
+ "emel-model",
 ]
 
 [[package]]

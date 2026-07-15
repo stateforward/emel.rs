@@ -21,6 +21,11 @@ use emel_io::staged_read::event::{
     Callback as StageCallback, StageWindow, StageWindowDone, StageWindowError,
     Target as StageTarget,
 };
+use emel_model::model_tensor_proof::Store as TensorStore;
+use emel_model::model_tensor_proof::event::{
+    ApplyEffectError, BindStorage, EffectBuffer, EffectError, EffectRequest, Error as TensorError,
+    PlanLoad, StorageBatch, StorageEntry, StrategyKind as TensorStrategy, TensorMetadata,
+};
 use std::cell::Cell;
 
 const ALIGNMENT: usize = 32;
@@ -34,6 +39,7 @@ enum Suite {
     IoMmap,
     IoStagedRead,
     IoLoader,
+    ModelTensor,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -75,6 +81,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Suite::IoMmap => run_io_mmap(config)?,
         Suite::IoStagedRead => run_io_staged_read(config)?,
         Suite::IoLoader => run_io_loader(config)?,
+        Suite::ModelTensor => run_model_tensor(config)?,
     }
     Ok(())
 }
@@ -173,6 +180,80 @@ fn run_io_loader(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         return Err("loader benchmark target mismatch".into());
     }
     print_case("io/loader/rust/read_copy_1mib", timing, config);
+    Ok(())
+}
+
+fn run_model_tensor(config: Config) -> Result<(), TensorError> {
+    const TENSORS: usize = 64;
+    println!("# source_repository: stateforward/emel.cpp");
+    println!("# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
+    println!("# source_tree: 06306d4ffad3455fcf5df71dc692df52514b9865");
+    println!(
+        "# benchmark_fixture: proof-feature Store/process_event, 64 bound metadata records, preallocated mapped effect buffer"
+    );
+    println!(
+        "# benchmark_validation: timed phase is only 64-effect mapped planning; typed count checked; recovery is checked outside timing; returned allocation reset and reused"
+    );
+    println!(
+        "# contract_delta: mapped success deferred; each timed plan is closed afterward with the lane-native backend-error event"
+    );
+
+    let entries = (0..TENSORS)
+        .map(|index| {
+            StorageEntry::new(
+                TensorMetadata::new(
+                    u64::try_from(index + 1).expect("fixture index") * 4_096,
+                    32,
+                    u16::try_from(index % 4).expect("fixture file index"),
+                    7,
+                ),
+                None,
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut store = TensorStore::new(TENSORS)?;
+    store
+        .process_event(BindStorage::new(StorageBatch::new(entries)))
+        .map_err(|error| error.error())?;
+    let mut effects = Some(EffectBuffer::new(
+        vec![EffectRequest::Empty; TENSORS].into_boxed_slice(),
+    ));
+    let mut plan_and_recover = || {
+        let buffer = effects
+            .take()
+            .expect("benchmark owns one effect allocation");
+        let started = Instant::now();
+        let done = store
+            .process_event(PlanLoad::new(TensorStrategy::MappedFile, buffer))
+            .map_err(|error| error.error())?;
+        let elapsed = started.elapsed();
+        if done.effect_count() != TENSORS {
+            return Err(TensorError::Internal);
+        }
+        let outcome = store.process_event(ApplyEffectError::new(0, EffectError::Backend));
+        if outcome != Err(TensorError::BackendError) {
+            return Err(TensorError::Internal);
+        }
+        let mut buffer = done.into_effects();
+        buffer.reset();
+        effects = Some(buffer);
+        Ok(elapsed.as_secs_f64() * 1_000_000_000.0)
+    };
+    for _ in 0..config.warmup_iterations {
+        black_box(plan_and_recover()?);
+    }
+    let mut samples = Vec::with_capacity(config.runs);
+    for _ in 0..config.runs {
+        let mut elapsed_ns = 0.0;
+        for _ in 0..config.iterations {
+            elapsed_ns += plan_and_recover()?;
+        }
+        let iterations = f64::from(u32::try_from(config.iterations).expect("validated iterations"));
+        samples.push(elapsed_ns / iterations);
+    }
+    samples.sort_by(f64::total_cmp);
+    print_case("model/tensor/rust/plan_mapped_64", median(&samples), config);
     Ok(())
 }
 
@@ -363,9 +444,13 @@ fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
             suite = Some(Suite::IoLoader);
             continue;
         }
+        if argument == "model-tensor" {
+            suite = Some(Suite::ModelTensor);
+            continue;
+        }
         if argument == "--help" || argument == "-h" {
             println!(
-                "usage: emel-bench [gguf|io-read|io-mmap|io-staged-read|io-loader] [--iterations=N] [--runs=N] \
+                "usage: emel-bench [gguf|io-read|io-mmap|io-staged-read|io-loader|model-tensor] [--iterations=N] [--runs=N] \
                  [--warmup-iterations=N]"
             );
             std::process::exit(0);

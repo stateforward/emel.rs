@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 emel-gguf = { path = "../crates/emel-gguf" }
 emel-io = { path = "../crates/emel-io" }
+emel-model = { path = "../crates/emel-model", features = ["model-tensor-proof"] }
 libfuzzer-sys = "0.4.13"
 
 [[bin]]
@@ -57,6 +58,13 @@ bench = false
 [[bin]]
 name = "emel_io_loader"
 path = "fuzz_targets/emel_io_loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_model_tensor"
+path = "fuzz_targets/emel_model_tensor.rs"
 test = false
 doc = false
 bench = false

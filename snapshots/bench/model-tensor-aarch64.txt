@@ -1,0 +1,10 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_tree: 06306d4ffad3455fcf5df71dc692df52514b9865
+# benchmark_fixture: proof-feature Store/process_event, 64 bound metadata records, preallocated mapped effect buffer
+# benchmark_validation: timed phase is only 64-effect mapped planning; typed count checked; recovery is checked outside timing; returned allocation reset and reused
+# contract_delta: mapped success deferred; each timed plan is closed afterward with the lane-native backend-error event
+model/tensor/plan_mapped_64 rust_ns_per_op=98.578 cpp_ns_per_op=78.253 rust_vs_cpp_ratio=1.259734 iter=1000 runs=5

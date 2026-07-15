@@ -22,6 +22,10 @@ pub trait Event<D = ()>: sealed::Sealed {
 
 /// Tensor-store failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "BackendError is the pinned tensor protocol classification"
+)]
 #[non_exhaustive]
 pub enum Error {
     /// A tensor identifier, byte payload, or metadata field is invalid.
@@ -34,6 +38,12 @@ pub enum Error {
     TensorUnbound,
     /// Mapped residency must be managed by the mapped-load lifecycle.
     MappedTensorRequiresRelease,
+    /// The actor is awaiting a previously planned effect batch.
+    Busy,
+    /// The requested load strategy is not supported.
+    UnsupportedStrategy,
+    /// A planned effect failed in its owning backend.
+    BackendError,
     /// The actor encountered an internal or unexpected event error.
     Internal,
 }
@@ -46,6 +56,9 @@ impl fmt::Display for Error {
             Self::TensorAlreadyResident => "tensor is already resident",
             Self::TensorUnbound => "tensor is not resident",
             Self::MappedTensorRequiresRelease => "mapped tensor requires mapped release",
+            Self::Busy => "tensor store is awaiting effect results",
+            Self::UnsupportedStrategy => "unsupported tensor load strategy",
+            Self::BackendError => "tensor effect backend failed",
             Self::Internal => "internal tensor actor error",
         })
     }
@@ -96,6 +109,443 @@ impl TensorMetadata {
     #[must_use]
     pub const fn tensor_type(self) -> i32 {
         self.tensor_type
+    }
+}
+
+/// One setup-allocated tensor record transferred into the actor.
+#[derive(Debug, Eq, PartialEq)]
+pub struct StorageEntry {
+    pub(crate) metadata: TensorMetadata,
+    pub(crate) bytes: Option<Box<[u8]>>,
+}
+
+impl StorageEntry {
+    /// Creates one owned storage record.
+    #[must_use]
+    pub const fn new(metadata: TensorMetadata, bytes: Option<Box<[u8]>>) -> Self {
+        Self { metadata, bytes }
+    }
+
+    /// Returns the tensor metadata.
+    #[must_use]
+    pub const fn metadata(&self) -> TensorMetadata {
+        self.metadata
+    }
+
+    /// Returns the optional setup-allocated byte count.
+    #[must_use]
+    pub fn initial_bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+}
+
+/// One setup-allocated batch transferred by [`BindStorage`].
+#[derive(Debug, Eq, PartialEq)]
+pub struct StorageBatch(pub(crate) Box<[StorageEntry]>);
+
+impl StorageBatch {
+    /// Creates a batch from setup-allocated entries.
+    #[must_use]
+    pub const fn new(entries: Box<[StorageEntry]>) -> Self {
+        Self(entries)
+    }
+
+    /// Returns the number of entries.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns whether the batch contains no entries.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the owned entries.
+    #[must_use]
+    pub fn into_entries(self) -> Box<[StorageEntry]> {
+        self.0
+    }
+}
+
+/// Replace the actor's active tensor-storage batch.
+#[derive(Debug, Eq, PartialEq)]
+pub struct BindStorage {
+    pub(crate) storage: StorageBatch,
+}
+
+impl BindStorage {
+    /// Creates an owned storage-bind request.
+    #[must_use]
+    pub const fn new(storage: StorageBatch) -> Self {
+        Self { storage }
+    }
+}
+
+/// Successful bulk storage binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BindStorageDone {
+    active_extent: usize,
+}
+
+impl BindStorageDone {
+    pub(crate) const fn new(active_extent: usize) -> Self {
+        Self { active_extent }
+    }
+
+    /// Returns the number of active tensor records.
+    #[must_use]
+    pub const fn active_extent(self) -> usize {
+        self.active_extent
+    }
+}
+
+/// Failed bulk binding with ownership returned unchanged.
+#[derive(Debug, Eq, PartialEq)]
+pub struct BindStorageError {
+    pub(crate) error: Error,
+    pub(crate) storage: StorageBatch,
+}
+
+impl BindStorageError {
+    pub(crate) const fn new(error: Error, storage: StorageBatch) -> Self {
+        Self { error, storage }
+    }
+
+    /// Returns the failure classification.
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+
+    /// Returns the unchanged caller allocation.
+    #[must_use]
+    pub fn into_storage(self) -> StorageBatch {
+        self.storage
+    }
+}
+
+/// Load-planning strategy selected before dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StrategyKind {
+    /// Use bytes already supplied by the storage batch.
+    None,
+    /// Request file-backed mapped residency.
+    MappedFile,
+    /// Request an owned read-and-copy result.
+    ReadCopy,
+    /// Request bytes from an external buffer backend.
+    ExternalBuffer,
+    /// Request an owned staged-read result.
+    StagedRead,
+    /// Preserve an unknown wire value for explicit rejection.
+    Unknown(u8),
+}
+
+/// One preallocated effect slot filled by [`PlanLoad`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EffectRequest {
+    /// Caller-provided empty slot.
+    #[default]
+    Empty,
+    /// Actor-owned initial-byte residency request.
+    None {
+        /// Ordered tensor identifier.
+        tensor_id: i32,
+        /// Source split-file index.
+        file_index: u16,
+        /// Source byte offset.
+        offset: u64,
+        /// Required byte count.
+        size: u64,
+    },
+    /// File-backed mapping request.
+    MappedFile {
+        /// Ordered tensor identifier.
+        tensor_id: i32,
+        /// Source split-file index.
+        file_index: u16,
+        /// Source byte offset.
+        offset: u64,
+        /// Required byte count.
+        size: u64,
+    },
+    /// Read-and-copy request.
+    ReadCopy {
+        /// Ordered tensor identifier.
+        tensor_id: i32,
+        /// Source split-file index.
+        file_index: u16,
+        /// Source byte offset.
+        offset: u64,
+        /// Required byte count.
+        size: u64,
+    },
+    /// External-buffer request.
+    ExternalBuffer {
+        /// Ordered tensor identifier.
+        tensor_id: i32,
+        /// Source split-file index.
+        file_index: u16,
+        /// Source byte offset.
+        offset: u64,
+        /// Required byte count.
+        size: u64,
+    },
+    /// Staged-read request.
+    StagedRead {
+        /// Ordered tensor identifier.
+        tensor_id: i32,
+        /// Source split-file index.
+        file_index: u16,
+        /// Source byte offset.
+        offset: u64,
+        /// Required byte count.
+        size: u64,
+    },
+}
+
+/// Setup-allocated effect slots moved through planning unchanged.
+#[derive(Debug, Eq, PartialEq)]
+pub struct EffectBuffer(pub(crate) Box<[EffectRequest]>);
+
+impl EffectBuffer {
+    /// Creates a buffer whose slots must all be [`EffectRequest::Empty`].
+    #[must_use]
+    pub const fn new(effects: Box<[EffectRequest]>) -> Self {
+        Self(effects)
+    }
+
+    /// Returns the number of preallocated slots.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Returns whether the buffer contains no slots.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Returns the planned requests.
+    #[must_use]
+    pub const fn effects(&self) -> &[EffectRequest] {
+        &self.0
+    }
+
+    /// Resets every slot for allocation-free reuse by another plan.
+    pub fn reset(&mut self) {
+        self.0.fill(EffectRequest::Empty);
+    }
+
+    /// Returns the setup allocation.
+    #[must_use]
+    pub fn into_effects(self) -> Box<[EffectRequest]> {
+        self.0
+    }
+}
+
+/// Plan one ordered effect per active tensor.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PlanLoad {
+    pub(crate) strategy: StrategyKind,
+    pub(crate) effects: EffectBuffer,
+}
+
+impl PlanLoad {
+    /// Creates a load-plan request.
+    #[must_use]
+    pub const fn new(strategy: StrategyKind, effects: EffectBuffer) -> Self {
+        Self { strategy, effects }
+    }
+}
+
+/// Successful planning with the caller allocation returned.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PlanLoadDone {
+    effects: EffectBuffer,
+    effect_count: usize,
+}
+
+impl PlanLoadDone {
+    pub(crate) const fn new(effects: EffectBuffer, effect_count: usize) -> Self {
+        Self {
+            effects,
+            effect_count,
+        }
+    }
+
+    /// Returns the number of filled effect slots.
+    #[must_use]
+    pub const fn effect_count(&self) -> usize {
+        self.effect_count
+    }
+
+    /// Returns the planned effect allocation.
+    #[must_use]
+    pub fn into_effects(self) -> EffectBuffer {
+        self.effects
+    }
+}
+
+/// Failed planning with the caller allocation returned unchanged.
+#[derive(Debug, Eq, PartialEq)]
+pub struct PlanLoadError {
+    pub(crate) error: Error,
+    pub(crate) effects: EffectBuffer,
+}
+
+impl PlanLoadError {
+    pub(crate) const fn new(error: Error, effects: EffectBuffer) -> Self {
+        Self { error, effects }
+    }
+
+    /// Returns the failure classification.
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+
+    /// Returns the unchanged effect allocation.
+    #[must_use]
+    pub fn into_effects(self) -> EffectBuffer {
+        self.effects
+    }
+}
+
+/// Apply the actor-owned initial bytes for an ordered tensor-id batch.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ApplyBoundEffectResults {
+    pub(crate) tensor_ids: Box<[i32]>,
+}
+
+impl ApplyBoundEffectResults {
+    /// Creates a bound-result batch.
+    #[must_use]
+    pub const fn new(tensor_ids: Box<[i32]>) -> Self {
+        Self { tensor_ids }
+    }
+}
+
+/// Failed bound-result application with input returned unchanged.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ApplyBoundEffectResultsError {
+    pub(crate) error: Error,
+    pub(crate) tensor_ids: Box<[i32]>,
+}
+
+impl ApplyBoundEffectResultsError {
+    pub(crate) const fn new(error: Error, tensor_ids: Box<[i32]>) -> Self {
+        Self { error, tensor_ids }
+    }
+
+    /// Returns the failure classification.
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+
+    /// Returns the unchanged result allocation.
+    #[must_use]
+    pub fn into_tensor_ids(self) -> Box<[i32]> {
+        self.tensor_ids
+    }
+}
+
+/// One owned backend result transferred into tensor residency.
+#[derive(Debug, Eq, PartialEq)]
+pub struct OwnedEffectResult {
+    pub(crate) tensor_id: i32,
+    pub(crate) bytes: Box<[u8]>,
+}
+
+impl OwnedEffectResult {
+    /// Creates one owned backend result.
+    #[must_use]
+    pub const fn new(tensor_id: i32, bytes: Box<[u8]>) -> Self {
+        Self { tensor_id, bytes }
+    }
+
+    /// Returns the tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(&self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the result bytes.
+    #[must_use]
+    pub const fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+/// Apply an ordered batch of owned backend results.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ApplyOwnedEffectResults {
+    pub(crate) results: Box<[OwnedEffectResult]>,
+}
+
+impl ApplyOwnedEffectResults {
+    /// Creates an owned-result batch.
+    #[must_use]
+    pub const fn new(results: Box<[OwnedEffectResult]>) -> Self {
+        Self { results }
+    }
+}
+
+/// Failed owned-result application with input returned unchanged.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ApplyOwnedEffectResultsError {
+    pub(crate) error: Error,
+    pub(crate) results: Box<[OwnedEffectResult]>,
+}
+
+impl ApplyOwnedEffectResultsError {
+    pub(crate) const fn new(error: Error, results: Box<[OwnedEffectResult]>) -> Self {
+        Self { error, results }
+    }
+
+    /// Returns the failure classification.
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+
+    /// Returns the unchanged result allocation.
+    #[must_use]
+    pub fn into_results(self) -> Box<[OwnedEffectResult]> {
+        self.results
+    }
+}
+
+/// Backend effect failure details preserved for typed dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum EffectError {
+    /// Backend rejected the request.
+    Backend,
+    /// Backend could not allocate required storage.
+    OutOfMemory,
+    /// Backend returned malformed or insufficient data.
+    InvalidData,
+    /// Backend-specific error code.
+    Unknown(u16),
+}
+
+/// Report one failed planned effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ApplyEffectError {
+    pub(crate) tensor_id: i32,
+    pub(crate) error: EffectError,
+}
+
+impl ApplyEffectError {
+    /// Creates a backend-error result.
+    #[must_use]
+    pub const fn new(tensor_id: i32, error: EffectError) -> Self {
+        Self { tensor_id, error }
     }
 }
 
@@ -280,5 +730,50 @@ impl<D> Event<D> for CaptureTensorState {
 
     fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
         actor.capture_tensor_state(self)
+    }
+}
+
+impl sealed::Sealed for BindStorage {}
+impl<D> Event<D> for BindStorage {
+    type Output = Result<BindStorageDone, BindStorageError>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.bind_storage(self)
+    }
+}
+
+impl sealed::Sealed for PlanLoad {}
+impl<D> Event<D> for PlanLoad {
+    type Output = Result<PlanLoadDone, PlanLoadError>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.plan_load(self)
+    }
+}
+
+impl sealed::Sealed for ApplyBoundEffectResults {}
+impl<D> Event<D> for ApplyBoundEffectResults {
+    type Output = Result<(), ApplyBoundEffectResultsError>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.apply_bound_effect_results(self)
+    }
+}
+
+impl sealed::Sealed for ApplyOwnedEffectResults {}
+impl<D> Event<D> for ApplyOwnedEffectResults {
+    type Output = Result<(), ApplyOwnedEffectResultsError>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.apply_owned_effect_results(self)
+    }
+}
+
+impl sealed::Sealed for ApplyEffectError {}
+impl<D> Event<D> for ApplyEffectError {
+    type Output = Result<(), Error>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.apply_effect_error(self)
     }
 }
