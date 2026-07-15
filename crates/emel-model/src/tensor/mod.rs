@@ -1,4 +1,11 @@
-//! Model tensor SM scaffold (`emel.cpp/src/emel/model/tensor/`).
+//! Ownership-safe tensor residency actor.
 
-pub mod sm;
+mod actor;
+pub mod event;
+mod sm;
 pub mod window;
+
+pub use actor::Store;
+
+#[cfg(test)]
+mod tests;

@@ -1,6 +1,11 @@
-//! Model loading and tensor lifecycle state machines (scaffold).
+//! Model loading and reusable tensor lifecycle actors.
 //!
-//! Generated SM modules are `pub(crate)` until actions/guards/contexts are ported.
+//! The tensor actor is intentionally private until the complete model-domain
+//! cutover is ready.
+//!
+//! ```compile_fail
+//! use emel_model::tensor::Store;
+//! ```
 
 #![forbid(unsafe_code)]
 #![allow(missing_docs, dead_code)]

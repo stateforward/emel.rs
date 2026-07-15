@@ -9,9 +9,8 @@ fn loader_sm_table_is_constructible() {
 
 #[test]
 fn tensor_sm_table_is_constructible() {
-    use crate::tensor::sm::{ModelTensorContext, ModelTensorStateMachine, ModelTensorStates};
-    let sm = ModelTensorStateMachine::new(ModelTensorContext::default());
-    assert!(sm.is(&ModelTensorStates::Ready));
+    let store = crate::tensor::Store::new(1).unwrap();
+    assert!(store.is_ready());
 }
 
 #[test]
@@ -27,11 +26,15 @@ fn window_sm_table_is_constructible() {
 fn model_sm_sources_use_sml_and_cite_cpp() {
     for src in [
         include_str!("loader/sm.rs"),
-        include_str!("tensor/sm.rs"),
         include_str!("tensor/window/sm.rs"),
     ] {
         assert!(src.contains("sml!"));
         assert!(src.contains("emel.cpp/src/emel/model"));
         assert!(src.contains("TODO"));
     }
+
+    let tensor = include_str!("tensor/sm.rs");
+    assert!(tensor.contains("sml!"));
+    assert!(tensor.contains("emel.cpp/src/emel/model"));
+    assert!(!tensor.contains("TODO"));
 }
