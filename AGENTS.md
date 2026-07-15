@@ -373,6 +373,35 @@ NEVER expose mutable internal state through public references.
 NEVER use `unsafe` unless a safe implementation cannot satisfy the required
 contract and the user has approved the boundary.
 
+ALWAYS use a stable safe Rust primitive when it satisfies the required
+semantics, ownership, portability, and performance contract.
+
+ALWAYS evaluate safe standard-library APIs and appropriately maintained safe
+wrappers before proposing an EMEL-owned unsafe boundary. Record the candidates
+and the exact contract gap that disqualifies each one.
+
+NEVER introduce EMEL-owned `unsafe` merely to mirror reference code, reduce
+implementation effort, avoid a dependency, shorten compile time, expose an
+implementation-only native result, or make parity tooling easier.
+
+A reference implementation's use of raw pointers, native handles, foreign
+functions, or unchecked operations is NEVER evidence that Rust requires the
+same unsafe surface. Port the required behavior through safe Rust whenever a
+safe primitive can express it.
+
+Treat safe wrappers semantically rather than syntactically. ALWAYS verify the
+pinned wrapper's implementation, maintenance state, platform behavior,
+ownership contract, failure semantics, and runtime path before relying on it
+at a safety boundary.
+
+ONLY place the irreducible native operation inside an approved unsafe block.
+Keep validation, arithmetic, ownership transitions, error classification, and
+orchestration in safe Rust whenever possible.
+
+If a stable safe primitive later satisfies an approved unsafe operation's full
+contract, ALWAYS migrate to it and remove the corresponding EMEL-owned unsafe
+surface.
+
 Every `unsafe` block MUST document its safety invariants and have focused tests
 that exercise the boundary.
 
