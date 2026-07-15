@@ -8,7 +8,13 @@ use emel_io::read::event::{
     Callback, Error, ReadTensor, ReadTensorBatch, ReadTensorBatchDone, ReadTensorBatchError,
     ReadTensorDone, ReadTensorError, SourceError, Target, TensorRead,
 };
+#[cfg(unix)]
+use libc as _;
+#[cfg(unix)]
+use rustix as _;
 use sml as _;
+#[cfg(windows)]
+use windows_sys as _;
 
 const MAX_READ_BATCH_TENSORS: usize = 65_536;
 

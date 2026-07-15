@@ -51,6 +51,9 @@ jobs:
       - run: cargo lint
       - run: cargo clippy --manifest-path fuzz/Cargo.toml --bins -- -D warnings
       - run: cargo test-all
+      - run: cargo test --locked --workspace --doc --all-features
+      - run: scripts/tests/bench_io_read_artifact.sh
+      - run: scripts/tests/bench_io_mmap_artifact.sh
       - name: Coverage gate (90% lines, 50% branches)
         run: scripts/coverage.sh
       - run: scripts/paritychecker.sh
@@ -87,3 +90,14 @@ jobs:
           name: gguf-fuzz-artifacts-${{ github.sha }}
           path: fuzz/artifacts
           if-no-files-found: ignore
+
+  mmap-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          components: clippy,rustfmt
+      - run: cargo test --locked -p emel-io --lib mmap
+      - run: cargo test --locked -p emel-io --test mmap
+      - run: cargo test --locked -p emel-io --test mmap_architecture

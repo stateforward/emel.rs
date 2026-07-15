@@ -3,7 +3,13 @@
 #[path = "../examples/read_parity.rs"]
 mod parity;
 
+#[cfg(unix)]
+use libc as _;
+#[cfg(unix)]
+use rustix as _;
 use sml as _;
+#[cfg(windows)]
+use windows_sys as _;
 
 const SNAPSHOT: &str = include_str!("../../../snapshots/parity/io-read/manifest.txt");
 

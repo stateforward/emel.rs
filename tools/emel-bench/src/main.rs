@@ -2,10 +2,16 @@
 
 use std::env;
 use std::hint::black_box;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use emel_gguf::Loader;
 use emel_gguf::event::{Bind, Error, Load, Parse, Probe};
+use emel_io::mmap::Mapper;
+use emel_io::mmap::event::{
+    AdviseDontNeed, AdviseSequential, AdviseWillNeed, MapTensor, MappingCallback, MmapSource,
+    ReleaseMapping, WithMapping,
+};
 use emel_io::read::Reader;
 use emel_io::read::event::ReadTensor;
 
@@ -17,6 +23,7 @@ const VERSION: u32 = 3;
 enum Suite {
     Gguf,
     IoRead,
+    IoMmap,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,6 +62,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match suite {
         Suite::Gguf => run_gguf(config)?,
         Suite::IoRead => run_io_read(config)?,
+        Suite::IoMmap => run_io_mmap(config)?,
     }
     Ok(())
 }
@@ -121,6 +129,106 @@ fn run_io_read(config: Config) -> Result<(), emel_io::read::event::Error> {
     Ok(())
 }
 
+fn run_io_mmap(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    const FIXTURE_BYTES: usize = 1_048_576;
+    println!("# source_repository: stateforward/emel.cpp");
+    println!("# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
+    println!("# source_tree: ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa");
+    println!(
+        "# benchmark_fixture: public file-backed mmap lifecycle, file_bytes=1048576 pattern=incrementing_u8 offset=0 cases=16384,1048576"
+    );
+    println!(
+        "# benchmark_operations: source open, map, full immutable access checksum, sequential advice, will-need advice, don't-need advice, release"
+    );
+    println!(
+        "# benchmark_validation: typed outcomes and handle length checked each iteration, full mapped FNV-1a equals precomputed fixture checksum"
+    );
+    println!("# native_semantics_complete: true");
+    println!("# missing_native_semantics: none");
+    println!("# contract_delta: rust_mmap_source_capability");
+
+    let external_fixture = env::var_os("EMEL_IO_MMAP_BENCH_FIXTURE").is_some();
+    let fixture = mmap_fixture_path();
+    let bytes = (0_u8..=255).cycle().take(FIXTURE_BYTES).collect::<Vec<_>>();
+    let checksum_16kib = fnv1a64(&bytes[..16_384]);
+    let checksum_1mib = fnv1a64(&bytes);
+    std::fs::write(&fixture, &bytes)?;
+    let mut mapper = Mapper::new();
+    let timing_16kib = benchmark_mmap_case(&mut mapper, &fixture, 16_384, checksum_16kib, config)?;
+    let timing_1mib =
+        benchmark_mmap_case(&mut mapper, &fixture, FIXTURE_BYTES, checksum_1mib, config)?;
+    if !external_fixture {
+        let _ = std::fs::remove_file(&fixture);
+    }
+    print_case("io/mmap/rust/lifecycle_16kib", timing_16kib, config);
+    print_case("io/mmap/rust/lifecycle_1mib", timing_1mib, config);
+    Ok(())
+}
+
+fn benchmark_mmap_case(
+    mapper: &mut Mapper,
+    fixture: &std::path::Path,
+    mapping_bytes: usize,
+    expected_checksum: u64,
+    config: Config,
+) -> Result<f64, emel_io::mmap::event::Error> {
+    let mut final_checksum = 0_u64;
+    let timing = measure(config, || {
+        let source = open_benchmark_source(fixture)?;
+        let done = mapper.process_event(MapTensor::new(71, source, 0, mapping_bytes as u64))?;
+        if done.len() != mapping_bytes as u64 {
+            return Err(emel_io::mmap::event::Error::InternalError);
+        }
+        let mut checksum = 0_u64;
+        let mut observe = |mapped: &[u8]| checksum = fnv1a64(mapped);
+        let callback = MappingCallback::new(&mut observe);
+        mapper.process_event(WithMapping::new(71, done.handle(), &callback))?;
+        mapper.process_event(AdviseSequential::new(
+            71,
+            done.handle(),
+            0,
+            mapping_bytes as u64,
+        ))?;
+        mapper.process_event(AdviseWillNeed::new(71, done.handle(), 0, 4_096))?;
+        mapper.process_event(AdviseDontNeed::new(71, done.handle(), 0, 4_096))?;
+        mapper.process_event(ReleaseMapping::new(71, done.handle()))?;
+        if checksum != expected_checksum {
+            return Err(emel_io::mmap::event::Error::InternalError);
+        }
+        final_checksum = black_box(checksum);
+        Ok(())
+    })?;
+    if final_checksum != expected_checksum {
+        return Err(emel_io::mmap::event::Error::InternalError);
+    }
+    Ok(timing)
+}
+
+#[allow(
+    unsafe_code,
+    reason = "the benchmark fixture is immutable from capability construction through every measured release"
+)]
+fn open_benchmark_source(
+    fixture: &std::path::Path,
+) -> Result<MmapSource, emel_io::mmap::event::Error> {
+    // SAFETY: fixture construction finishes before this call, measurement only
+    // reads it, and every mapping is released before the capability is dropped.
+    unsafe { MmapSource::open(fixture) }
+}
+
+fn mmap_fixture_path() -> PathBuf {
+    env::var_os("EMEL_IO_MMAP_BENCH_FIXTURE").map_or_else(
+        || env::temp_dir().join(format!("emel-io-mmap-bench-{}.bin", std::process::id())),
+        PathBuf::from,
+    )
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
     let mut config = Config::default();
     let mut suite = None;
@@ -133,9 +241,13 @@ fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
             suite = Some(Suite::IoRead);
             continue;
         }
+        if argument == "io-mmap" {
+            suite = Some(Suite::IoMmap);
+            continue;
+        }
         if argument == "--help" || argument == "-h" {
             println!(
-                "usage: emel-bench [gguf|io-read] [--iterations=N] [--runs=N] \
+                "usage: emel-bench [gguf|io-read|io-mmap] [--iterations=N] [--runs=N] \
                  [--warmup-iterations=N]"
             );
             std::process::exit(0);

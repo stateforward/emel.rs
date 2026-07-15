@@ -1,7 +1,13 @@
 //! Static architecture regressions for the maintained read machines.
 
 use emel_io as _;
+#[cfg(unix)]
+use libc as _;
+#[cfg(unix)]
+use rustix as _;
 use sml as _;
+#[cfg(windows)]
+use windows_sys as _;
 
 #[test]
 fn batch_failure_selection_stays_out_of_actions() {

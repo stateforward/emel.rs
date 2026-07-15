@@ -1,1265 +1,671 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Private explicit mapper orchestration.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
+    reason = "stateforward-sml generated state tokens intentionally derive PartialEq"
 )]
+
+use core::cell::{Cell, RefCell};
 
 use sml::sml;
 
-// --- machine IoMmap from emel.cpp/src/emel/io/mmap/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailAdviseMappingRuntime;
+use super::event::{
+    AdviceRequest, Error, MapDone, MapTensor, MappingCallback, ReleaseMapping, WithMapping,
+};
+use super::platform::{Platform, PlatformError, Region, SetupError};
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailMapTensorRuntime;
+const MAX_FILE_INDEX: u16 = 65_534;
+const MAX_MAPPING_BYTES: u64 = 1_u64 << 40;
+const MAX_MAPPINGS: usize = 256;
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailReleaseMappingRuntime;
+struct Slot {
+    tensor_id: i32,
+    region: Option<Region>,
+}
+
+pub(super) struct Context<P: Platform> {
+    platform: P,
+    slots: [Slot; MAX_MAPPINGS],
+    free_stack: [u32; MAX_MAPPINGS],
+    free_count: usize,
+}
+
+impl<P: Platform> Context<P> {
+    fn new(platform: P) -> Self {
+        Self {
+            platform,
+            slots: core::array::from_fn(|_| Slot {
+                tensor_id: -1,
+                region: None,
+            }),
+            free_stack: core::array::from_fn(|index| {
+                u32::try_from(MAX_MAPPINGS - 1 - index).expect("mapping capacity fits u32")
+            }),
+            free_count: MAX_MAPPINGS,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct MapRuntime<'dispatch, 'data> {
+    request: &'data MapTensor,
+    handle: &'dispatch Cell<u32>,
+    setup: &'dispatch RefCell<Option<Result<Region, SetupError>>>,
+    cleanup: &'dispatch Cell<Option<Result<(), PlatformError>>>,
+    result: &'dispatch Cell<Result<MapDone, Error>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct ReleaseRuntime<'dispatch> {
+    request: ReleaseMapping,
+    region: &'dispatch RefCell<Option<Region>>,
+    native: &'dispatch Cell<Option<Result<(), PlatformError>>>,
+    result: &'dispatch Cell<Result<(), Error>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AdviceRuntime<'dispatch> {
+    request: AdviceRequest,
+    region: &'dispatch RefCell<Option<Region>>,
+    native: &'dispatch Cell<Option<Result<(), PlatformError>>>,
+    result: &'dispatch Cell<Result<(), Error>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct AccessRuntime<'dispatch, 'data> {
+    tensor_id: i32,
+    handle: u32,
+    callback: &'data MappingCallback<'data>,
+    callback_result: &'dispatch Cell<Option<Result<(), ()>>>,
+    result: &'dispatch Cell<Result<(), Error>>,
+}
 
 sml! {
     IoMmap {
-        "state_request_decision"_s <= *"state_ready"_s + event<DetailMapTensorRuntime> / effect_begin_map_tensor,
-        "state_file_path_decision"_s <= "state_request_decision"_s + completion<DetailMapTensorRuntime> [request_span_valid],
-        "state_invalid_request_error_decision"_s <= "state_request_decision"_s + completion<DetailMapTensorRuntime> [request_span_invalid] / effect_mark_invalid_request_from_state_request_decision,
-        "state_file_decision"_s <= "state_file_path_decision"_s + completion<DetailMapTensorRuntime> [file_path_valid],
-        "state_invalid_request_error_decision"_s <= "state_file_path_decision"_s + completion<DetailMapTensorRuntime> [file_path_invalid] / effect_mark_invalid_request_from_state_file_path_decision,
-        "state_offset_decision"_s <= "state_file_decision"_s + completion<DetailMapTensorRuntime> [file_index_valid],
-        "state_unsupported_resource_error_decision"_s <= "state_file_decision"_s + completion<DetailMapTensorRuntime> [file_index_invalid] / effect_mark_unsupported_file,
-        "state_length_decision"_s <= "state_offset_decision"_s + completion<DetailMapTensorRuntime> [offset_aligned],
-        "state_unsupported_resource_error_decision"_s <= "state_offset_decision"_s + completion<DetailMapTensorRuntime> [offset_unaligned] / effect_mark_unsupported_offset,
-        "state_layout_decision"_s <= "state_length_decision"_s + completion<DetailMapTensorRuntime> [length_within_bounds],
-        "state_unsupported_resource_error_decision"_s <= "state_length_decision"_s + completion<DetailMapTensorRuntime> [length_overflow] / effect_mark_unsupported_length,
-        "state_platform_decision"_s <= "state_layout_decision"_s + completion<DetailMapTensorRuntime> [layout_supported],
-        "state_unsupported_resource_error_decision"_s <= "state_layout_decision"_s + completion<DetailMapTensorRuntime> [layout_unsupported] / effect_mark_unsupported_layout,
-        "state_slot_reservation_decision"_s <= "state_platform_decision"_s + completion<DetailMapTensorRuntime> [platform_mmap_supported],
-        "state_unsupported_platform_error_decision"_s <= "state_platform_decision"_s + completion<DetailMapTensorRuntime> [platform_mmap_unsupported] / effect_mark_unsupported_platform,
-        "state_file_open_decision"_s <= "state_slot_reservation_decision"_s + completion<DetailMapTensorRuntime> [slot_capacity_available] / effect_reserve_top_free_slot_then_attempt_open,
-        "state_resource_exhausted_error_decision"_s <= "state_slot_reservation_decision"_s + completion<DetailMapTensorRuntime> [slot_pool_exhausted] / effect_mark_resource_exhausted,
-        "state_file_size_decision"_s <= "state_file_open_decision"_s + completion<DetailMapTensorRuntime> [file_open_succeeded] / effect_measure_open_file_size,
-        "state_file_open_failed_error_decision"_s <= "state_file_open_decision"_s + completion<DetailMapTensorRuntime> [file_open_failed] / effect_release_reserved_slot_on_open_failure,
-        "state_mapping_decision"_s <= "state_file_size_decision"_s + completion<DetailMapTensorRuntime> [file_span_within_file] / effect_attempt_mapping,
-        "state_unsupported_resource_error_decision"_s <= "state_file_size_decision"_s + completion<DetailMapTensorRuntime> [file_span_exceeds_file] / effect_close_open_resource_and_release_slot_on_file_span_failure,
-        "state_done_callback"_s <= "state_mapping_decision"_s + completion<DetailMapTensorRuntime> [mapping_succeeded] / effect_commit_mapping,
-        "state_mapping_failed_error_decision"_s <= "state_mapping_decision"_s + completion<DetailMapTensorRuntime> [mapping_failed] / effect_close_open_resource_and_release_slot_on_mapping_failure,
-        "state_ready"_s <= "state_done_callback"_s + completion<DetailMapTensorRuntime> / effect_publish_map_tensor_done,
-        "state_error_callback"_s <= "state_invalid_request_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_present] / effect_publish_map_tensor_error_from_state_invalid_request_error_decision,
-        "state_ready"_s <= "state_invalid_request_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_absent] / effect_record_map_tensor_error_from_state_invalid_request_error_decision,
-        "state_error_callback"_s <= "state_unsupported_resource_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_present] / effect_publish_map_tensor_error_from_state_unsupported_resource_error_decision,
-        "state_ready"_s <= "state_unsupported_resource_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_absent] / effect_record_map_tensor_error_from_state_unsupported_resource_error_decision,
-        "state_error_callback"_s <= "state_unsupported_platform_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_present] / effect_publish_map_tensor_error_from_state_unsupported_platform_error_decision,
-        "state_ready"_s <= "state_unsupported_platform_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_absent] / effect_record_map_tensor_error_from_state_unsupported_platform_error_decision,
-        "state_error_callback"_s <= "state_resource_exhausted_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_present] / effect_publish_map_tensor_error_from_state_resource_exhausted_error_decision,
-        "state_ready"_s <= "state_resource_exhausted_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_absent] / effect_record_map_tensor_error_from_state_resource_exhausted_error_decision,
-        "state_error_callback"_s <= "state_file_open_failed_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_present] / effect_publish_map_tensor_error_from_state_file_open_failed_error_decision,
-        "state_ready"_s <= "state_file_open_failed_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_absent] / effect_record_map_tensor_error_from_state_file_open_failed_error_decision,
-        "state_error_callback"_s <= "state_mapping_failed_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_present] / effect_publish_map_tensor_error_from_state_mapping_failed_error_decision,
-        "state_ready"_s <= "state_mapping_failed_error_decision"_s + completion<DetailMapTensorRuntime> [error_callback_absent] / effect_record_map_tensor_error_from_state_mapping_failed_error_decision,
-        "state_ready"_s <= "state_error_callback"_s + completion<DetailMapTensorRuntime> / effect_record_map_tensor_error_from_state_error_callback,
-        "state_release_decision"_s <= "state_ready"_s + event<DetailReleaseMappingRuntime> / effect_begin_release,
-        "state_release_in_use_decision"_s <= "state_release_decision"_s + completion<DetailReleaseMappingRuntime> [release_handle_in_range],
-        "state_release_invalid_handle_error_decision"_s <= "state_release_decision"_s + completion<DetailReleaseMappingRuntime> [release_handle_out_of_range] / effect_mark_release_invalid_handle_from_state_release_decision,
-        "state_unmap_decision"_s <= "state_release_in_use_decision"_s + completion<DetailReleaseMappingRuntime> [release_slot_in_use_owned_by_tensor] / effect_attempt_unmap,
-        "state_release_invalid_handle_error_decision"_s <= "state_release_in_use_decision"_s + completion<DetailReleaseMappingRuntime> [release_slot_not_in_use] / effect_mark_release_invalid_handle_from_state_release_in_use_decision,
-        "state_release_invalid_handle_error_decision"_s <= "state_release_in_use_decision"_s + completion<DetailReleaseMappingRuntime> [release_slot_in_use_not_owned_by_tensor] / effect_mark_release_invalid_handle_from_state_release_in_use_decision,
-        "state_release_publish_done_decision"_s <= "state_unmap_decision"_s + completion<DetailReleaseMappingRuntime> [unmap_succeeded] / effect_release_slot_after_unmap,
-        "state_unmap_failed_error_decision"_s <= "state_unmap_decision"_s + completion<DetailReleaseMappingRuntime> [unmap_failed] / effect_mark_unmap_failed_and_release_slot,
-        "state_release_done_callback"_s <= "state_release_publish_done_decision"_s + completion<DetailReleaseMappingRuntime> [release_done_callback_present] / effect_publish_release_mapping_done,
-        "state_ready"_s <= "state_release_publish_done_decision"_s + completion<DetailReleaseMappingRuntime> [release_done_callback_absent] / effect_record_release_mapping_done_from_state_release_publish_done_decision,
-        "state_ready"_s <= "state_release_done_callback"_s + completion<DetailReleaseMappingRuntime> / effect_record_release_mapping_done_from_state_release_done_callback,
-        "state_release_error_callback"_s <= "state_release_invalid_handle_error_decision"_s + completion<DetailReleaseMappingRuntime> [release_error_callback_present] / effect_publish_release_mapping_error_from_state_release_invalid_handle_error_decision,
-        "state_ready"_s <= "state_release_invalid_handle_error_decision"_s + completion<DetailReleaseMappingRuntime> [release_error_callback_absent] / effect_record_release_mapping_error_from_state_release_invalid_handle_error_decision,
-        "state_release_error_callback"_s <= "state_unmap_failed_error_decision"_s + completion<DetailReleaseMappingRuntime> [release_error_callback_present] / effect_publish_release_mapping_error_from_state_unmap_failed_error_decision,
-        "state_ready"_s <= "state_unmap_failed_error_decision"_s + completion<DetailReleaseMappingRuntime> [release_error_callback_absent] / effect_record_release_mapping_error_from_state_unmap_failed_error_decision,
-        "state_ready"_s <= "state_release_error_callback"_s + completion<DetailReleaseMappingRuntime> / effect_record_release_mapping_error_from_state_release_error_callback,
-        "state_advise_decision"_s <= "state_ready"_s + event<DetailAdviseMappingRuntime> / effect_begin_advise,
-        "state_advise_owned_decision"_s <= "state_advise_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_handle_in_range],
-        "state_advise_invalid_handle_error_decision"_s <= "state_advise_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_handle_out_of_range] / effect_mark_advise_invalid_handle_from_state_advise_decision,
-        "state_advise_range_decision"_s <= "state_advise_owned_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_slot_in_use_owned_by_tensor],
-        "state_advise_invalid_handle_error_decision"_s <= "state_advise_owned_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_slot_unavailable] / effect_mark_advise_invalid_handle_from_state_advise_owned_decision,
-        "state_advise_platform_decision"_s <= "state_advise_range_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_range_within_mapping],
-        "state_advise_invalid_range_error_decision"_s <= "state_advise_range_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_range_outside_mapping] / effect_mark_advise_invalid_range,
-        "state_advise_kind_decision"_s <= "state_advise_platform_decision"_s + completion<DetailAdviseMappingRuntime> [guard_platform_advise_supported],
-        "state_advise_unsupported_platform_error_decision"_s <= "state_advise_platform_decision"_s + completion<DetailAdviseMappingRuntime> [guard_platform_advise_unsupported] / effect_mark_advise_unsupported_platform,
-        "state_advise_attempt_decision"_s <= "state_advise_kind_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_kind_sequential] / effect_attempt_advise_sequential,
-        "state_advise_attempt_decision"_s <= "state_advise_kind_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_kind_willneed] / effect_attempt_advise_willneed,
-        "state_advise_attempt_decision"_s <= "state_advise_kind_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_kind_dontneed] / effect_attempt_advise_dontneed,
-        "state_advise_invalid_kind_error_decision"_s <= "state_advise_kind_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_kind_invalid] / effect_mark_advise_invalid_kind,
-        "state_advise_publish_done_decision"_s <= "state_advise_attempt_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_succeeded] / effect_commit_advise,
-        "state_advise_failed_error_decision"_s <= "state_advise_attempt_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_failed] / effect_mark_advise_failed,
-        "state_advise_done_callback"_s <= "state_advise_publish_done_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_done_callback_present] / effect_publish_advise_mapping_done,
-        "state_ready"_s <= "state_advise_publish_done_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_done_callback_absent] / effect_record_advise_mapping_done_from_state_advise_publish_done_decision,
-        "state_ready"_s <= "state_advise_done_callback"_s + completion<DetailAdviseMappingRuntime> / effect_record_advise_mapping_done_from_state_advise_done_callback,
-        "state_advise_error_callback"_s <= "state_advise_invalid_handle_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_present] / effect_publish_advise_mapping_error_from_state_advise_invalid_handle_error_decision,
-        "state_ready"_s <= "state_advise_invalid_handle_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_absent] / effect_record_advise_mapping_error_from_state_advise_invalid_handle_error_decision,
-        "state_advise_error_callback"_s <= "state_advise_invalid_range_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_present] / effect_publish_advise_mapping_error_from_state_advise_invalid_range_error_decision,
-        "state_ready"_s <= "state_advise_invalid_range_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_absent] / effect_record_advise_mapping_error_from_state_advise_invalid_range_error_decision,
-        "state_advise_error_callback"_s <= "state_advise_unsupported_platform_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_present] / effect_publish_advise_mapping_error_from_state_advise_unsupported_platform_error_decision,
-        "state_ready"_s <= "state_advise_unsupported_platform_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_absent] / effect_record_advise_mapping_error_from_state_advise_unsupported_platform_error_decision,
-        "state_advise_error_callback"_s <= "state_advise_failed_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_present] / effect_publish_advise_mapping_error_from_state_advise_failed_error_decision,
-        "state_ready"_s <= "state_advise_failed_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_absent] / effect_record_advise_mapping_error_from_state_advise_failed_error_decision,
-        "state_advise_error_callback"_s <= "state_advise_invalid_kind_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_present] / effect_publish_advise_mapping_error_from_state_advise_invalid_kind_error_decision,
-        "state_ready"_s <= "state_advise_invalid_kind_error_decision"_s + completion<DetailAdviseMappingRuntime> [guard_advise_error_callback_absent] / effect_record_advise_mapping_error_from_state_advise_invalid_kind_error_decision,
-        "state_ready"_s <= "state_advise_error_callback"_s + completion<DetailAdviseMappingRuntime> / effect_record_advise_mapping_error_from_state_advise_error_callback,
-        "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected_from_state_ready,
-        "state_ready"_s <= "state_request_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_request_decision,
-        "state_ready"_s <= "state_file_path_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_path_decision,
-        "state_ready"_s <= "state_file_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_decision,
-        "state_ready"_s <= "state_offset_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_offset_decision,
-        "state_ready"_s <= "state_length_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_length_decision,
-        "state_ready"_s <= "state_layout_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_layout_decision,
-        "state_ready"_s <= "state_platform_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_platform_decision,
-        "state_ready"_s <= "state_slot_reservation_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_slot_reservation_decision,
-        "state_ready"_s <= "state_file_open_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_open_decision,
-        "state_ready"_s <= "state_file_size_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_size_decision,
-        "state_ready"_s <= "state_mapping_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_mapping_decision,
-        "state_ready"_s <= "state_done_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_done_callback,
-        "state_ready"_s <= "state_invalid_request_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_invalid_request_error_decision,
-        "state_ready"_s <= "state_unsupported_resource_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_unsupported_resource_error_decision,
-        "state_ready"_s <= "state_unsupported_platform_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_unsupported_platform_error_decision,
-        "state_ready"_s <= "state_resource_exhausted_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_resource_exhausted_error_decision,
-        "state_ready"_s <= "state_file_open_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_file_open_failed_error_decision,
-        "state_ready"_s <= "state_mapping_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_mapping_failed_error_decision,
-        "state_ready"_s <= "state_error_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_error_callback,
-        "state_ready"_s <= "state_release_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_release_decision,
-        "state_ready"_s <= "state_release_in_use_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_release_in_use_decision,
-        "state_ready"_s <= "state_unmap_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_unmap_decision,
-        "state_ready"_s <= "state_release_publish_done_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_release_publish_done_decision,
-        "state_ready"_s <= "state_release_done_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_release_done_callback,
-        "state_ready"_s <= "state_release_invalid_handle_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_release_invalid_handle_error_decision,
-        "state_ready"_s <= "state_unmap_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_unmap_failed_error_decision,
-        "state_ready"_s <= "state_release_error_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_release_error_callback,
-        "state_ready"_s <= "state_advise_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_decision,
-        "state_ready"_s <= "state_advise_owned_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_owned_decision,
-        "state_ready"_s <= "state_advise_range_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_range_decision,
-        "state_ready"_s <= "state_advise_platform_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_platform_decision,
-        "state_ready"_s <= "state_advise_kind_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_kind_decision,
-        "state_ready"_s <= "state_advise_attempt_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_attempt_decision,
-        "state_ready"_s <= "state_advise_publish_done_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_publish_done_decision,
-        "state_ready"_s <= "state_advise_done_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_done_callback,
-        "state_ready"_s <= "state_advise_invalid_handle_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_invalid_handle_error_decision,
-        "state_ready"_s <= "state_advise_invalid_range_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_invalid_range_error_decision,
-        "state_ready"_s <= "state_advise_invalid_kind_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_invalid_kind_error_decision,
-        "state_ready"_s <= "state_advise_unsupported_platform_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_unsupported_platform_error_decision,
-        "state_ready"_s <= "state_advise_failed_error_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_failed_error_decision,
-        "state_ready"_s <= "state_advise_error_callback"_s + unexpected_event<_> / effect_on_unexpected_from_state_advise_error_callback,
+        // Pure request validation; setup is structurally unreachable here.
+        "state_request_decision"_s <= *"state_ready"_s + Map(MapRuntime<'dispatch, 'data>),
+        "state_resource_decision"_s <= "state_request_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_request_valid],
+        "state_ready"_s <= "state_request_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_request_invalid] / effect_invalid_request,
+        "state_platform_decision"_s <= "state_resource_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_resource_valid],
+        "state_ready"_s <= "state_resource_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_resource_invalid] / effect_unsupported_resource,
+        "state_capacity_decision"_s <= "state_platform_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_platform_supported],
+        "state_ready"_s <= "state_platform_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_platform_unsupported] / effect_unsupported_platform,
+
+        // Capacity-selected native setup and explicit result classification.
+        "state_setup_decision"_s <= "state_capacity_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_capacity_available] / effect_reserve_and_prepare_mapping,
+        "state_ready"_s <= "state_capacity_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_capacity_exhausted] / effect_resource_exhausted_before_map,
+        "state_setup_view_decision"_s <= "state_setup_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_native_succeeded],
+        "state_ready"_s <= "state_setup_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_mapping_failed] / effect_mapping_failed,
+        "state_ready"_s <= "state_setup_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_platform_failed] / effect_unsupported_platform_setup,
+        "state_ready"_s <= "state_setup_view_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_view_representable] / effect_commit_mapping,
+        "state_setup_cleanup_decision"_s <= "state_setup_view_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_view_unrepresentable] / effect_release_unrepresentable_mapping,
+        "state_ready"_s <= "state_setup_cleanup_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_cleanup_succeeded] / effect_finish_unrepresentable_mapping,
+        "state_ready"_s <= "state_setup_cleanup_decision"_s + completion<Map>(MapRuntime<'dispatch, 'data>) [guard_setup_cleanup_failed] / effect_abort_unrepresentable_cleanup,
+
+        // Release ownership transfer and native result classification.
+        "state_release_owner_decision"_s <= "state_ready"_s + Release(ReleaseRuntime<'dispatch>),
+        "state_release_native_decision"_s <= "state_release_owner_decision"_s + completion<Release>(ReleaseRuntime<'dispatch>) [guard_release_owned] / effect_release_native,
+        "state_ready"_s <= "state_release_owner_decision"_s + completion<Release>(ReleaseRuntime<'dispatch>) [guard_release_invalid] / effect_release_invalid,
+        "state_ready"_s <= "state_release_native_decision"_s + completion<Release>(ReleaseRuntime<'dispatch>) [guard_release_succeeded] / effect_finish_release,
+        "state_ready"_s <= "state_release_native_decision"_s + completion<Release>(ReleaseRuntime<'dispatch>) [guard_release_failed] / effect_restore_release_failure,
+
+        // Sequential advice validation and ownership transfer.
+        "state_sequential_owner_decision"_s <= "state_ready"_s + Sequential(AdviceRuntime<'dispatch>),
+        "state_sequential_range_decision"_s <= "state_sequential_owner_decision"_s + completion<Sequential>(AdviceRuntime<'dispatch>) [guard_sequential_owned],
+        "state_ready"_s <= "state_sequential_owner_decision"_s + completion<Sequential>(AdviceRuntime<'dispatch>) [guard_sequential_invalid_owner] / effect_sequential_invalid_owner,
+        "state_sequential_native_decision"_s <= "state_sequential_range_decision"_s + completion<Sequential>(AdviceRuntime<'dispatch>) [guard_sequential_range_valid] / effect_advise_sequential_native,
+        "state_ready"_s <= "state_sequential_range_decision"_s + completion<Sequential>(AdviceRuntime<'dispatch>) [guard_sequential_range_invalid] / effect_sequential_invalid_range,
+        "state_ready"_s <= "state_sequential_native_decision"_s + completion<Sequential>(AdviceRuntime<'dispatch>) [guard_advice_succeeded] / effect_restore_advice_success,
+        "state_ready"_s <= "state_sequential_native_decision"_s + completion<Sequential>(AdviceRuntime<'dispatch>) [guard_advice_failed] / effect_restore_advice_failure,
+
+        // Will-need advice validation and ownership transfer.
+        "state_will_need_owner_decision"_s <= "state_ready"_s + WillNeed(AdviceRuntime<'dispatch>),
+        "state_will_need_range_decision"_s <= "state_will_need_owner_decision"_s + completion<WillNeed>(AdviceRuntime<'dispatch>) [guard_will_need_owned],
+        "state_ready"_s <= "state_will_need_owner_decision"_s + completion<WillNeed>(AdviceRuntime<'dispatch>) [guard_will_need_invalid_owner] / effect_will_need_invalid_owner,
+        "state_will_need_native_decision"_s <= "state_will_need_range_decision"_s + completion<WillNeed>(AdviceRuntime<'dispatch>) [guard_will_need_range_valid] / effect_advise_will_need_native,
+        "state_ready"_s <= "state_will_need_range_decision"_s + completion<WillNeed>(AdviceRuntime<'dispatch>) [guard_will_need_range_invalid] / effect_will_need_invalid_range,
+        "state_ready"_s <= "state_will_need_native_decision"_s + completion<WillNeed>(AdviceRuntime<'dispatch>) [guard_advice_succeeded] / effect_restore_advice_success,
+        "state_ready"_s <= "state_will_need_native_decision"_s + completion<WillNeed>(AdviceRuntime<'dispatch>) [guard_advice_failed] / effect_restore_advice_failure,
+
+        // Don't-need advice validation and ownership transfer.
+        "state_dont_need_owner_decision"_s <= "state_ready"_s + DontNeed(AdviceRuntime<'dispatch>),
+        "state_dont_need_range_decision"_s <= "state_dont_need_owner_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_dont_need_owned],
+        "state_ready"_s <= "state_dont_need_owner_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_dont_need_invalid_owner] / effect_dont_need_invalid_owner,
+        "state_dont_need_native_decision"_s <= "state_dont_need_range_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_dont_need_range_valid] / effect_advise_dont_need_native,
+        "state_ready"_s <= "state_dont_need_range_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_dont_need_range_invalid] / effect_dont_need_invalid_range,
+        "state_ready"_s <= "state_dont_need_native_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_advice_succeeded] / effect_restore_advice_success,
+        "state_ready"_s <= "state_dont_need_native_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_advice_failed] / effect_restore_advice_failure,
+
+        // Immediate immutable callback access; panic is captured and explicitly classified.
+        "state_access_owner_decision"_s <= "state_ready"_s + Access(AccessRuntime<'dispatch, 'data>),
+        "state_access_callback_decision"_s <= "state_access_owner_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_owned] / effect_invoke_access,
+        "state_ready"_s <= "state_access_owner_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_invalid] / effect_access_invalid,
+        "state_ready"_s <= "state_access_callback_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_succeeded] / effect_access_succeeded,
+        "state_ready"_s <= "state_access_callback_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_panicked] / effect_access_panicked,
+
+        // Explicit unexpected events preserve every decision state.
+        "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_request_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_resource_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_platform_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_setup_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_setup_view_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_setup_cleanup_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_capacity_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_release_owner_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_release_native_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_sequential_owner_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_sequential_range_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_sequential_native_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_will_need_owner_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_will_need_range_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_will_need_native_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_dont_need_owner_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_dont_need_range_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_dont_need_native_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_access_owner_decision"_s + unexpected_event<_> / effect_unexpected,
+        "state_ready"_s <= "state_access_callback_decision"_s + unexpected_event<_> / effect_unexpected,
     }
 }
 
-/// Context for `IoMmap` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
-pub struct IoMmapContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+pub(super) struct MapperCore<P: Platform> {
+    machine: IoMmapStateMachine<Context<P>>,
 }
 
-impl IoMmapStateMachineContext for IoMmapContext {
-    fn effect_attempt_advise_dontneed(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_attempt_advise_dontneed
-        todo!(
-            "TODO: port action `effect_attempt_advise_dontneed` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_attempt_advise_sequential(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_attempt_advise_sequential
-        todo!(
-            "TODO: port action `effect_attempt_advise_sequential` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_attempt_advise_willneed(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_attempt_advise_willneed
-        todo!(
-            "TODO: port action `effect_attempt_advise_willneed` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_attempt_mapping(&mut self, _event: &DetailMapTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_attempt_mapping
-        todo!(
-            "TODO: port action `effect_attempt_mapping` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_attempt_unmap(&mut self, _event: &DetailReleaseMappingRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_attempt_unmap
-        todo!("TODO: port action `effect_attempt_unmap` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_begin_advise(&mut self, _event: &DetailAdviseMappingRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_begin_advise
-        todo!("TODO: port action `effect_begin_advise` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_begin_map_tensor(&mut self, _event: &DetailMapTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_begin_map_tensor
-        todo!(
-            "TODO: port action `effect_begin_map_tensor` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_begin_release(&mut self, _event: &DetailReleaseMappingRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_begin_release
-        todo!("TODO: port action `effect_begin_release` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_close_open_resource_and_release_slot_on_file_span_failure(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_close_open_resource_and_release_slot_on_file_span_failure
-        todo!(
-            "TODO: port action `effect_close_open_resource_and_release_slot_on_file_span_failure` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_close_open_resource_and_release_slot_on_mapping_failure(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_close_open_resource_and_release_slot_on_mapping_failure
-        todo!(
-            "TODO: port action `effect_close_open_resource_and_release_slot_on_mapping_failure` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_commit_advise(&mut self, _event: &DetailAdviseMappingRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_commit_advise
-        todo!("TODO: port action `effect_commit_advise` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_commit_mapping(&mut self, _event: &DetailMapTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_commit_mapping
-        todo!(
-            "TODO: port action `effect_commit_mapping` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_advise_failed(&mut self, _event: &DetailAdviseMappingRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_advise_failed
-        todo!(
-            "TODO: port action `effect_mark_advise_failed` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_advise_invalid_handle_from_state_advise_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_advise_invalid_handle
-        todo!(
-            "TODO: port action `effect_mark_advise_invalid_handle` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_advise_invalid_handle_from_state_advise_owned_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_advise_invalid_handle
-        todo!(
-            "TODO: port action `effect_mark_advise_invalid_handle` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_advise_invalid_kind(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_advise_invalid_kind
-        todo!(
-            "TODO: port action `effect_mark_advise_invalid_kind` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_advise_invalid_range(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_advise_invalid_range
-        todo!(
-            "TODO: port action `effect_mark_advise_invalid_range` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_advise_unsupported_platform(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_advise_unsupported_platform
-        todo!(
-            "TODO: port action `effect_mark_advise_unsupported_platform` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_invalid_request_from_state_file_path_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_invalid_request
-        todo!(
-            "TODO: port action `effect_mark_invalid_request` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_invalid_request_from_state_request_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_invalid_request
-        todo!(
-            "TODO: port action `effect_mark_invalid_request` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_release_invalid_handle_from_state_release_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_release_invalid_handle
-        todo!(
-            "TODO: port action `effect_mark_release_invalid_handle` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_release_invalid_handle_from_state_release_in_use_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_release_invalid_handle
-        todo!(
-            "TODO: port action `effect_mark_release_invalid_handle` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_resource_exhausted(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_resource_exhausted
-        todo!(
-            "TODO: port action `effect_mark_resource_exhausted` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_unmap_failed_and_release_slot(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_unmap_failed_and_release_slot
-        todo!(
-            "TODO: port action `effect_mark_unmap_failed_and_release_slot` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_file(&mut self, _event: &DetailMapTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_unsupported_file
-        todo!(
-            "TODO: port action `effect_mark_unsupported_file` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_layout(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_unsupported_layout
-        todo!(
-            "TODO: port action `effect_mark_unsupported_layout` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_length(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_unsupported_length
-        todo!(
-            "TODO: port action `effect_mark_unsupported_length` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_offset(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_unsupported_offset
-        todo!(
-            "TODO: port action `effect_mark_unsupported_offset` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_mark_unsupported_platform(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_mark_unsupported_platform
-        todo!(
-            "TODO: port action `effect_mark_unsupported_platform` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_measure_open_file_size(&mut self, _event: &DetailMapTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_measure_open_file_size
-        todo!(
-            "TODO: port action `effect_measure_open_file_size` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_on_unexpected_from_state_advise_attempt_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_done_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_error_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_failed_error_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_invalid_handle_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_invalid_kind_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_invalid_range_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_kind_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_owned_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_platform_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_publish_done_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_range_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_advise_unsupported_platform_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_done_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_error_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_open_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_open_failed_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_path_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_file_size_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_invalid_request_error_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_layout_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_length_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_mapping_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_mapping_failed_error_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_offset_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_platform_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_release_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_release_done_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_release_error_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_release_in_use_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_release_invalid_handle_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_release_publish_done_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_resource_exhausted_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_slot_reservation_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_unmap_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_unmap_failed_error_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_unsupported_platform_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_on_unexpected_from_state_unsupported_resource_error_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_on_unexpected
-        todo!("TODO: port action `effect_on_unexpected` from emel.cpp/src/emel/io/mmap/actions.hpp")
-    }
-    fn effect_publish_advise_mapping_done(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_advise_mapping_done
-        todo!(
-            "TODO: port action `effect_publish_advise_mapping_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_advise_mapping_error_from_state_advise_failed_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_advise_mapping_error_from_state_advise_invalid_handle_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_advise_mapping_error_from_state_advise_invalid_kind_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_advise_mapping_error_from_state_advise_invalid_range_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_advise_mapping_error_from_state_advise_unsupported_platform_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_done(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_done
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_error_from_state_file_open_failed_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_error_from_state_invalid_request_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_error_from_state_mapping_failed_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_error_from_state_resource_exhausted_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_error_from_state_unsupported_platform_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_map_tensor_error_from_state_unsupported_resource_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_map_tensor_error
-        todo!(
-            "TODO: port action `effect_publish_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_release_mapping_done(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_release_mapping_done
-        todo!(
-            "TODO: port action `effect_publish_release_mapping_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_release_mapping_error_from_state_release_invalid_handle_error_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_release_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_release_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_publish_release_mapping_error_from_state_unmap_failed_error_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_publish_release_mapping_error
-        todo!(
-            "TODO: port action `effect_publish_release_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_done_from_state_advise_done_callback(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_done
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_done_from_state_advise_publish_done_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_done
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_error_from_state_advise_error_callback(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_error_from_state_advise_failed_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_error_from_state_advise_invalid_handle_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_error_from_state_advise_invalid_kind_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_error_from_state_advise_invalid_range_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_advise_mapping_error_from_state_advise_unsupported_platform_error_decision(
-        &mut self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_advise_mapping_error
-        todo!(
-            "TODO: port action `effect_record_advise_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_error_callback(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_file_open_failed_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_invalid_request_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_mapping_failed_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_resource_exhausted_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_unsupported_platform_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_map_tensor_error_from_state_unsupported_resource_error_decision(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_map_tensor_error
-        todo!(
-            "TODO: port action `effect_record_map_tensor_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_release_mapping_done_from_state_release_done_callback(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_release_mapping_done
-        todo!(
-            "TODO: port action `effect_record_release_mapping_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_release_mapping_done_from_state_release_publish_done_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_release_mapping_done
-        todo!(
-            "TODO: port action `effect_record_release_mapping_done` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_release_mapping_error_from_state_release_error_callback(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_release_mapping_error
-        todo!(
-            "TODO: port action `effect_record_release_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_release_mapping_error_from_state_release_invalid_handle_error_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_release_mapping_error
-        todo!(
-            "TODO: port action `effect_record_release_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_record_release_mapping_error_from_state_unmap_failed_error_decision(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_record_release_mapping_error
-        todo!(
-            "TODO: port action `effect_record_release_mapping_error` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_release_reserved_slot_on_open_failure(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_release_reserved_slot_on_open_failure
-        todo!(
-            "TODO: port action `effect_release_reserved_slot_on_open_failure` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_release_slot_after_unmap(
-        &mut self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_release_slot_after_unmap
-        todo!(
-            "TODO: port action `effect_release_slot_after_unmap` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn effect_reserve_top_free_slot_then_attempt_open(
-        &mut self,
-        _event: &DetailMapTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/actions.hpp::effect_reserve_top_free_slot_then_attempt_open
-        todo!(
-            "TODO: port action `effect_reserve_top_free_slot_then_attempt_open` from emel.cpp/src/emel/io/mmap/actions.hpp"
-        )
-    }
-    fn error_callback_absent(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::error_callback_absent
-        todo!("TODO: port guard `error_callback_absent` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn error_callback_present(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::error_callback_present
-        todo!("TODO: port guard `error_callback_present` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_index_invalid(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_index_invalid
-        todo!("TODO: port guard `file_index_invalid` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_index_valid(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_index_valid
-        todo!("TODO: port guard `file_index_valid` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_open_failed(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_open_failed
-        todo!("TODO: port guard `file_open_failed` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_open_succeeded(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_open_succeeded
-        todo!("TODO: port guard `file_open_succeeded` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_path_invalid(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_path_invalid
-        todo!("TODO: port guard `file_path_invalid` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_path_valid(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_path_valid
-        todo!("TODO: port guard `file_path_valid` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_span_exceeds_file(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_span_exceeds_file
-        todo!("TODO: port guard `file_span_exceeds_file` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn file_span_within_file(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::file_span_within_file
-        todo!("TODO: port guard `file_span_within_file` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn guard_advise_done_callback_absent(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_done_callback_absent
-        todo!(
-            "TODO: port guard `guard_advise_done_callback_absent` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_done_callback_present(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_done_callback_present
-        todo!(
-            "TODO: port guard `guard_advise_done_callback_present` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_error_callback_absent(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_error_callback_absent
-        todo!(
-            "TODO: port guard `guard_advise_error_callback_absent` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_error_callback_present(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_error_callback_present
-        todo!(
-            "TODO: port guard `guard_advise_error_callback_present` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_failed(&self, _event: &DetailAdviseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_failed
-        todo!("TODO: port guard `guard_advise_failed` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn guard_advise_handle_in_range(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_handle_in_range
-        todo!(
-            "TODO: port guard `guard_advise_handle_in_range` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_handle_out_of_range(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_handle_out_of_range
-        todo!(
-            "TODO: port guard `guard_advise_handle_out_of_range` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_kind_dontneed(&self, _event: &DetailAdviseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_kind_dontneed
-        todo!(
-            "TODO: port guard `guard_advise_kind_dontneed` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_kind_invalid(&self, _event: &DetailAdviseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_kind_invalid
-        todo!(
-            "TODO: port guard `guard_advise_kind_invalid` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_kind_sequential(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_kind_sequential
-        todo!(
-            "TODO: port guard `guard_advise_kind_sequential` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_kind_willneed(&self, _event: &DetailAdviseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_kind_willneed
-        todo!(
-            "TODO: port guard `guard_advise_kind_willneed` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_range_outside_mapping(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_range_outside_mapping
-        todo!(
-            "TODO: port guard `guard_advise_range_outside_mapping` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_range_within_mapping(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_range_within_mapping
-        todo!(
-            "TODO: port guard `guard_advise_range_within_mapping` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_slot_in_use_owned_by_tensor(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_slot_in_use_owned_by_tensor
-        todo!(
-            "TODO: port guard `guard_advise_slot_in_use_owned_by_tensor` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_slot_unavailable(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_slot_unavailable
-        todo!(
-            "TODO: port guard `guard_advise_slot_unavailable` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_advise_succeeded(&self, _event: &DetailAdviseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_advise_succeeded
-        todo!("TODO: port guard `guard_advise_succeeded` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn guard_platform_advise_supported(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_platform_advise_supported
-        todo!(
-            "TODO: port guard `guard_platform_advise_supported` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn guard_platform_advise_unsupported(
-        &self,
-        _event: &DetailAdviseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::guard_platform_advise_unsupported
-        todo!(
-            "TODO: port guard `guard_platform_advise_unsupported` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn layout_supported(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::layout_supported
-        todo!("TODO: port guard `layout_supported` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn layout_unsupported(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::layout_unsupported
-        todo!("TODO: port guard `layout_unsupported` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn length_overflow(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::length_overflow
-        todo!("TODO: port guard `length_overflow` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn length_within_bounds(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::length_within_bounds
-        todo!("TODO: port guard `length_within_bounds` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn mapping_failed(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::mapping_failed
-        todo!("TODO: port guard `mapping_failed` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn mapping_succeeded(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::mapping_succeeded
-        todo!("TODO: port guard `mapping_succeeded` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn offset_aligned(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::offset_aligned
-        todo!("TODO: port guard `offset_aligned` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn offset_unaligned(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::offset_unaligned
-        todo!("TODO: port guard `offset_unaligned` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn platform_mmap_supported(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::platform_mmap_supported
-        todo!(
-            "TODO: port guard `platform_mmap_supported` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn platform_mmap_unsupported(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::platform_mmap_unsupported
-        todo!(
-            "TODO: port guard `platform_mmap_unsupported` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_done_callback_absent(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_done_callback_absent
-        todo!(
-            "TODO: port guard `release_done_callback_absent` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_done_callback_present(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_done_callback_present
-        todo!(
-            "TODO: port guard `release_done_callback_present` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_error_callback_absent(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_error_callback_absent
-        todo!(
-            "TODO: port guard `release_error_callback_absent` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_error_callback_present(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_error_callback_present
-        todo!(
-            "TODO: port guard `release_error_callback_present` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_handle_in_range(&self, _event: &DetailReleaseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_handle_in_range
-        todo!(
-            "TODO: port guard `release_handle_in_range` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_handle_out_of_range(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_handle_out_of_range
-        todo!(
-            "TODO: port guard `release_handle_out_of_range` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_slot_in_use_not_owned_by_tensor(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_slot_in_use_not_owned_by_tensor
-        todo!(
-            "TODO: port guard `release_slot_in_use_not_owned_by_tensor` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_slot_in_use_owned_by_tensor(
-        &self,
-        _event: &DetailReleaseMappingRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_slot_in_use_owned_by_tensor
-        todo!(
-            "TODO: port guard `release_slot_in_use_owned_by_tensor` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn release_slot_not_in_use(&self, _event: &DetailReleaseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::release_slot_not_in_use
-        todo!(
-            "TODO: port guard `release_slot_not_in_use` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn request_span_invalid(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::request_span_invalid
-        todo!("TODO: port guard `request_span_invalid` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn request_span_valid(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::request_span_valid
-        todo!("TODO: port guard `request_span_valid` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn slot_capacity_available(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::slot_capacity_available
-        todo!(
-            "TODO: port guard `slot_capacity_available` from emel.cpp/src/emel/io/mmap/guards.hpp"
-        )
-    }
-    fn slot_pool_exhausted(&self, _event: &DetailMapTensorRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::slot_pool_exhausted
-        todo!("TODO: port guard `slot_pool_exhausted` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn unmap_failed(&self, _event: &DetailReleaseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::unmap_failed
-        todo!("TODO: port guard `unmap_failed` from emel.cpp/src/emel/io/mmap/guards.hpp")
-    }
-    fn unmap_succeeded(&self, _event: &DetailReleaseMappingRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/io/mmap/guards.hpp::unmap_succeeded
-        todo!("TODO: port guard `unmap_succeeded` from emel.cpp/src/emel/io/mmap/guards.hpp")
+impl<P: Platform> MapperCore<P> {
+    pub(super) fn new(platform: P) -> Self {
+        Self {
+            machine: IoMmapStateMachine::new(Context::new(platform)),
+        }
+    }
+
+    pub(super) fn map(&mut self, request: &MapTensor) -> Result<MapDone, Error> {
+        let handle = Cell::new(0);
+        let setup = RefCell::new(None);
+        let cleanup = Cell::new(None);
+        let result = Cell::new(Err(Error::InternalError));
+        self.machine
+            .process_event(IoMmapEvents::Map(MapRuntime {
+                request,
+                handle: &handle,
+                setup: &setup,
+                cleanup: &cleanup,
+                result: &result,
+            }))
+            .expect("mmap SML callbacks are infallible");
+        result.get()
+    }
+
+    pub(super) fn release(&mut self, request: ReleaseMapping) -> Result<(), Error> {
+        let region = RefCell::new(None);
+        let native = Cell::new(None);
+        let result = Cell::new(Err(Error::InternalError));
+        self.machine
+            .process_event(IoMmapEvents::Release(ReleaseRuntime {
+                request,
+                region: &region,
+                native: &native,
+                result: &result,
+            }))
+            .expect("mmap SML callbacks are infallible");
+        result.get()
+    }
+
+    pub(super) fn advise_sequential(&mut self, request: AdviceRequest) -> Result<(), Error> {
+        let region = RefCell::new(None);
+        let native = Cell::new(None);
+        let result = Cell::new(Err(Error::InternalError));
+        self.machine
+            .process_event(IoMmapEvents::Sequential(AdviceRuntime {
+                request,
+                region: &region,
+                native: &native,
+                result: &result,
+            }))
+            .expect("mmap SML callbacks are infallible");
+        result.get()
+    }
+
+    pub(super) fn advise_will_need(&mut self, request: AdviceRequest) -> Result<(), Error> {
+        let region = RefCell::new(None);
+        let native = Cell::new(None);
+        let result = Cell::new(Err(Error::InternalError));
+        self.machine
+            .process_event(IoMmapEvents::WillNeed(AdviceRuntime {
+                request,
+                region: &region,
+                native: &native,
+                result: &result,
+            }))
+            .expect("mmap SML callbacks are infallible");
+        result.get()
+    }
+
+    pub(super) fn advise_dont_need(&mut self, request: AdviceRequest) -> Result<(), Error> {
+        let region = RefCell::new(None);
+        let native = Cell::new(None);
+        let result = Cell::new(Err(Error::InternalError));
+        self.machine
+            .process_event(IoMmapEvents::DontNeed(AdviceRuntime {
+                request,
+                region: &region,
+                native: &native,
+                result: &result,
+            }))
+            .expect("mmap SML callbacks are infallible");
+        result.get()
+    }
+
+    pub(super) fn with_mapping(&mut self, request: WithMapping<'_>) -> Result<(), Error> {
+        let callback_result = Cell::new(None);
+        let result = Cell::new(Err(Error::InternalError));
+        self.machine
+            .process_event(IoMmapEvents::Access(AccessRuntime {
+                tensor_id: request.tensor_id,
+                handle: request.handle,
+                callback: request.callback,
+                callback_result: &callback_result,
+                result: &result,
+            }))
+            .expect("mmap SML callbacks are infallible");
+        result.get()
+    }
+}
+
+impl<P: Platform> IoMmapStateMachineContext for Context<P> {
+    fn guard_request_valid(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.request.len > 0)
+    }
+    fn guard_request_invalid(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.request.len == 0)
+    }
+    fn guard_resource_valid(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(event.request.file_index <= MAX_FILE_INDEX
+            && event.request.len <= MAX_MAPPING_BYTES
+            && mapping_view_len_supported(event.request.len)
+            && usize::try_from(event.request.len).is_ok()
+            && event
+                .request
+                .offset
+                .checked_add(event.request.len)
+                .is_some_and(|end| end <= event.request.file.len())
+            && self.platform.offset_supported(event.request.offset)
+            && event
+                .request
+                .offset
+                .is_multiple_of(self.platform.required_alignment()))
+    }
+    fn guard_resource_invalid(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!self.guard_resource_valid(event)?)
+    }
+    fn guard_platform_supported(&self, _: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(self.platform.supported())
+    }
+    fn guard_platform_unsupported(&self, _: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!self.platform.supported())
+    }
+    fn effect_invalid_request(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+    fn effect_unsupported_resource(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        event.result.set(Err(Error::UnsupportedResource));
+        Ok(())
+    }
+    fn effect_unsupported_platform(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        event.result.set(Err(Error::UnsupportedPlatform));
+        Ok(())
+    }
+    fn guard_capacity_available(&self, _: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(self.free_count > 0)
+    }
+    fn guard_capacity_exhausted(&self, _: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(self.free_count == 0)
+    }
+    fn effect_reserve_and_prepare_mapping(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        self.free_count -= 1;
+        let handle = self.free_stack[self.free_count];
+        self.slots[handle as usize] = Slot {
+            tensor_id: event.request.tensor_id,
+            region: None,
+        };
+        event.handle.set(handle);
+        let len = usize::try_from(event.request.len)
+            .expect("resource guard selected a mapping length that fits usize");
+        event.setup.replace(Some(self.platform.prepare(
+            &event.request.file,
+            event.request.offset,
+            len,
+        )));
+        Ok(())
+    }
+    fn effect_resource_exhausted_before_map(
+        &mut self,
+        event: MapRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        event.result.set(Err(Error::ResourceExhausted));
+        Ok(())
+    }
+    fn guard_setup_native_succeeded(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(event.setup.borrow().as_ref(), Some(Ok(_))))
+    }
+    fn guard_setup_mapping_failed(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(
+            event.setup.borrow().as_ref(),
+            Some(Err(SetupError::MappingFailed))
+        ))
+    }
+    fn guard_setup_platform_failed(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(
+            event.setup.borrow().as_ref(),
+            Some(Err(SetupError::UnsupportedPlatform))
+        ))
+    }
+    fn effect_mapping_failed(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        self.free_reservation(event.handle.get());
+        event.result.set(Err(Error::MappingFailed));
+        Ok(())
+    }
+    fn effect_unsupported_platform_setup(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        self.free_reservation(event.handle.get());
+        event.result.set(Err(Error::UnsupportedPlatform));
+        Ok(())
+    }
+    fn guard_setup_view_representable(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(
+            event.setup.borrow().as_ref(),
+            Some(Ok(region)) if region.representable()
+        ))
+    }
+    fn guard_setup_view_unrepresentable(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(
+            event.setup.borrow().as_ref(),
+            Some(Ok(region)) if !region.representable()
+        ))
+    }
+    fn effect_release_unrepresentable_mapping(
+        &mut self,
+        event: MapRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        let mut setup = event.setup.borrow_mut();
+        let region = setup
+            .as_mut()
+            .expect("native setup outcome remains present during classification")
+            .as_mut()
+            .expect("native-success guard selected a region");
+        event.cleanup.set(Some(self.platform.release(region)));
+        Ok(())
+    }
+    fn guard_setup_cleanup_succeeded(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(event.cleanup.get(), Some(Ok(()))))
+    }
+    fn guard_setup_cleanup_failed(&self, event: &MapRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(event.cleanup.get(), Some(Err(_))))
+    }
+    fn effect_finish_unrepresentable_mapping(
+        &mut self,
+        event: MapRuntime<'_, '_>,
+    ) -> Result<(), ()> {
+        self.free_reservation(event.handle.get());
+        event.setup.borrow_mut().take();
+        event.result.set(Err(Error::MappingFailed));
+        Ok(())
+    }
+    fn effect_abort_unrepresentable_cleanup(&mut self, _: MapRuntime<'_, '_>) -> Result<(), ()> {
+        std::process::abort()
+    }
+    fn effect_commit_mapping(&mut self, event: MapRuntime<'_, '_>) -> Result<(), ()> {
+        let region = event
+            .setup
+            .borrow_mut()
+            .take()
+            .expect("setup outcome is present during synchronous completion")
+            .expect("success guard selected the successful setup outcome");
+        let handle = event.handle.get();
+        let index = handle as usize;
+        self.slots[index].region = Some(region);
+        event.result.set(Ok(MapDone::new(
+            handle,
+            event.request.tensor_id,
+            event.request.len,
+        )));
+        Ok(())
+    }
+    fn guard_release_owned(&self, event: &ReleaseRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_release_invalid(&self, event: &ReleaseRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn effect_release_native(&mut self, event: ReleaseRuntime<'_>) -> Result<(), ()> {
+        let mut region = self.take_region(event.request.handle);
+        event.native.set(Some(self.platform.release(&mut region)));
+        event.region.replace(Some(region));
+        Ok(())
+    }
+    fn effect_release_invalid(&mut self, event: ReleaseRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+    fn guard_release_succeeded(&self, event: &ReleaseRuntime<'_>) -> Result<bool, ()> {
+        Ok(matches!(event.native.get(), Some(Ok(()))))
+    }
+    fn guard_release_failed(&self, event: &ReleaseRuntime<'_>) -> Result<bool, ()> {
+        Ok(matches!(event.native.get(), Some(Err(_))))
+    }
+    fn effect_finish_release(&mut self, event: ReleaseRuntime<'_>) -> Result<(), ()> {
+        let index = event.request.handle as usize;
+        self.slots[index].tensor_id = -1;
+        self.free_stack[self.free_count] = event.request.handle;
+        self.free_count += 1;
+        event.region.borrow_mut().take();
+        event.result.set(Ok(()));
+        Ok(())
+    }
+    fn effect_restore_release_failure(&mut self, event: ReleaseRuntime<'_>) -> Result<(), ()> {
+        self.restore_region(event.request.handle, event.region);
+        event.result.set(Err(Error::UnmapFailed));
+        Ok(())
+    }
+    fn guard_sequential_owned(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_sequential_invalid_owner(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_sequential_range_valid(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.advice_range_valid(event.request))
+    }
+    fn guard_sequential_range_invalid(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.advice_range_valid(event.request))
+    }
+    fn effect_sequential_invalid_owner(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+    fn effect_sequential_invalid_range(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidAdviceRange));
+        Ok(())
+    }
+    fn effect_advise_sequential_native(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        let region = self.take_region(event.request.handle);
+        let offset = usize::try_from(event.request.offset)
+            .expect("range guard selected an advice offset that fits usize");
+        let len = usize::try_from(event.request.len)
+            .expect("range guard selected an advice length that fits usize");
+        event
+            .native
+            .set(Some(self.platform.advise_sequential(&region, offset, len)));
+        event.region.replace(Some(region));
+        Ok(())
+    }
+
+    fn guard_will_need_owned(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_will_need_invalid_owner(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_will_need_range_valid(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.advice_range_valid(event.request))
+    }
+    fn guard_will_need_range_invalid(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.advice_range_valid(event.request))
+    }
+    fn effect_will_need_invalid_owner(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+    fn effect_will_need_invalid_range(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidAdviceRange));
+        Ok(())
+    }
+    fn effect_advise_will_need_native(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        let region = self.take_region(event.request.handle);
+        let offset = usize::try_from(event.request.offset)
+            .expect("range guard selected an advice offset that fits usize");
+        let len = usize::try_from(event.request.len)
+            .expect("range guard selected an advice length that fits usize");
+        event
+            .native
+            .set(Some(self.platform.advise_will_need(&region, offset, len)));
+        event.region.replace(Some(region));
+        Ok(())
+    }
+
+    fn guard_dont_need_owned(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_dont_need_invalid_owner(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.owned(event.request.tensor_id, event.request.handle))
+    }
+    fn guard_dont_need_range_valid(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.advice_range_valid(event.request))
+    }
+    fn guard_dont_need_range_invalid(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.advice_range_valid(event.request))
+    }
+    fn effect_dont_need_invalid_owner(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+    fn effect_dont_need_invalid_range(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidAdviceRange));
+        Ok(())
+    }
+    fn effect_advise_dont_need_native(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        let region = self.take_region(event.request.handle);
+        let offset = usize::try_from(event.request.offset)
+            .expect("range guard selected an advice offset that fits usize");
+        let len = usize::try_from(event.request.len)
+            .expect("range guard selected an advice length that fits usize");
+        event
+            .native
+            .set(Some(self.platform.advise_dont_need(&region, offset, len)));
+        event.region.replace(Some(region));
+        Ok(())
+    }
+    fn guard_advice_succeeded(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(matches!(event.native.get(), Some(Ok(()))))
+    }
+    fn guard_advice_failed(&self, event: &AdviceRuntime<'_>) -> Result<bool, ()> {
+        Ok(matches!(event.native.get(), Some(Err(_))))
+    }
+    fn effect_restore_advice_success(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        self.restore_region(event.request.handle, event.region);
+        event.result.set(Ok(()));
+        Ok(())
+    }
+    fn effect_restore_advice_failure(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
+        self.restore_region(event.request.handle, event.region);
+        event.result.set(Err(Error::AdviceFailed));
+        Ok(())
+    }
+    fn guard_access_owned(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(self.owned(event.tensor_id, event.handle))
+    }
+    fn guard_access_invalid(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(!self.owned(event.tensor_id, event.handle))
+    }
+    fn effect_invoke_access(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
+        let bytes = self.slots[event.handle as usize]
+            .region
+            .as_ref()
+            .expect("access guard selected an owned live mapping")
+            .bytes();
+        event
+            .callback_result
+            .set(Some(event.callback.invoke(bytes)));
+        Ok(())
+    }
+    fn guard_access_succeeded(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(event.callback_result.get(), Some(Ok(()))))
+    }
+    fn guard_access_panicked(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
+        Ok(matches!(event.callback_result.get(), Some(Err(()))))
+    }
+    fn effect_access_succeeded(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
+        event.result.set(Ok(()));
+        Ok(())
+    }
+    fn effect_access_panicked(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
+        event.result.set(Err(Error::CallbackPanicked));
+        Ok(())
+    }
+    fn effect_access_invalid(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+    fn effect_unexpected(&mut self) -> Result<(), ()> {
+        std::process::abort()
+    }
+}
+
+pub(super) const fn mapping_view_len_supported(len: u64) -> bool {
+    len <= isize::MAX as u64
+}
+
+impl<P: Platform> Context<P> {
+    const fn owned(&self, tensor_id: i32, handle: u32) -> bool {
+        let index = handle as usize;
+        index < MAX_MAPPINGS
+            && self.slots[index].tensor_id == tensor_id
+            && self.slots[index].region.is_some()
+    }
+
+    const fn take_region(&mut self, handle: u32) -> Region {
+        self.slots[handle as usize]
+            .region
+            .take()
+            .expect("ownership guard selected a live mapping")
+    }
+
+    const fn free_reservation(&mut self, handle: u32) {
+        let index = handle as usize;
+        self.slots[index].tensor_id = -1;
+        self.free_stack[self.free_count] = handle;
+        self.free_count += 1;
+    }
+
+    fn advice_range_valid(&self, request: AdviceRequest) -> bool {
+        let mapped_len = self.slots[request.handle as usize]
+            .region
+            .as_ref()
+            .map_or(0, Region::len) as u64;
+        request.len > 0
+            && usize::try_from(request.offset).is_ok()
+            && usize::try_from(request.len).is_ok()
+            && request.offset <= mapped_len
+            && request.len <= mapped_len - request.offset
+    }
+
+    fn restore_region(&mut self, handle: u32, region: &RefCell<Option<Region>>) {
+        let index = handle as usize;
+        self.slots[index].region = Some(
+            region
+                .borrow_mut()
+                .take()
+                .expect("finish event retains exclusive region ownership"),
+        );
     }
 }

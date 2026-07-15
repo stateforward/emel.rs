@@ -1,6 +1,6 @@
 //! Model input contracts and eventually memory-mapped model loading.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![allow(missing_docs, dead_code)]
 
 use std::path::Path;
@@ -20,6 +20,6 @@ impl ModelSource {
     }
 }
 pub(crate) mod loader;
-pub(crate) mod mmap;
+pub mod mmap;
 pub mod read;
 pub(crate) mod staged_read;

@@ -2,7 +2,13 @@
 
 use emel_io::read::Reader;
 use emel_io::read::event::{ReadTensor, ReadTensorBatch, Target, TensorRead};
+#[cfg(unix)]
+use libc as _;
+#[cfg(unix)]
+use rustix as _;
 use sml as _;
+#[cfg(windows)]
+use windows_sys as _;
 
 #[test]
 fn public_reader_dispatches_typed_single_and_batch_events() {

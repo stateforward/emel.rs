@@ -8,8 +8,10 @@ LINE_COVERAGE_MIN="${LINE_COVERAGE_MIN:-90}"
 BRANCH_COVERAGE_MIN="${BRANCH_COVERAGE_MIN:-50}"
 GGUF_REPORT="${EMEL_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-gguf.json}"
 IO_REPORT="${EMEL_IO_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io.json}"
+IO_MMAP_REPORT="${EMEL_IO_MMAP_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-mmap.json}"
 GGUF_COVERAGE_TARGET_DIR="${EMEL_GGUF_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-gguf}"
 IO_COVERAGE_TARGET_DIR="${EMEL_IO_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io}"
+IO_MMAP_COVERAGE_TARGET_DIR="${EMEL_IO_MMAP_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-mmap}"
 
 if [[ $# -ne 0 ]]; then
   echo "usage: scripts/coverage.sh" >&2
@@ -44,9 +46,10 @@ fi
 
 mkdir -p \
   "$(dirname "$GGUF_REPORT")" \
-  "$(dirname "$IO_REPORT")"
-echo "Coverage scope: emel-gguf and emel-io production sources"
-echo "Generated GGUF sm.rs is excluded; maintained emel-io SML sources are fully enforced"
+  "$(dirname "$IO_REPORT")" \
+  "$(dirname "$IO_MMAP_REPORT")"
+echo "Coverage scope: emel-gguf, emel-io read, and maintained emel-io mmap production sources"
+echo "Generated GGUF sm.rs is excluded; maintained emel-io mmap SML sources are fully enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
 echo "Running emel-gguf coverage"
@@ -73,8 +76,21 @@ CARGO_LLVM_COV_TARGET_DIR="$IO_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN"
   --json \
   --output-path "$IO_REPORT"
 
+echo "Running maintained emel-io mmap coverage"
+CARGO_LLVM_COV_TARGET_DIR="$IO_MMAP_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
+  --manifest-path "$ROOT_DIR/Cargo.toml" \
+  --package emel-io \
+  --all-features \
+  --locked \
+  --branch \
+  --ignore-filename-regex 'crates/emel-io/(src/(lib\.rs|loader/|read/|staged_read/|mmap/tests\.rs)|tests/|examples/)' \
+  --summary-only \
+  --json \
+  --output-path "$IO_MMAP_REPORT"
+
 python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
-  "emel-gguf=$GGUF_REPORT" "emel-io=$IO_REPORT" <<'PY'
+  "emel-gguf=$GGUF_REPORT" "emel-io=$IO_REPORT" \
+  "emel-io-mmap=$IO_MMAP_REPORT" <<'PY'
 import json
 import math
 import pathlib

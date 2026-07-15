@@ -8,6 +8,8 @@ REFERENCE_BUILD_DIR="$BUILD_DIR/llama-reference"
 SNAPSHOT="${EMEL_GGUF_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/gguf/manifest.txt}"
 IO_READ_SNAPSHOT="${EMEL_IO_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-read/manifest.txt}"
 IO_READ_BUILD_DIR="${EMEL_IO_READ_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-read-parity}"
+IO_MMAP_SNAPSHOT="${EMEL_IO_MMAP_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-mmap/manifest.txt}"
+IO_MMAP_BUILD_DIR="${EMEL_IO_MMAP_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-mmap-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
@@ -17,6 +19,7 @@ RUN_LIVE=true
 RUN_UPDATE=true
 REFERENCE_SOURCE="${LLAMA_CPP_SOURCE_DIR:-}"
 REFERENCE_CONFIGURED=false
+SUITE=all
 models=()
 
 usage() {
@@ -35,6 +38,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
+  --suite=NAME     run all, gguf, io-read, or io-mmap (default: all)
 
 Model paths are checked during the live phase. Without paths, the deterministic
 fixture corpus is used.
@@ -64,6 +68,10 @@ for argument in "$@"; do
       RUN_LIVE=false
       RUN_UPDATE=true
       ;;
+    --suite=all) SUITE=all ;;
+    --suite=gguf) SUITE=gguf ;;
+    --suite=io-read) SUITE=io-read ;;
+    --suite=io-mmap) SUITE=io-mmap ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -78,19 +86,38 @@ if [[ ${#models[@]} -gt 0 ]] && ! $RUN_LIVE; then
   echo "error: model paths require the live phase" >&2
   exit 2
 fi
+if [[ ${#models[@]} -gt 0 && "$SUITE" != "all" && "$SUITE" != "gguf" ]]; then
+  echo "error: model paths are only valid for the GGUF suite" >&2
+  exit 2
+fi
 
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p emel-gguf-parity
-RUST_RUNNER="$ROOT_DIR/target/debug/emel-gguf-parity"
-"$RUST_RUNNER" --write-fixtures "$FIXTURE_DIR"
+RUN_GGUF=false
+RUN_IO_READ=false
+RUN_IO_MMAP=false
+case "$SUITE" in
+  all)
+    RUN_GGUF=true
+    RUN_IO_READ=true
+    RUN_IO_MMAP=true
+    ;;
+  gguf) RUN_GGUF=true ;;
+  io-read) RUN_IO_READ=true ;;
+  io-mmap) RUN_IO_MMAP=true ;;
+esac
 
 fixture_models=()
-while IFS= read -r path; do
-  fixture_models+=("$path")
-done < <(find "$FIXTURE_DIR/valid" "$FIXTURE_DIR/invalid" -type f -name '*.gguf' -print | sort)
+if $RUN_GGUF; then
+  cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p emel-gguf-parity
+  RUST_RUNNER="$ROOT_DIR/target/debug/emel-gguf-parity"
+  "$RUST_RUNNER" --write-fixtures "$FIXTURE_DIR"
+  while IFS= read -r path; do
+    fixture_models+=("$path")
+  done < <(find "$FIXTURE_DIR/valid" "$FIXTURE_DIR/invalid" -type f -name '*.gguf' -print | sort)
 
-if [[ ${#fixture_models[@]} -eq 0 ]]; then
-  echo "error: no GGUF parity fixtures found" >&2
-  exit 2
+  if [[ ${#fixture_models[@]} -eq 0 ]]; then
+    echo "error: no GGUF parity fixtures found" >&2
+    exit 2
+  fi
 fi
 
 sha256_file() {
@@ -276,16 +303,84 @@ run_io_read_parity() {
   echo "I/O read parity passed (24 cases, emel.cpp $EMEL_CPP_COMMIT)"
 }
 
-if $RUN_UPDATE; then
-  update_snapshot
+run_io_mmap_parity() {
+  local source_commit source_tree rust_output reference_output materialized_source
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/io)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_IO_TREE" ]]; then
+    echo "error: emel.cpp I/O reference identity drifted" >&2
+    echo "commit: $source_commit" >&2
+    echo "tree:   $source_tree" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- src/emel/io tests/io; then
+    echo "error: emel.cpp I/O reference files are dirty" >&2
+    exit 1
+  fi
+
+  materialized_source="$IO_MMAP_BUILD_DIR/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | \
+    tar -x -C "$materialized_source"
+
+  local cmake_args=(
+    -S "$ROOT_DIR/tools/emel-io-mmap-reference"
+    -B "$IO_MMAP_BUILD_DIR/reference-build"
+    -DCMAKE_BUILD_TYPE=Release
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  )
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$IO_MMAP_BUILD_DIR/reference-build" --parallel \
+    --target emel-io-mmap-reference
+
+  cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p emel-io \
+    --example mmap_parity
+  local rust_runner="$ROOT_DIR/target/debug/examples/mmap_parity"
+  local fixture="$IO_MMAP_BUILD_DIR/fixture.bin"
+  "$rust_runner" --write-fixture "$fixture"
+  rust_output="$IO_MMAP_BUILD_DIR/rust.out"
+  reference_output="$IO_MMAP_BUILD_DIR/reference.out"
+  "$rust_runner" "$fixture" >"$rust_output"
+  "$IO_MMAP_BUILD_DIR/reference-build/emel-io-mmap-reference" \
+    "$fixture" >"$reference_output"
+  diff -u "$reference_output" "$rust_output"
+  echo "I/O mmap deterministic lifecycle matches emel.cpp $EMEL_CPP_COMMIT"
+
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$IO_MMAP_SNAPSHOT")"
+    install -m 0644 "$reference_output" "$IO_MMAP_SNAPSHOT"
+    echo "Updated I/O mmap parity snapshot"
+  fi
+  if $RUN_SNAPSHOT; then
+    diff -u "$IO_MMAP_SNAPSHOT" "$rust_output"
+  fi
+
+  if ! grep -qx 'native_semantics_complete=true' "$rust_output"; then
+    echo "error: I/O mmap parity does not prove complete native semantics" >&2
+    return 1
+  fi
+  echo "I/O mmap parity passed (emel.cpp $EMEL_CPP_COMMIT)"
+}
+
+if $RUN_GGUF; then
+  if $RUN_UPDATE; then
+    update_snapshot
+  fi
+  if $RUN_LIVE; then
+    live_parity
+  fi
+  if $RUN_SNAPSHOT; then
+    check_snapshot
+  fi
 fi
 
-if $RUN_LIVE; then
-  live_parity
+if $RUN_IO_READ; then
+  run_io_read_parity
 fi
-
-if $RUN_SNAPSHOT; then
-  check_snapshot
+if $RUN_IO_MMAP; then
+  run_io_mmap_parity
 fi
-
-run_io_read_parity

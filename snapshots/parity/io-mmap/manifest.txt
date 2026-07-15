@@ -1,0 +1,27 @@
+io-mmap-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_tree=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+source_files=src/emel/io/mmap/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,actions.cpp,sm.hpp
+source_tests=tests/io/mmap/lifecycle_tests.cpp,tests/io/mmap/advise_tests.cpp
+fixture_config=file_bytes=32768,pattern=incrementing_u8,map_bytes=16384,offset=0
+native_semantics_complete=true
+missing_native_semantics=none
+contract_delta=rust_safe_access_event,rust_mmap_source_capability
+case=map_invalid_zero outcome=error error=invalid_request
+case=map_invalid_empty_path outcome=error error=invalid_request
+case=map_unsupported_index outcome=error error=unsupported_resource
+case=map_unsupported_offset outcome=error error=unsupported_resource
+case=map_unsupported_length outcome=error error=unsupported_resource
+case=map_unsupported_layout outcome=error error=unsupported_resource
+case=map_file_open outcome=error error=file_open_failed
+case=map_past_eof outcome=error error=unsupported_resource
+case=map_success outcome=done tensor_id=10 handle=0 bytes=16384 checksum=a78fc30c62e6e325
+case=advise_sequential outcome=done
+case=advise_will_need outcome=done
+case=advise_dont_need outcome=done
+case=advise_wrong_owner outcome=error error=invalid_request
+case=advise_invalid_range outcome=error error=invalid_advise_range
+case=release_wrong_owner outcome=error error=invalid_request
+case=release_success outcome=done
+case=release_again outcome=error error=invalid_request

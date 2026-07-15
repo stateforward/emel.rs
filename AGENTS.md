@@ -405,10 +405,12 @@ surface.
 Every `unsafe` block MUST document its safety invariants and have focused tests
 that exercise the boundary.
 
-The sole currently approved unsafe exception is the private target-gated
+The only currently approved unsafe exceptions are the private target-gated
 `crates/emel-io/src/mmap/platform/` module required for true native file-backed
-mapping. This exception is not precedent or standing authority for unsafe code
-in any other crate, module, actor, test, tool, or future implementation.
+mapping and the exact `emel_io::mmap::event::MmapSource::open` capability
+constructor described below. These exceptions are not precedent or standing
+authority for unsafe code in any other crate, module, actor, test, tool, or
+future implementation.
 
 Within that one module, unsafe is limited to native Unix `mmap`, `munmap`, and
 `posix_madvise`; native Windows `GetSystemInfo`, `CreateFileMappingW`,
@@ -417,7 +419,34 @@ only as the immediate process argument to `PrefetchVirtualMemory`, and
 `CloseHandle` only for the temporary file-mapping handle; checked pointer
 arithmetic; and one immutable `slice::from_raw_parts` conversion. `GetSystemInfo`
 is the only newly approved native call. ALWAYS keep the crate deny-by-default
-for unsafe code and allow it only on that private module.
+for unsafe code and allow native unsafe operations only on that private module.
+
+`MmapSource::open` is the sole approved unsafe declaration outside the private
+platform module. It MUST contain no unsafe block or native operation. Its only
+purpose is to let the caller assert the otherwise unprovable backing-file
+stability precondition required by a safe mapped-byte view. Before invoking the
+constructor, the caller MUST establish that the target file's length and
+contents cannot be changed through any handle, path, process, or filesystem
+operation. That guarantee MUST hold throughout construction and until every
+`MmapSource` clone and every mapper mapping created from it has been released
+or dropped.
+
+ALWAYS bind `MmapSource` to the exact safely opened `std::fs::File`, keep that
+file in private shared ownership for the complete lifetime of every derived
+mapping, and move a capability clone into each public map event before
+dispatch. NEVER recreate the capability from a path after validation, expose
+its `File`, accept an ordinary path or `File` in a map event, or provide a safe
+constructor that bypasses the stability assertion.
+
+The `MmapSource` exception permits narrowly scoped lint allowances on that
+constructor declaration and on caller functions whose only unsafe operation is
+one direct `MmapSource::open` invocation. Each such call MUST immediately state
+the unchanged and untruncated lifetime invariant that its owner enforces. It
+does not permit an unsafe trait, unsafe implementation, raw pointer, raw handle,
+mapped slice, platform call, another unsafe callee, or module-wide allowance
+outside `mmap/platform/`. Every mapped byte exposed by the safe actor API MUST
+remain lifetime-bound to actor-owned mapping state and MUST NOT escape the
+synchronous RTC callback.
 
 ALWAYS obtain Unix mapping alignment through a maintained safe Rust primitive,
 currently `rustix::param::page_size()`. NEVER add an EMEL-owned raw `sysconf`
@@ -428,19 +457,39 @@ ownership. NEVER add an EMEL-owned raw Unix `close` or retained-file Windows
 `CloseHandle` merely to observe a close result that safe `File` ownership does
 not expose. The approved Windows `CloseHandle` surface remains limited to the
 temporary file-mapping handle created inside the private mapping operation.
+The private Windows region MUST retain that handle until checked release, MUST
+clear its owner field only after `CloseHandle` succeeds, and MUST preserve the
+handle for a later release attempt when close fails. NEVER discard a
+`CloseHandle` result.
 
-The mmap exception requires private ownership of every native resource; no raw
+Because Rust destructors cannot return a teardown error, a native region
+destructor MUST attempt the same checked release and abort the process if that
+release fails. NEVER continue after dropping the sole owner of a live native
+mapping or mapping handle, and NEVER reduce destructor teardown to best effort.
+
+The mmap exceptions require private ownership of every native resource; no raw
 pointer, native handle, mutable slice, or platform operation in public API; no
 aliasing, re-entry, or escaped mapped view; exclusive actor access for release;
-and an unchanged, untruncated mapped file for the complete mapping lifetime.
-Every unsafe operation MUST state which invariant makes that exact operation
-sound. Target-gated focused tests, hostile-input tests, teardown and partial-
-release tests, and a fresh blind review MUST cover the boundary.
+and the caller-asserted `MmapSource` invariant for the complete mapping
+lifetime. Every unsafe operation MUST state which invariant makes that exact
+operation sound. Target-gated focused tests, hostile-input tests, teardown and
+partial-release tests, capability misuse compile-fail coverage, and a fresh
+blind review MUST cover the boundary.
+
+The user additionally approved the exact Unix address-zero success boundary.
+A private Unix region MAY temporarily own a successful null `mmap` result only
+between native setup and explicit same-RTC SML classification. It MUST retain
+that native owner, MUST route the unrepresentable-view outcome through explicit
+guards and transitions, and MUST perform the existing checked `munmap` before
+reporting mapping failure. Cleanup failure MUST abort. A null mapping MUST
+NEVER enter an actor slot, reach public API, or be passed to
+`slice::from_raw_parts`. This approval adds no unsafe operation class and does
+not authorize null pointers anywhere else.
 
 NEVER infer permission for a read-into-`Vec<u8>` fallback, another unsafe
 module, a wider lint allowance, or a public raw-pointer API from this exception.
-Any change to this exact unsafe surface or its invariants requires new explicit
-user approval and an `AGENTS.md` update before source implementation.
+Any change to these exact unsafe surfaces or their invariants requires new
+explicit user approval and an `AGENTS.md` update before source implementation.
 
 ALWAYS isolate any foreign-function integration in a dedicated boundary crate
 or module. Safe workspace crates MUST consume a safe wrapper.
@@ -557,9 +606,13 @@ ALWAYS run the relevant local quality gates after an implementation change:
 cargo fmt --all -- --check
 cargo lint
 cargo test-all
+cargo test --locked --workspace --doc --all-features
 scripts/coverage.sh
 scripts/paritychecker.sh --snapshot-only
 ```
+
+The complete test gate MUST execute both `cargo test-all` and the workspace
+doctest command so compile-fail safety contracts run locally and in CI.
 
 Run the isolated fuzz checks when parser, loader, binary format, or unsafe input
 handling changes:
