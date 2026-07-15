@@ -410,11 +410,24 @@ The sole currently approved unsafe exception is the private target-gated
 mapping. This exception is not precedent or standing authority for unsafe code
 in any other crate, module, actor, test, tool, or future implementation.
 
-Within that one module, unsafe is limited to native Unix map, unmap, and advise
-calls; native Windows mapping-handle, map, unmap, and prefetch calls; checked
-pointer arithmetic; and one immutable `slice::from_raw_parts` conversion.
-ALWAYS keep the crate deny-by-default for unsafe code and allow it only on that
-private module.
+Within that one module, unsafe is limited to native Unix `mmap`, `munmap`, and
+`posix_madvise`; native Windows `GetSystemInfo`, `CreateFileMappingW`,
+`MapViewOfFile`, `UnmapViewOfFile`, `PrefetchVirtualMemory`, `GetCurrentProcess`
+only as the immediate process argument to `PrefetchVirtualMemory`, and
+`CloseHandle` only for the temporary file-mapping handle; checked pointer
+arithmetic; and one immutable `slice::from_raw_parts` conversion. `GetSystemInfo`
+is the only newly approved native call. ALWAYS keep the crate deny-by-default
+for unsafe code and allow it only on that private module.
+
+ALWAYS obtain Unix mapping alignment through a maintained safe Rust primitive,
+currently `rustix::param::page_size()`. NEVER add an EMEL-owned raw `sysconf`
+call while that safe primitive satisfies the contract.
+
+ALWAYS retain mapped files as safe Rust owners and release them through Rust
+ownership. NEVER add an EMEL-owned raw Unix `close` or retained-file Windows
+`CloseHandle` merely to observe a close result that safe `File` ownership does
+not expose. The approved Windows `CloseHandle` surface remains limited to the
+temporary file-mapping handle created inside the private mapping operation.
 
 The mmap exception requires private ownership of every native resource; no raw
 pointer, native handle, mutable slice, or platform operation in public API; no
