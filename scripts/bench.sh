@@ -20,7 +20,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -34,6 +34,7 @@ for argument in "$@"; do
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
     --suite=io-mmap) SUITE=io-mmap; runner_args[0]=io-mmap ;;
+    --suite=io-staged-read) SUITE=io-staged-read; runner_args[0]=io-staged-read ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
   esac
@@ -141,6 +142,82 @@ if [[ "$SUITE" == "io-mmap" ]]; then
       emit("1mib")
     }
   ' "$rust_current" "$reference_current" >"$CURRENT"
+elif [[ "$SUITE" == "io-staged-read" ]]; then
+  "$RUNNER" "${runner_args[@]}" >"$CURRENT"
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/io)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_IO_TREE" ]]; then
+    echo "error: emel.cpp I/O reference identity drifted" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- src/emel/io tests/io; then
+    echo "error: emel.cpp I/O reference files are dirty" >&2
+    exit 1
+  fi
+  reference_root="$BUILD_DIR/io-staged-read-reference"
+  materialized_source="$reference_root/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | \
+    tar -x -C "$materialized_source"
+  cmake_args=(
+    -S "$ROOT_DIR/tools/emel-io-staged-read-reference"
+    -B "$reference_root/build"
+    -DCMAKE_BUILD_TYPE=Release
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  )
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$reference_root/build" --parallel \
+    --target emel-io-staged-read-reference
+  config_values="$(awk '
+    /^# benchmark_config: / {
+      for (field_index = 3; field_index <= NF; ++field_index) {
+        split($field_index, part, "=")
+        value[part[1]] = part[2]
+      }
+    }
+    END { print value["iterations"], value["runs"], value["warmup_iterations"] }
+  ' "$CURRENT")"
+  read -r iterations runs warmup_iterations <<<"$config_values"
+  reference_current="$CURRENT.reference"
+  "$reference_root/build/emel-io-staged-read-reference" --benchmark \
+    "$iterations" "$runs" "$warmup_iterations" >"$reference_current"
+  rust_current="$CURRENT.rust"
+  mv "$CURRENT" "$rust_current"
+  awk '
+    function field_value(name,    field_index, part) {
+      for (field_index = 2; field_index <= NF; ++field_index) {
+        split($field_index, part, "=")
+        if (part[1] == name) { return part[2] }
+      }
+      return ""
+    }
+    function emit(case_name,    ratio) {
+      ratio = rust[case_name] / cpp[case_name]
+      printf "io/staged-read/copy_%s rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n", \
+        case_name, rust[case_name], cpp[case_name], ratio, iterations[case_name], runs[case_name]
+    }
+    FNR == NR {
+      if ($0 ~ /^#/) { print; next }
+      if ($1 ~ /^io\/staged-read\/rust\/copy_/) {
+        case_name = $1
+        sub(/^io\/staged-read\/rust\/copy_/, "", case_name)
+        rust[case_name] = field_value("ns_per_op")
+        iterations[case_name] = field_value("iter")
+        runs[case_name] = field_value("runs")
+      }
+      next
+    }
+    $1 ~ /^io\/staged-read\/reference\/copy_/ {
+      case_name = $1
+      sub(/^io\/staged-read\/reference\/copy_/, "", case_name)
+      cpp[case_name] = field_value("ns_per_op")
+    }
+    END { emit("16kib"); emit("1mib") }
+  ' "$rust_current" "$reference_current" >"$CURRENT"
 else
   "$RUNNER" "${runner_args[@]}" >"$CURRENT"
 fi
@@ -195,7 +272,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" ]]; then
+if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -350,6 +427,10 @@ validate_io_mmap_artifact() {
   "$ROOT_DIR/scripts/validate_io_mmap_bench.sh" "$@"
 }
 
+validate_io_staged_read_artifact() {
+  bash "$ROOT_DIR/scripts/validate_io_staged_read_bench.sh" "$@"
+}
+
 if [[ "$SUITE" == "io-read" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   current_iterations="${current_config_values%% *}"
@@ -361,6 +442,12 @@ elif [[ "$SUITE" == "io-mmap" ]]; then
   current_iterations="${current_config_values%% *}"
   current_runs="${current_config_values#* }"
   validate_io_mmap_artifact \
+    "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
+elif [[ "$SUITE" == "io-staged-read" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  current_iterations="${current_config_values%% *}"
+  current_runs="${current_config_values#* }"
+  validate_io_staged_read_artifact \
     "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
 fi
 
@@ -432,11 +519,31 @@ elif [[ "$SUITE" == "io-mmap" ]]; then
       exit 1
     fi
   done
+elif [[ "$SUITE" == "io-staged-read" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  baseline_config_values="$(validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width")"
+  baseline_iterations="${baseline_config_values%% *}"
+  baseline_runs="${baseline_config_values#* }"
+  validate_io_staged_read_artifact \
+    "$BASELINE" "benchmark baseline" "$baseline_iterations" "$baseline_runs"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: staged-read benchmark baseline architecture differs from current" >&2
+    exit 1
+  fi
+  for field in source_repository source_commit source_tree benchmark_fixture benchmark_validation; do
+    baseline_value="$(grep "^# $field: " "$BASELINE" || true)"
+    current_value="$(grep "^# $field: " "$CURRENT" || true)"
+    if [[ -z "$baseline_value" || "$baseline_value" != "$current_value" ]]; then
+      echo "error: io-staged-read benchmark $field provenance differs from baseline" >&2
+      exit 1
+    fi
+  done
 fi
 
 max_ratio="${EMEL_BENCH_MAX_REGRESSION_RATIO:-2.0}"
-if [[ "$SUITE" == "io-mmap" ]]; then
-  awk -v max_ratio="$max_ratio" '
+if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" ]]; then
+  awk -v max_ratio="$max_ratio" -v suite="$SUITE" '
     function value(name,    field_index, part) {
       for (field_index = 2; field_index <= NF; ++field_index) {
         split($field_index, part, "=")
@@ -457,7 +564,7 @@ if [[ "$SUITE" == "io-mmap" ]]; then
       failed = 0
       for (name in baseline_rust) {
         if (!(name in current_rust)) {
-          printf "missing mmap benchmark case: %s\n", name > "/dev/stderr"
+          printf "missing %s benchmark case: %s\n", suite, name > "/dev/stderr"
           failed = 1
           continue
         }
@@ -467,13 +574,13 @@ if [[ "$SUITE" == "io-mmap" ]]; then
           name, baseline_rust[name], current_rust[name], rust_ratio, \
           baseline_cpp[name], current_cpp[name], cpp_ratio
         if (rust_ratio > max_ratio || cpp_ratio > max_ratio) {
-          printf "mmap benchmark regression: %s exceeds %.3fx\n", name, max_ratio > "/dev/stderr"
+          printf "%s benchmark regression: %s exceeds %.3fx\n", suite, name, max_ratio > "/dev/stderr"
           failed = 1
         }
       }
       for (name in current_rust) {
         if (!(name in baseline_rust)) {
-          printf "new mmap benchmark case missing from baseline: %s\n", name > "/dev/stderr"
+          printf "new %s benchmark case missing from baseline: %s\n", suite, name > "/dev/stderr"
           failed = 1
         }
       }

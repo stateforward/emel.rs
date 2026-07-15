@@ -54,10 +54,11 @@ jobs:
       - run: cargo test --locked --workspace --doc --all-features
       - run: scripts/tests/bench_io_read_artifact.sh
       - run: scripts/tests/bench_io_mmap_artifact.sh
+      - run: bash scripts/tests/bench_io_staged_read_artifact.sh
       - name: Coverage gate (90% lines, 50% branches)
         run: scripts/coverage.sh
       - run: scripts/paritychecker.sh
-      - run: git diff --exit-code -- snapshots/parity/gguf/manifest.txt
+      - run: git diff --exit-code -- snapshots/parity
       - uses: actions/upload-artifact@v4
         if: always()
         with:

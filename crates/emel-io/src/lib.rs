@@ -22,4 +22,4 @@ impl ModelSource {
 pub(crate) mod loader;
 pub mod mmap;
 pub mod read;
-pub(crate) mod staged_read;
+pub mod staged_read;

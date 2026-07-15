@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(emel-io-staged-read-reference LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(NOT DEFINED EMEL_CPP_SOURCE_DIR)
+  message(FATAL_ERROR "EMEL_CPP_SOURCE_DIR must name the pinned emel.cpp checkout")
+endif()
+
+set(EMEL_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+set(EMEL_ENABLE_FUZZ OFF CACHE BOOL "" FORCE)
+set(EMEL_ENABLE_AARCH64_HOST_FEATURES OFF CACHE BOOL "" FORCE)
+set(EMEL_ENABLE_X86_64_HOST_FEATURES OFF CACHE BOOL "" FORCE)
+add_subdirectory("${EMEL_CPP_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/emel-cpp" EXCLUDE_FROM_ALL)
+
+add_executable(emel-io-staged-read-reference main.cpp)
+target_link_libraries(emel-io-staged-read-reference PRIVATE emel_core)

@@ -1,0 +1,10 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_tree: ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+# benchmark_fixture: public Stager/StageWindow, immutable source fill=0xa5, caller target cases=16384,1048576, chunk_bytes=4096
+# benchmark_validation: typed done and synchronous callback checked each iteration, target equals source after measurement
+io/staged-read/copy_16kib rust_ns_per_op=213.959 cpp_ns_per_op=201.292 rust_vs_cpp_ratio=1.062928 iter=1000 runs=5
+io/staged-read/copy_1mib rust_ns_per_op=13862.375 cpp_ns_per_op=13221.292 rust_vs_cpp_ratio=1.048489 iter=1000 runs=5

@@ -14,6 +14,11 @@ use emel_io::mmap::event::{
 };
 use emel_io::read::Reader;
 use emel_io::read::event::ReadTensor;
+use emel_io::staged_read::Stager;
+use emel_io::staged_read::event::{
+    Callback as StageCallback, StageWindow, StageWindowDone, StageWindowError,
+};
+use std::cell::Cell;
 
 const ALIGNMENT: usize = 32;
 const MAGIC: [u8; 4] = *b"GGUF";
@@ -24,6 +29,7 @@ enum Suite {
     Gguf,
     IoRead,
     IoMmap,
+    IoStagedRead,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Suite::Gguf => run_gguf(config)?,
         Suite::IoRead => run_io_read(config)?,
         Suite::IoMmap => run_io_mmap(config)?,
+        Suite::IoStagedRead => run_io_staged_read(config)?,
     }
     Ok(())
 }
@@ -165,6 +172,65 @@ fn run_io_mmap(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn run_io_staged_read(config: Config) -> Result<(), emel_io::staged_read::event::Error> {
+    println!("# source_repository: stateforward/emel.cpp");
+    println!("# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
+    println!("# source_tree: ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa");
+    println!(
+        "# benchmark_fixture: public Stager/StageWindow, immutable source fill=0xa5, caller target cases=16384,1048576, chunk_bytes=4096"
+    );
+    println!(
+        "# benchmark_validation: typed done and synchronous callback checked each iteration, target equals source after measurement"
+    );
+    print_case(
+        "io/staged-read/rust/copy_16kib",
+        benchmark_staged_read_case(16_384, config)?,
+        config,
+    );
+    print_case(
+        "io/staged-read/rust/copy_1mib",
+        benchmark_staged_read_case(1_048_576, config)?,
+        config,
+    );
+    Ok(())
+}
+
+fn benchmark_staged_read_case(
+    copy_bytes: usize,
+    config: Config,
+) -> Result<f64, emel_io::staged_read::event::Error> {
+    let source = vec![0xa5; copy_bytes];
+    let mut target = vec![0_u8; copy_bytes];
+    let logical = u64::try_from(copy_bytes).expect("benchmark fixture length");
+    let done = Cell::new(None::<StageWindowDone>);
+    let error = Cell::new(None::<StageWindowError>);
+    let mut actor = Stager::new();
+    let timing = measure(config, || {
+        done.set(None);
+        error.set(None);
+        let outcome = actor.process_event(
+            StageWindow::new(
+                0,
+                logical,
+                4_096,
+                Some(black_box(&source)),
+                black_box(&mut target),
+            )
+            .on_done(StageCallback::store(&done))
+            .on_error(StageCallback::store(&error)),
+        )?;
+        if outcome.bytes_committed() != logical || done.get() != Some(outcome) {
+            return Err(emel_io::staged_read::event::Error::InternalError);
+        }
+        black_box(outcome);
+        Ok(())
+    })?;
+    if target != source {
+        return Err(emel_io::staged_read::event::Error::InternalError);
+    }
+    Ok(timing)
+}
+
 fn benchmark_mmap_case(
     mapper: &mut Mapper,
     fixture: &std::path::Path,
@@ -245,9 +311,13 @@ fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
             suite = Some(Suite::IoMmap);
             continue;
         }
+        if argument == "io-staged-read" {
+            suite = Some(Suite::IoStagedRead);
+            continue;
+        }
         if argument == "--help" || argument == "-h" {
             println!(
-                "usage: emel-bench [gguf|io-read|io-mmap] [--iterations=N] [--runs=N] \
+                "usage: emel-bench [gguf|io-read|io-mmap|io-staged-read] [--iterations=N] [--runs=N] \
                  [--warmup-iterations=N]"
             );
             std::process::exit(0);

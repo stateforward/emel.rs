@@ -47,6 +47,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "emel_io_staged_read"
+path = "fuzz_targets/emel_io_staged_read.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 resolver = "3"

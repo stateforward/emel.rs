@@ -1,0 +1,20 @@
+io-staged-read-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_tree=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+source_files=src/emel/io/staged_read/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,sm.hpp
+source_tests=tests/io/staged_read/lifecycle_tests.cpp
+fixture_config=caller_owned_memory,platform_supported,synchronous_callbacks,single_aligned_and_remainder,batch_offsets,validation_precedence
+contract_delta=rust_borrows_prove_non_null_targets_and_source_lengths
+case=single_aligned outcome=done bytes_committed=8 callback_bytes_committed=8 target=6162636465666768
+case=single_remainder outcome=done bytes_committed=10 callback_bytes_committed=10 target=6162636465666768696a
+case=single_missing_callbacks outcome=error error=invalid_callbacks callback=false target=00000000
+case=single_invalid_contract outcome=error error=invalid_stage_contract callback=true target=
+case=single_offset_overflow outcome=error error=invalid_stage_contract callback=true target=0000
+case=single_invalid_target outcome=error error=invalid_target_window callback=true target=000000
+case=single_null_source outcome=error error=null_source_span callback=true target=00000000
+case=single_insufficient_source outcome=error error=insufficient_source_span callback=true target=00000000
+case=single_source_mismatch outcome=error error=source_span_size_mismatch callback=true target=00000000
+case=batch_success outcome=done done_count=2 bytes_committed=9 callback_done_count=2 callback_bytes_committed=9 first_target=32333435 second_target=3839616263
+case=batch_invalid outcome=error error=invalid_stage_contract failed_index=1 callback=true first_target=00000000 second_target=00
+case=batch_missing_callbacks outcome=error error=invalid_callbacks failed_index=0 callback=false

@@ -9,7 +9,7 @@ CORPUS_DIR="$BUILD_DIR/gguf-corpus"
 DURATION_SECONDS="${EMEL_FUZZ_SECONDS:-10}"
 MAX_LEN="${EMEL_FUZZ_MAX_LEN:-65536}"
 MODE="run"
-TARGETS=(gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap)
+TARGETS=(gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap emel_io_staged_read)
 
 usage() {
   cat <<'USAGE'
@@ -17,7 +17,7 @@ usage: scripts/fuzz.sh [OPTIONS]
 
 Seed and run the isolated cargo-fuzz targets for emel-gguf and emel-io.
 
-  --target NAME   run one of: gguf_loader, gguf_load, gguf_lifecycle, emel_io_read, emel_io_mmap
+  --target NAME   run one of: gguf_loader, gguf_load, gguf_lifecycle, emel_io_read, emel_io_mmap, emel_io_staged_read
   --seconds N     libFuzzer time budget per target (default: 10)
   --max-len N     maximum generated input size (default: 65536)
   --build-only    compile selected targets without running them
@@ -31,7 +31,7 @@ USAGE
 is_target() {
   local requested="$1"
   local target
-  for target in gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap; do
+  for target in gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap emel_io_staged_read; do
     if [[ "$requested" == "$target" ]]; then
       return 0
     fi
@@ -96,7 +96,7 @@ seed_corpus() {
 
 needs_gguf_corpus=false
 for target in "${TARGETS[@]}"; do
-  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" ]]; then
+  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" ]]; then
     needs_gguf_corpus=true
   fi
 done
@@ -122,7 +122,7 @@ for target in "${TARGETS[@]}"; do
     (cd "$FUZZ_DIR" && cargo fuzz build "$target")
   else
     echo "Fuzzing $target for ${DURATION_SECONDS}s with max_len=$MAX_LEN"
-    if [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" ]]; then
+    if [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" ]]; then
       (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
         -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
     else

@@ -10,6 +10,8 @@ IO_READ_SNAPSHOT="${EMEL_IO_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-
 IO_READ_BUILD_DIR="${EMEL_IO_READ_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-read-parity}"
 IO_MMAP_SNAPSHOT="${EMEL_IO_MMAP_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-mmap/manifest.txt}"
 IO_MMAP_BUILD_DIR="${EMEL_IO_MMAP_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-mmap-parity}"
+IO_STAGED_READ_SNAPSHOT="${EMEL_IO_STAGED_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-staged-read/manifest.txt}"
+IO_STAGED_READ_BUILD_DIR="${EMEL_IO_STAGED_READ_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-staged-read-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
@@ -38,7 +40,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, or io-mmap (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, or io-staged-read (default: all)
 
 Model paths are checked during the live phase. Without paths, the deterministic
 fixture corpus is used.
@@ -72,6 +74,7 @@ for argument in "$@"; do
     --suite=gguf) SUITE=gguf ;;
     --suite=io-read) SUITE=io-read ;;
     --suite=io-mmap) SUITE=io-mmap ;;
+    --suite=io-staged-read) SUITE=io-staged-read ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -94,15 +97,18 @@ fi
 RUN_GGUF=false
 RUN_IO_READ=false
 RUN_IO_MMAP=false
+RUN_IO_STAGED_READ=false
 case "$SUITE" in
   all)
     RUN_GGUF=true
     RUN_IO_READ=true
     RUN_IO_MMAP=true
+    RUN_IO_STAGED_READ=true
     ;;
   gguf) RUN_GGUF=true ;;
   io-read) RUN_IO_READ=true ;;
   io-mmap) RUN_IO_MMAP=true ;;
+  io-staged-read) RUN_IO_STAGED_READ=true ;;
 esac
 
 fixture_models=()
@@ -366,6 +372,60 @@ run_io_mmap_parity() {
   echo "I/O mmap parity passed (emel.cpp $EMEL_CPP_COMMIT)"
 }
 
+run_io_staged_read_parity() {
+  local source_commit source_tree rust_output reference_output materialized_source
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/io)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_IO_TREE" ]]; then
+    echo "error: emel.cpp I/O reference identity drifted" >&2
+    echo "commit: $source_commit" >&2
+    echo "tree:   $source_tree" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- src/emel/io tests/io; then
+    echo "error: emel.cpp I/O reference files are dirty" >&2
+    exit 1
+  fi
+
+  materialized_source="$IO_STAGED_READ_BUILD_DIR/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | \
+    tar -x -C "$materialized_source"
+
+  local cmake_args=(
+    -S "$ROOT_DIR/tools/emel-io-staged-read-reference"
+    -B "$IO_STAGED_READ_BUILD_DIR/reference-build"
+    -DCMAKE_BUILD_TYPE=Release
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  )
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$IO_STAGED_READ_BUILD_DIR/reference-build" --parallel \
+    --target emel-io-staged-read-reference
+
+  mkdir -p "$IO_STAGED_READ_BUILD_DIR"
+  rust_output="$IO_STAGED_READ_BUILD_DIR/rust.out"
+  reference_output="$IO_STAGED_READ_BUILD_DIR/reference.out"
+  cargo run --quiet --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-io --example staged_read_parity >"$rust_output"
+  "$IO_STAGED_READ_BUILD_DIR/reference-build/emel-io-staged-read-reference" \
+    >"$reference_output"
+  diff -u "$reference_output" "$rust_output"
+
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$IO_STAGED_READ_SNAPSHOT")"
+    install -m 0644 "$reference_output" "$IO_STAGED_READ_SNAPSHOT"
+    echo "Updated I/O staged-read parity snapshot from emel.cpp $EMEL_CPP_COMMIT"
+  fi
+  if $RUN_SNAPSHOT; then
+    diff -u "$IO_STAGED_READ_SNAPSHOT" "$rust_output"
+  fi
+  echo "I/O staged-read parity passed (12 cases, emel.cpp $EMEL_CPP_COMMIT)"
+}
+
 if $RUN_GGUF; then
   if $RUN_UPDATE; then
     update_snapshot
@@ -383,4 +443,7 @@ if $RUN_IO_READ; then
 fi
 if $RUN_IO_MMAP; then
   run_io_mmap_parity
+fi
+if $RUN_IO_STAGED_READ; then
+  run_io_staged_read_parity
 fi
