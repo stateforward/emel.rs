@@ -20,21 +20,24 @@ mod tests {
     fn single_read_copies_selected_range_and_publishes_done() {
         let mut reader = Reader::new();
         let source = *b"abcdef";
-        let mut target = [0_u8; 4];
+        let mut target_bytes = [0_u8; 4];
         let done = Cell::new(None::<ReadTensorDone>);
         let error = Cell::new(None::<ReadTensorError>);
 
-        let result = reader.process_event(
-            ReadTensor::new(7, "tensor.bin", Some(&source), &mut target)
-                .with_range(1, 4)
-                .on_done(Callback::store(&done))
-                .on_error(Callback::store(&error)),
-        );
+        let result = {
+            let target = Target::new(&mut target_bytes);
+            reader.process_event(
+                ReadTensor::new(7, "tensor.bin", Some(&source), &target)
+                    .with_range(1, 4)
+                    .on_done(Callback::store(&done))
+                    .on_error(Callback::store(&error)),
+            )
+        };
 
         assert_eq!(result, Ok(ReadTensorDone::new(7, 4)));
         assert_eq!(done.get(), result.ok());
         assert_eq!(error.get(), None);
-        assert_eq!(&target, b"bcde");
+        assert_eq!(&target_bytes, b"bcde");
         assert!(reader.is_ready());
     }
 
@@ -104,9 +107,12 @@ mod tests {
         );
         let mut reader = Reader::new();
         let mut short_target = [0_u8; 2];
-        let result = reader.process_event(
-            ReadTensor::new(6, "valid.bin", Some(&source), &mut short_target).with_range(0, 4),
-        );
+        let result = {
+            let target = Target::new(&mut short_target);
+            reader.process_event(
+                ReadTensor::new(6, "valid.bin", Some(&source), &target).with_range(0, 4),
+            )
+        };
         assert_eq!(result, Err(Error::InvalidRequest));
         assert!(reader.is_ready());
     }
@@ -115,13 +121,16 @@ mod tests {
     fn single_read_classifies_platform_and_external_source_errors() {
         let source = *b"abcdefgh";
         let mut reader = Reader::new();
-        let mut target = [0_u8; 4];
-        let result = reader.read_tensor_on_unsupported_platform(ReadTensor::new(
-            1,
-            "valid.bin",
-            Some(&source),
-            &mut target,
-        ));
+        let mut target_bytes = [0_u8; 4];
+        let result = {
+            let target = Target::new(&mut target_bytes);
+            reader.read_tensor_on_unsupported_platform(ReadTensor::new(
+                1,
+                "valid.bin",
+                Some(&source),
+                &target,
+            ))
+        };
         assert_eq!(result, Err(Error::UnsupportedPlatform));
         assert!(reader.is_ready());
 
@@ -178,18 +187,24 @@ mod tests {
     fn callbacks_are_optional_and_error_callback_is_synchronous() {
         let mut reader = Reader::new();
         let source = *b"abcd";
-        let mut target = [0_u8; 4];
-        assert_eq!(
-            reader.process_event(ReadTensor::new(1, "valid.bin", Some(&source), &mut target,)),
-            Ok(ReadTensorDone::new(1, 4)),
-        );
+        let mut target_bytes = [0_u8; 4];
+        {
+            let target = Target::new(&mut target_bytes);
+            assert_eq!(
+                reader.process_event(ReadTensor::new(1, "valid.bin", Some(&source), &target)),
+                Ok(ReadTensorDone::new(1, 4)),
+            );
+        }
 
         let error_slot = Cell::new(None::<ReadTensorError>);
-        let mut target = [0_u8; 4];
-        let result = reader.process_event(
-            ReadTensor::new(2, "missing.bin", None, &mut target)
-                .on_error(Callback::store(&error_slot)),
-        );
+        let mut target_bytes = [0_u8; 4];
+        let result = {
+            let target = Target::new(&mut target_bytes);
+            reader.process_event(
+                ReadTensor::new(2, "missing.bin", None, &target)
+                    .on_error(Callback::store(&error_slot)),
+            )
+        };
         assert_eq!(result, Err(Error::FileOpenFailed));
         assert_eq!(
             error_slot.get(),
@@ -409,33 +424,38 @@ mod tests {
     #[test]
     fn reader_recovers_after_errors() {
         let mut reader = Reader::new();
-        let mut target = [0_u8; 1];
-        assert_eq!(
-            reader.process_event(ReadTensor::new(1, "missing.bin", None, &mut target)),
-            Err(Error::FileOpenFailed),
-        );
-        assert!(reader.is_ready());
-
+        let mut target_bytes = [0_u8; 1];
         let source = *b"x";
-        assert_eq!(
-            reader.process_event(ReadTensor::new(2, "valid.bin", Some(&source), &mut target,)),
-            Ok(ReadTensorDone::new(2, 1)),
-        );
-        assert_eq!(target, source);
+        {
+            let target = Target::new(&mut target_bytes);
+            assert_eq!(
+                reader.process_event(ReadTensor::new(1, "missing.bin", None, &target)),
+                Err(Error::FileOpenFailed),
+            );
+            assert!(reader.is_ready());
+            assert_eq!(
+                reader.process_event(ReadTensor::new(2, "valid.bin", Some(&source), &target)),
+                Ok(ReadTensorDone::new(2, 1)),
+            );
+        }
+        assert_eq!(target_bytes, source);
         assert!(reader.is_ready());
     }
 
     fn assert_single_error(
-        request: impl for<'a> FnOnce(&'a mut [u8]) -> ReadTensor<'a>,
+        request: impl for<'a> FnOnce(&'a Target<'a>) -> ReadTensor<'a>,
         expected: Error,
     ) {
         let mut reader = Reader::new();
-        let mut target = [0_u8; 4];
+        let mut target_bytes = [0_u8; 4];
         let error = Cell::new(None::<ReadTensorError>);
-        let result = reader.process_event(request(&mut target).on_error(Callback::store(&error)));
+        let result = {
+            let target = Target::new(&mut target_bytes);
+            reader.process_event(request(&target).on_error(Callback::store(&error)))
+        };
         assert_eq!(result, Err(expected));
         assert_eq!(error.get().map(ReadTensorError::error), Some(expected));
-        assert_eq!(target, [0; 4]);
+        assert_eq!(target_bytes, [0; 4]);
         assert!(reader.is_ready());
     }
 }

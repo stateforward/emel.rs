@@ -20,7 +20,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -35,6 +35,7 @@ for argument in "$@"; do
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
     --suite=io-mmap) SUITE=io-mmap; runner_args[0]=io-mmap ;;
     --suite=io-staged-read) SUITE=io-staged-read; runner_args[0]=io-staged-read ;;
+    --suite=io-loader) SUITE=io-loader; runner_args[0]=io-loader ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
   esac
@@ -218,6 +219,32 @@ elif [[ "$SUITE" == "io-staged-read" ]]; then
     }
     END { emit("16kib"); emit("1mib") }
   ' "$rust_current" "$reference_current" >"$CURRENT"
+elif [[ "$SUITE" == "io-loader" ]]; then
+  "$RUNNER" "${runner_args[@]}" >"$CURRENT"
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/io)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || "$source_tree" != "$EMEL_CPP_IO_TREE" ]]; then
+    echo "error: emel.cpp I/O reference identity drifted" >&2; exit 1
+  fi
+  reference_root="$BUILD_DIR/io-loader-reference"
+  materialized_source="$reference_root/emel-cpp-source"
+  cmake -E remove_directory "$materialized_source"; cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | tar -x -C "$materialized_source"
+  cmake_args=(-S "$ROOT_DIR/tools/emel-io-loader-reference" -B "$reference_root/build"
+    -DCMAKE_BUILD_TYPE=Release "-DEMEL_CPP_SOURCE_DIR=$materialized_source")
+  if command -v ninja >/dev/null 2>&1; then cmake_args+=(-G Ninja); fi
+  cmake "${cmake_args[@]}"; cmake --build "$reference_root/build" --parallel --target emel-io-loader-reference
+  config_values="$(awk '/^# benchmark_config: / { for(i=3;i<=NF;i++){split($i,p,"=");v[p[1]]=p[2]} } END {print v["iterations"],v["runs"],v["warmup_iterations"]}' "$CURRENT")"
+  read -r iterations runs warmup_iterations <<<"$config_values"
+  reference_current="$CURRENT.reference"
+  "$reference_root/build/emel-io-loader-reference" --benchmark "$iterations" "$runs" "$warmup_iterations" >"$reference_current"
+  rust_current="$CURRENT.rust"; mv "$CURRENT" "$rust_current"
+  awk '
+    function field(name, i,p){for(i=2;i<=NF;i++){split($i,p,"=");if(p[1]==name)return p[2]}return ""}
+    FNR==NR {if($0~/^#/){print;next} if($1=="io/loader/rust/read_copy_1mib"){r=field("ns_per_op");it=field("iter");runs=field("runs")} next}
+    $1=="io/loader/reference/read_copy_1mib" {c=field("ns_per_op")}
+    END {printf "io/loader/read_copy_1mib rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n",r,c,r/c,it,runs}
+  ' "$rust_current" "$reference_current" >"$CURRENT"
 else
   "$RUNNER" "${runner_args[@]}" >"$CURRENT"
 fi
@@ -272,7 +299,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" ]]; then
+if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -431,6 +458,10 @@ validate_io_staged_read_artifact() {
   bash "$ROOT_DIR/scripts/validate_io_staged_read_bench.sh" "$@"
 }
 
+validate_io_loader_artifact() {
+  bash "$ROOT_DIR/scripts/validate_io_loader_bench.sh" "$@"
+}
+
 if [[ "$SUITE" == "io-read" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   current_iterations="${current_config_values%% *}"
@@ -449,6 +480,11 @@ elif [[ "$SUITE" == "io-staged-read" ]]; then
   current_runs="${current_config_values#* }"
   validate_io_staged_read_artifact \
     "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
+elif [[ "$SUITE" == "io-loader" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  current_iterations="${current_config_values%% *}"
+  current_runs="${current_config_values#* }"
+  validate_io_loader_artifact "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
 fi
 
 if $UPDATE; then
@@ -539,10 +575,24 @@ elif [[ "$SUITE" == "io-staged-read" ]]; then
       exit 1
     fi
   done
+elif [[ "$SUITE" == "io-loader" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  baseline_config_values="$(validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width")"
+  baseline_iterations="${baseline_config_values%% *}"
+  baseline_runs="${baseline_config_values#* }"
+  validate_io_loader_artifact "$BASELINE" "benchmark baseline" "$baseline_iterations" "$baseline_runs"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: loader benchmark architecture differs from baseline" >&2; exit 1
+  fi
+  for field in source_repository source_commit source_tree benchmark_fixture benchmark_validation; do
+    [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
+      echo "error: io-loader benchmark $field provenance differs from baseline" >&2; exit 1; }
+  done
 fi
 
 max_ratio="${EMEL_BENCH_MAX_REGRESSION_RATIO:-2.0}"
-if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" ]]; then
+if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" ]]; then
   awk -v max_ratio="$max_ratio" -v suite="$SUITE" '
     function value(name,    field_index, part) {
       for (field_index = 2; field_index <= NF; ++field_index) {

@@ -10,10 +10,12 @@ GGUF_REPORT="${EMEL_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-gguf.json}"
 IO_REPORT="${EMEL_IO_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io.json}"
 IO_MMAP_REPORT="${EMEL_IO_MMAP_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-mmap.json}"
 IO_STAGED_READ_REPORT="${EMEL_IO_STAGED_READ_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-staged-read.json}"
+IO_LOADER_REPORT="${EMEL_IO_LOADER_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-loader.json}"
 GGUF_COVERAGE_TARGET_DIR="${EMEL_GGUF_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-gguf}"
 IO_COVERAGE_TARGET_DIR="${EMEL_IO_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io}"
 IO_MMAP_COVERAGE_TARGET_DIR="${EMEL_IO_MMAP_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-mmap}"
 IO_STAGED_READ_COVERAGE_TARGET_DIR="${EMEL_IO_STAGED_READ_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-staged-read}"
+IO_LOADER_COVERAGE_TARGET_DIR="${EMEL_IO_LOADER_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-loader}"
 
 if [[ $# -ne 0 ]]; then
   echo "usage: scripts/coverage.sh" >&2
@@ -50,8 +52,9 @@ mkdir -p \
   "$(dirname "$GGUF_REPORT")" \
   "$(dirname "$IO_REPORT")" \
   "$(dirname "$IO_MMAP_REPORT")" \
-  "$(dirname "$IO_STAGED_READ_REPORT")"
-echo "Coverage scope: emel-gguf and maintained emel-io read, mmap, and staged-read sources"
+  "$(dirname "$IO_STAGED_READ_REPORT")" \
+  "$(dirname "$IO_LOADER_REPORT")"
+echo "Coverage scope: emel-gguf and maintained emel-io read, mmap, staged-read, and loader sources"
 echo "Generated GGUF sm.rs is excluded; maintained emel-io SML sources are fully enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
@@ -103,10 +106,17 @@ CARGO_LLVM_COV_TARGET_DIR="$IO_STAGED_READ_COVERAGE_TARGET_DIR" cargo +"$COVERAG
   --json \
   --output-path "$IO_STAGED_READ_REPORT"
 
+echo "Running maintained emel-io loader coverage"
+CARGO_LLVM_COV_TARGET_DIR="$IO_LOADER_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
+  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-io --all-features --locked --branch \
+  --ignore-filename-regex 'crates/emel-io/(src/(lib\.rs|mmap/|read/|staged_read/|loader/tests\.rs)|tests/|examples/)' \
+  --summary-only --json --output-path "$IO_LOADER_REPORT"
+
 python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-gguf=$GGUF_REPORT" "emel-io=$IO_REPORT" \
   "emel-io-mmap=$IO_MMAP_REPORT" \
-  "emel-io-staged-read=$IO_STAGED_READ_REPORT" <<'PY'
+  "emel-io-staged-read=$IO_STAGED_READ_REPORT" \
+  "emel-io-loader=$IO_LOADER_REPORT" <<'PY'
 import json
 import math
 import pathlib

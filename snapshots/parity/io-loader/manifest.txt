@@ -1,0 +1,24 @@
+io-loader-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_tree=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
+source_files=src/emel/io/loader/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,sm.hpp
+source_tests=tests/io/loader/lifecycle_tests.cpp
+fixture_config=public_loader,static_read_and_staged_dependencies,single_and_batch,typed_failures
+contract_delta=rust_target_capability_replaces_raw_buffer_result;rust_loader_batch_max=65536_for_bounded_rtc_cpp_reference_unbounded
+case=invalid outcome=error error=invalid_request strategy_error=none
+case=none outcome=error error=unsupported_strategy strategy_error=none
+case=mapped outcome=error error=unsupported_strategy strategy_error=none
+case=external outcome=error error=unsupported_strategy strategy_error=none
+case=unknown outcome=error error=unsupported_strategy strategy_error=none
+case=read_success outcome=done strategy=read_copy bytes_loaded=4 callback=true target=63646566
+case=staged_success outcome=done strategy=staged_read bytes_loaded=4 callback=true target=63646566
+case=read_absent outcome=error error=unsupported_strategy strategy_error=none
+case=read_failure outcome=error error=unavailable strategy_error=file_read_failed
+case=staged_failure outcome=error error=unavailable strategy_error=invalid_stage_contract
+case=batch_read outcome=done strategy=read_copy done_count=2 bytes_loaded=7 callback=true first=626364 second=66676869
+case=batch_staged outcome=done strategy=staged_read done_count=2 bytes_loaded=7 callback=true first=626364 second=66676869
+case=batch_invalid outcome=error error=invalid_request strategy_error=none failed_index=0
+case=batch_absent outcome=error error=unsupported_strategy strategy_error=none failed_index=0
+case=batch_read_failure outcome=error error=unavailable strategy_error=file_read_failed failed_index=1
+case=batch_staged_failure outcome=error error=unavailable strategy_error=invalid_stage_contract failed_index=0

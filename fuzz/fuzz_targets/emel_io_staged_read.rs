@@ -19,17 +19,14 @@ fuzz_target!(|data: &[u8]| {
     let error = Cell::new(None::<StageWindowError>);
     let mut target = [0_u8; 64];
     let mut actor = Stager::new();
-    let _ = actor.process_event(
-        StageWindow::new(
-            offset,
-            logical,
-            chunk,
-            Some(source),
-            &mut target[..target_len],
-        )
-        .on_done(Callback::store(&done))
-        .on_error(Callback::store(&error)),
-    );
+    {
+        let target = Target::new(&mut target[..target_len]);
+        let _ = actor.process_event(
+            StageWindow::new(offset, logical, chunk, Some(source), &target)
+                .on_done(Callback::store(&done))
+                .on_error(Callback::store(&error)),
+        );
+    }
 
     let mut first_bytes = [0_u8; 32];
     let mut second_bytes = [0_u8; 32];
@@ -40,8 +37,8 @@ fuzz_target!(|data: &[u8]| {
     let second_offset = read_u64(data, 41);
     let second_size = read_u64(data, 49);
     let spans = [
-        StageSpan::new(first_offset, first_size, Some(source), &first_target),
-        StageSpan::new(second_offset, second_size, Some(source), &second_target),
+        StageSpan::staged(first_offset, first_size, Some(source), &first_target),
+        StageSpan::staged(second_offset, second_size, Some(source), &second_target),
     ];
     let batch_done = Cell::new(None::<StageWindowBatchDone>);
     let batch_error = Cell::new(None::<StageWindowBatchError>);
@@ -55,15 +52,22 @@ fuzz_target!(|data: &[u8]| {
     let mut recovery_target = [0_u8];
     let recovery_done = Cell::new(None::<StageWindowDone>);
     let recovery_error = Cell::new(None::<StageWindowError>);
+    let recovery_target_capability = Target::new(&mut recovery_target);
     let recovery = actor
         .process_event(
-            StageWindow::new(0, 1, 1, Some(&recovery_source), &mut recovery_target)
+            StageWindow::new(
+                0,
+                1,
+                1,
+                Some(&recovery_source),
+                &recovery_target_capability,
+            )
                 .on_done(Callback::store(&recovery_done))
                 .on_error(Callback::store(&recovery_error)),
         )
         .expect("the actor must recover after every classified fuzz request");
     assert_eq!(recovery.bytes_committed(), 1);
-    assert_eq!(recovery_target, recovery_source);
+    assert_eq!(recovery_target_capability.try_matches(&recovery_source), Ok(true));
     assert_eq!(recovery_done.get(), Some(recovery));
 });
 

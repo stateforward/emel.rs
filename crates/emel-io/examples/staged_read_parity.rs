@@ -46,22 +46,25 @@ pub fn render_manifest() -> String {
 
 fn render_single_success(manifest: &mut String, name: &str, source: &[u8], chunk: u64) {
     let mut actor = Stager::new();
-    let mut target = vec![0_u8; source.len()];
+    let mut target_bytes = vec![0_u8; source.len()];
     let done = Cell::new(None::<StageWindowDone>);
     let error = Cell::new(None::<StageWindowError>);
-    let outcome = actor
-        .process_event(
-            StageWindow::new(17, source.len() as u64, chunk, Some(source), &mut target)
-                .on_done(Callback::store(&done))
-                .on_error(Callback::store(&error)),
-        )
-        .expect("pinned success case");
+    let outcome = {
+        let target = Target::new(&mut target_bytes);
+        actor
+            .process_event(
+                StageWindow::new(17, source.len() as u64, chunk, Some(source), &target)
+                    .on_done(Callback::store(&done))
+                    .on_error(Callback::store(&error)),
+            )
+            .expect("pinned success case")
+    };
     writeln!(
         manifest,
         "case=single_{name} outcome=done bytes_committed={} callback_bytes_committed={} target={}",
         outcome.bytes_committed(),
         done.get().expect("synchronous callback").bytes_committed(),
-        hex(&target),
+        hex(&target_bytes),
     )
     .expect("writing to String is infallible");
 }
@@ -127,22 +130,25 @@ fn render_single_error(
     callbacks: bool,
 ) {
     let mut actor = Stager::new();
-    let mut target = vec![0_u8; target_len];
+    let mut target_bytes = vec![0_u8; target_len];
     let done = Cell::new(None::<StageWindowDone>);
     let error = Cell::new(None::<StageWindowError>);
-    let mut event = StageWindow::new(offset, logical, chunk, source, &mut target);
-    if callbacks {
-        event = event
-            .on_done(Callback::store(&done))
-            .on_error(Callback::store(&error));
-    }
-    let outcome = actor.process_event(event).expect_err("pinned error case");
+    let outcome = {
+        let target = Target::new(&mut target_bytes);
+        let mut event = StageWindow::new(offset, logical, chunk, source, &target);
+        if callbacks {
+            event = event
+                .on_done(Callback::store(&done))
+                .on_error(Callback::store(&error));
+        }
+        actor.process_event(event).expect_err("pinned error case")
+    };
     writeln!(
         manifest,
         "case=single_{name} outcome=error error={} callback={} target={}",
         error_name(outcome),
         error.get().is_some(),
-        hex(&target),
+        hex(&target_bytes),
     )
     .expect("writing to String is infallible");
 }
@@ -158,8 +164,8 @@ fn render_batch_success(manifest: &mut String) {
         let first_target = Target::new(&mut first_bytes);
         let second_target = Target::new(&mut second_bytes);
         let spans = [
-            StageSpan::new(2, 4, Some(source), &first_target),
-            StageSpan::new(8, 5, Some(source), &second_target),
+            StageSpan::staged(2, 4, Some(source), &first_target),
+            StageSpan::staged(8, 5, Some(source), &second_target),
         ];
         actor
             .process_event(
@@ -194,8 +200,8 @@ fn render_batch_errors(manifest: &mut String) {
         let first_target = Target::new(&mut first_bytes);
         let second_target = Target::new(&mut second_bytes);
         let spans = [
-            StageSpan::new(0, 4, Some(source), &first_target),
-            StageSpan::new(15, 2, Some(source), &second_target),
+            StageSpan::staged(0, 4, Some(source), &first_target),
+            StageSpan::staged(15, 2, Some(source), &second_target),
         ];
         actor
             .process_event(

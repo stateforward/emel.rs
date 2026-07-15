@@ -1,6 +1,6 @@
 //! Owned actor boundary for read dispatch.
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 use core::fmt;
 
 use super::event::{self, Event};
@@ -37,6 +37,32 @@ impl Reader {
         self.dispatch_read_tensor(event, super::sm::PLATFORM_SUPPORTED)
     }
 
+    pub(crate) fn read_span(
+        &mut self,
+        event: event::ReadSpan<'_>,
+    ) -> Result<event::ReadTensorDone, event::Error> {
+        let span = event.tensor;
+        let status = Cell::new(ReadStatus::new());
+        let runtime = ReadRuntime {
+            tensor_id: span.tensor_id,
+            file_index: span.file_index,
+            file_offset: span.file_offset,
+            byte_size: span.byte_size,
+            file_path: span.file_path,
+            source: span.source,
+            source_error: span.source_error,
+            target: &span.target.bytes,
+            on_done: None,
+            on_error: None,
+            platform_supported: super::sm::PLATFORM_SUPPORTED,
+            status: &status,
+        };
+        self.machine
+            .process_event(IoReadEvents::ReadTensor(runtime))
+            .map_err(|_| event::Error::InternalError)?;
+        status.get().result
+    }
+
     fn dispatch_read_tensor(
         &mut self,
         event: event::ReadTensor<'_>,
@@ -50,12 +76,11 @@ impl Reader {
             file_path,
             source,
             source_error,
-            target: target_bytes,
+            target,
             on_done,
             on_error,
         } = event;
         let status = Cell::new(ReadStatus::new());
-        let target = RefCell::new(&mut *target_bytes);
         let runtime = ReadRuntime {
             tensor_id,
             file_index,
@@ -64,7 +89,7 @@ impl Reader {
             file_path,
             source,
             source_error,
-            target: &target,
+            target: &target.bytes,
             on_done,
             on_error,
             platform_supported,

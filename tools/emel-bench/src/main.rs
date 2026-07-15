@@ -5,18 +5,21 @@ use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use emel_gguf::Loader;
+use emel_gguf::Loader as GgufLoader;
 use emel_gguf::event::{Bind, Error, Load, Parse, Probe};
+use emel_io::loader::Loader as IoLoader;
+use emel_io::loader::event::{LoadTensor, StrategyKind, StrategyPolicy, TensorLoadSpan};
 use emel_io::mmap::Mapper;
 use emel_io::mmap::event::{
     AdviseDontNeed, AdviseSequential, AdviseWillNeed, MapTensor, MappingCallback, MmapSource,
     ReleaseMapping, WithMapping,
 };
 use emel_io::read::Reader;
-use emel_io::read::event::ReadTensor;
+use emel_io::read::event::{ReadTensor, Target as ReadTarget};
 use emel_io::staged_read::Stager;
 use emel_io::staged_read::event::{
     Callback as StageCallback, StageWindow, StageWindowDone, StageWindowError,
+    Target as StageTarget,
 };
 use std::cell::Cell;
 
@@ -30,6 +33,7 @@ enum Suite {
     IoRead,
     IoMmap,
     IoStagedRead,
+    IoLoader,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -70,6 +74,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Suite::IoRead => run_io_read(config)?,
         Suite::IoMmap => run_io_mmap(config)?,
         Suite::IoStagedRead => run_io_staged_read(config)?,
+        Suite::IoLoader => run_io_loader(config)?,
     }
     Ok(())
 }
@@ -118,21 +123,56 @@ fn run_io_read(config: Config) -> Result<(), emel_io::read::event::Error> {
     );
     let source = vec![0xa5; COPY_BYTES];
     let mut target = vec![0_u8; COPY_BYTES];
+    let target_capability = ReadTarget::new(&mut target);
     let mut reader = Reader::new();
     let timing = measure(config, || {
         let done = reader.process_event(ReadTensor::new(
             1,
             "benchmark.bin",
             Some(black_box(&source)),
-            black_box(&mut target),
+            black_box(&target_capability),
         ))?;
         black_box(done);
         Ok(())
     })?;
-    if target != source {
+    if !target_capability
+        .try_matches(&source)
+        .map_err(|_| emel_io::read::event::Error::InternalError)?
+    {
         return Err(emel_io::read::event::Error::InternalError);
     }
     print_case("io/read/copy_1mib", timing, config);
+    Ok(())
+}
+
+fn run_io_loader(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    const COPY_BYTES: usize = 1024 * 1024;
+    println!("# source_repository: stateforward/emel.cpp");
+    println!("# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
+    println!("# source_tree: ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa");
+    println!(
+        "# benchmark_fixture: public Loader/LoadTensor read_copy, immutable source bytes=1048576 fill=0xa5, caller target bytes=1048576"
+    );
+    println!(
+        "# benchmark_validation: typed loader done checked each iteration, target equals source after measurement"
+    );
+    let source = vec![0xa5; COPY_BYTES];
+    let mut target_bytes = vec![0_u8; COPY_BYTES];
+    let target = ReadTarget::new(&mut target_bytes);
+    let span = TensorLoadSpan::new(1, "benchmark.bin", Some(&source), &target);
+    let policy = StrategyPolicy::new(StrategyKind::ReadCopy);
+    let mut loader = IoLoader::with_reader(Reader::new());
+    let timing = measure(config, || {
+        let done = loader
+            .process_event(LoadTensor::new(black_box(span), policy))
+            .map_err(|_| "loader dispatch failed")?;
+        black_box(done);
+        Ok::<(), &'static str>(())
+    })?;
+    if !target.try_matches(&source)? {
+        return Err("loader benchmark target mismatch".into());
+    }
+    print_case("io/loader/rust/read_copy_1mib", timing, config);
     Ok(())
 }
 
@@ -201,6 +241,7 @@ fn benchmark_staged_read_case(
 ) -> Result<f64, emel_io::staged_read::event::Error> {
     let source = vec![0xa5; copy_bytes];
     let mut target = vec![0_u8; copy_bytes];
+    let target_capability = StageTarget::new(&mut target);
     let logical = u64::try_from(copy_bytes).expect("benchmark fixture length");
     let done = Cell::new(None::<StageWindowDone>);
     let error = Cell::new(None::<StageWindowError>);
@@ -214,7 +255,7 @@ fn benchmark_staged_read_case(
                 logical,
                 4_096,
                 Some(black_box(&source)),
-                black_box(&mut target),
+                black_box(&target_capability),
             )
             .on_done(StageCallback::store(&done))
             .on_error(StageCallback::store(&error)),
@@ -225,7 +266,10 @@ fn benchmark_staged_read_case(
         black_box(outcome);
         Ok(())
     })?;
-    if target != source {
+    if !target_capability
+        .try_matches(&source)
+        .map_err(|_| emel_io::staged_read::event::Error::InternalError)?
+    {
         return Err(emel_io::staged_read::event::Error::InternalError);
     }
     Ok(timing)
@@ -315,9 +359,13 @@ fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
             suite = Some(Suite::IoStagedRead);
             continue;
         }
+        if argument == "io-loader" {
+            suite = Some(Suite::IoLoader);
+            continue;
+        }
         if argument == "--help" || argument == "-h" {
             println!(
-                "usage: emel-bench [gguf|io-read|io-mmap|io-staged-read] [--iterations=N] [--runs=N] \
+                "usage: emel-bench [gguf|io-read|io-mmap|io-staged-read|io-loader] [--iterations=N] [--runs=N] \
                  [--warmup-iterations=N]"
             );
             std::process::exit(0);
@@ -343,7 +391,7 @@ fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
 }
 
 fn benchmark_probe(bytes: &[u8], config: Config) -> Result<f64, Error> {
-    let mut loader = Loader::new();
+    let mut loader = GgufLoader::new();
     measure(config, || {
         let requirements = loader.process_event(Probe::new(black_box(bytes)))?;
         black_box(requirements);
@@ -353,14 +401,14 @@ fn benchmark_probe(bytes: &[u8], config: Config) -> Result<f64, Error> {
 
 fn benchmark_load(bytes: &[u8], config: Config) -> Result<f64, Error> {
     measure(config, || {
-        let model = Loader::new().process_event(Load::new(black_box(bytes)))?;
+        let model = GgufLoader::new().process_event(Load::new(black_box(bytes)))?;
         black_box(model);
         Ok(())
     })
 }
 
 fn benchmark_parse(bytes: &[u8], config: Config) -> Result<f64, Error> {
-    let mut loader = Loader::new();
+    let mut loader = GgufLoader::new();
     loader.process_event(Probe::new(bytes))?;
     loader.process_event(Bind::exact())?;
     measure(config, || {
@@ -467,13 +515,13 @@ fn tensor_fixture() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use emel_gguf::Loader;
+    use emel_gguf::Loader as GgufLoader;
     use emel_gguf::event::{Load, ParseDone};
 
     use super::{median, metadata_fixture, tensor_fixture};
 
     fn load(file_image: &[u8]) -> ParseDone<'_> {
-        Loader::new()
+        GgufLoader::new()
             .process_event(Load::new(file_image))
             .expect("fixture loads")
     }

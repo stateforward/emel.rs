@@ -22,13 +22,16 @@ fn aligned_and_remainder_windows_copy_and_publish_typed_outcomes() {
     let mut actor = Stager::new();
 
     let mut aligned = [0_u8; 8];
-    let result = actor
-        .process_event(
-            StageWindow::new(100, 8, 4, Some(&source[..8]), &mut aligned)
-                .on_done(Callback::store(&done_slot))
-                .on_error(Callback::store(&error_slot)),
-        )
-        .expect("aligned stage");
+    let result = {
+        let target = Target::new(&mut aligned);
+        actor
+            .process_event(
+                StageWindow::new(100, 8, 4, Some(&source[..8]), &target)
+                    .on_done(Callback::store(&done_slot))
+                    .on_error(Callback::store(&error_slot)),
+            )
+            .expect("aligned stage")
+    };
     assert_eq!(aligned, *b"abcdefgh");
     assert_eq!(result.bytes_committed(), 8);
     assert_eq!(done_slot.get(), Some(result));
@@ -36,13 +39,16 @@ fn aligned_and_remainder_windows_copy_and_publish_typed_outcomes() {
 
     done_slot.set(None);
     let mut remainder = [0_u8; 10];
-    let result = actor
-        .process_event(
-            StageWindow::new(200, 10, 4, Some(&source), &mut remainder)
-                .on_done(Callback::store(&done_slot))
-                .on_error(Callback::store(&error_slot)),
-        )
-        .expect("remainder stage");
+    let result = {
+        let target = Target::new(&mut remainder);
+        actor
+            .process_event(
+                StageWindow::new(200, 10, 4, Some(&source), &target)
+                    .on_done(Callback::store(&done_slot))
+                    .on_error(Callback::store(&error_slot)),
+            )
+            .expect("remainder stage")
+    };
     assert_eq!(remainder, source);
     assert_eq!(result.bytes_committed(), 10);
     assert_eq!(done_slot.get(), Some(result));
@@ -53,11 +59,14 @@ fn validation_precedence_and_source_size_classes_match_the_pinned_machine() {
     let source = [7_u8; 8];
     let mut actor = Stager::new();
 
-    let mut target = [0_u8; 2];
-    assert_eq!(
-        actor.process_event(StageWindow::new(u64::MAX, 0, 0, None, &mut target)),
-        Err(Error::InvalidCallbacks)
-    );
+    let mut target_bytes = [0_u8; 2];
+    {
+        let target = Target::new(&mut target_bytes);
+        assert_eq!(
+            actor.process_event(StageWindow::new(u64::MAX, 0, 0, None, &target)),
+            Err(Error::InvalidCallbacks)
+        );
+    }
 
     for (source, expected) in [
         (None, Error::NullSourceSpan),
@@ -66,29 +75,35 @@ fn validation_precedence_and_source_size_classes_match_the_pinned_machine() {
     ] {
         let done = Cell::new(None);
         let error = Cell::new(None);
-        let mut target = [0_u8; 4];
-        assert_eq!(
-            actor.process_event(
-                StageWindow::new(0, 4, 2, source, &mut target)
-                    .on_done(Callback::store(&done))
-                    .on_error(Callback::store(&error)),
-            ),
-            Err(expected)
-        );
+        let mut target_bytes = [0_u8; 4];
+        {
+            let target = Target::new(&mut target_bytes);
+            assert_eq!(
+                actor.process_event(
+                    StageWindow::new(0, 4, 2, source, &target)
+                        .on_done(Callback::store(&done))
+                        .on_error(Callback::store(&error)),
+                ),
+                Err(expected)
+            );
+        }
         assert_eq!(error.get().map(StageWindowError::error), Some(expected));
     }
 
     let done = Cell::new(None);
     let error = Cell::new(None);
     let mut short_target = [0_u8; 3];
-    assert_eq!(
-        actor.process_event(
-            StageWindow::new(0, 4, 2, Some(&source[..4]), &mut short_target)
-                .on_done(Callback::store(&done))
-                .on_error(Callback::store(&error)),
-        ),
-        Err(Error::InvalidTargetWindow)
-    );
+    {
+        let target = Target::new(&mut short_target);
+        assert_eq!(
+            actor.process_event(
+                StageWindow::new(0, 4, 2, Some(&source[..4]), &target)
+                    .on_done(Callback::store(&done))
+                    .on_error(Callback::store(&error)),
+            ),
+            Err(Error::InvalidTargetWindow)
+        );
+    }
 }
 
 #[test]
@@ -104,8 +119,8 @@ fn batch_copies_source_ranges_and_reports_first_invalid_index() {
         let first_target = Target::new(&mut first_bytes);
         let second_target = Target::new(&mut second_bytes);
         let spans = [
-            StageSpan::new(2, 4, Some(&source), &first_target),
-            StageSpan::new(8, 5, Some(&source), &second_target),
+            StageSpan::staged(2, 4, Some(&source), &first_target),
+            StageSpan::staged(8, 5, Some(&source), &second_target),
         ];
         let result = actor
             .process_event(
@@ -117,8 +132,8 @@ fn batch_copies_source_ranges_and_reports_first_invalid_index() {
 
         let invalid_target = Target::new(&mut invalid_bytes);
         let invalid = [
-            StageSpan::new(0, 4, Some(&source), &first_target),
-            StageSpan::new(15, 2, Some(&source), &invalid_target),
+            StageSpan::staged(0, 4, Some(&source), &first_target),
+            StageSpan::staged(15, 2, Some(&source), &invalid_target),
         ];
         let batch_error = actor
             .process_event(
@@ -175,27 +190,33 @@ fn callback_contracts_and_public_diagnostics_are_explicit() {
     assert_eq!(format!("{:?}", Stager::default()), "Stager { .. }");
 
     let source = [1_u8; 2];
-    let mut target = [0_u8; 2];
+    let mut target_bytes = [0_u8; 2];
     let mut actor = Stager::new();
-    assert_eq!(
-        actor.process_event(
-            StageWindow::new(0, 2, 1, Some(&source), &mut target).on_error(Callback::store(&error)),
-        ),
-        Err(Error::InvalidCallbacks)
-    );
+    {
+        let target = Target::new(&mut target_bytes);
+        assert_eq!(
+            actor.process_event(
+                StageWindow::new(0, 2, 1, Some(&source), &target).on_error(Callback::store(&error)),
+            ),
+            Err(Error::InvalidCallbacks)
+        );
+    }
     assert_eq!(
         error.get().map(StageWindowError::error),
         Some(Error::InvalidCallbacks)
     );
 
     error.set(None);
-    let mut target = [0_u8; 2];
-    assert_eq!(
-        actor.process_event(
-            StageWindow::new(0, 2, 1, Some(&source), &mut target).on_done(Callback::store(&done)),
-        ),
-        Err(Error::InvalidCallbacks)
-    );
+    let mut target_bytes = [0_u8; 2];
+    {
+        let target = Target::new(&mut target_bytes);
+        assert_eq!(
+            actor.process_event(
+                StageWindow::new(0, 2, 1, Some(&source), &target).on_done(Callback::store(&done)),
+            ),
+            Err(Error::InvalidCallbacks)
+        );
+    }
     assert_eq!(error.get(), None);
 }
 

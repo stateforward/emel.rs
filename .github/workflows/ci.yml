@@ -55,6 +55,7 @@ jobs:
       - run: scripts/tests/bench_io_read_artifact.sh
       - run: scripts/tests/bench_io_mmap_artifact.sh
       - run: bash scripts/tests/bench_io_staged_read_artifact.sh
+      - run: bash scripts/tests/bench_io_loader_artifact.sh
       - name: Coverage gate (90% lines, 50% branches)
         run: scripts/coverage.sh
       - run: scripts/paritychecker.sh

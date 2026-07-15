@@ -49,13 +49,16 @@ pub fn render_manifest() -> String {
 
 fn render_single_success(manifest: &mut String) {
     let mut reader = Reader::new();
-    let mut target = [0_u8; 4];
+    let mut target_bytes = [0_u8; 4];
     let callback = Cell::new(None::<ReadTensorDone>);
-    let result = reader.process_event(
-        ReadTensor::new(7, "tensor.bin", Some(b"abcdef"), &mut target)
-            .with_range(1, 4)
-            .on_done(Callback::store(&callback)),
-    );
+    let result = {
+        let target = Target::new(&mut target_bytes);
+        reader.process_event(
+            ReadTensor::new(7, "tensor.bin", Some(b"abcdef"), &target)
+                .with_range(1, 4)
+                .on_done(Callback::store(&callback)),
+        )
+    };
     let done = result.expect("pinned single-success case must succeed");
     let callback = callback
         .get()
@@ -65,7 +68,7 @@ fn render_single_success(manifest: &mut String) {
         "case=single_success outcome=done tensor_id={} bytes_copied={} target={} callback_tensor_id={} callback_bytes_copied={}",
         done.tensor_id(),
         done.bytes_copied(),
-        hex(&target),
+        hex(&target_bytes),
         callback.tensor_id(),
         callback.bytes_copied(),
     )
@@ -109,12 +112,15 @@ fn render_single_errors(manifest: &mut String) {
 fn render_single_error(
     manifest: &mut String,
     name: &str,
-    request: impl for<'a> FnOnce(&'a mut [u8]) -> ReadTensor<'a>,
+    request: impl for<'a> FnOnce(&'a Target<'a>) -> ReadTensor<'a>,
 ) {
     let mut reader = Reader::new();
-    let mut target = [0_u8; 4];
+    let mut target_bytes = [0_u8; 4];
     let callback = Cell::new(None::<ReadTensorError>);
-    let result = reader.process_event(request(&mut target).on_error(Callback::store(&callback)));
+    let result = {
+        let target = Target::new(&mut target_bytes);
+        reader.process_event(request(&target).on_error(Callback::store(&callback)))
+    };
     let error = result.expect_err("pinned single-error case must fail");
     let callback = callback
         .get()
@@ -124,7 +130,7 @@ fn render_single_error(
         "case=single_{name} outcome=error error={} callback_error={} target={}",
         error_name(error),
         error_name(callback.error()),
-        hex(&target),
+        hex(&target_bytes),
     )
     .expect("writing to String is infallible");
 }

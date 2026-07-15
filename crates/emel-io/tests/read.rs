@@ -14,11 +14,14 @@ use windows_sys as _;
 fn public_reader_dispatches_typed_single_and_batch_events() {
     let mut reader = Reader::new();
     let mut single_target = [0_u8; 3];
-    let single = reader
-        .process_event(
-            ReadTensor::new(4, "single.bin", Some(b"abcdef"), &mut single_target).with_range(1, 3),
-        )
-        .expect("single read should succeed");
+    let single = {
+        let target = Target::new(&mut single_target);
+        reader
+            .process_event(
+                ReadTensor::new(4, "single.bin", Some(b"abcdef"), &target).with_range(1, 3),
+            )
+            .expect("single read should succeed")
+    };
     assert_eq!(single.tensor_id(), 4);
     assert_eq!(single.bytes_copied(), 3);
     assert_eq!(&single_target, b"bcd");

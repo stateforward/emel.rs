@@ -60,7 +60,7 @@ pub(super) struct ReadRuntime<'dispatch, 'data> {
     pub(super) file_path: &'data str,
     pub(super) source: Option<&'data [u8]>,
     pub(super) source_error: Option<SourceError>,
-    pub(super) target: &'dispatch RefCell<&'dispatch mut [u8]>,
+    pub(super) target: &'data RefCell<&'data mut [u8]>,
     pub(super) on_done: Option<Callback<'data, ReadTensorDone>>,
     pub(super) on_error: Option<Callback<'data, ReadTensorError>>,
     pub(super) platform_supported: bool,

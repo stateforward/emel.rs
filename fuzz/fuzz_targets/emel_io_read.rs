@@ -1,7 +1,7 @@
 #![no_main]
 
 use emel_io::read::Reader;
-use emel_io::read::event::ReadTensor;
+use emel_io::read::event::{ReadTensor, Target};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -14,25 +14,23 @@ fuzz_target!(|data: &[u8]| {
     let source = data.get(19..).unwrap_or_default();
     let mut target = [0_u8; 64];
     let mut reader = Reader::new();
-
-    let _ = reader.process_event(
-        ReadTensor::new(1, "fuzz.bin", Some(source), &mut target[..target_len])
-            .with_file_index(file_index)
-            .with_range(file_offset, byte_size),
-    );
+    {
+        let target = Target::new(&mut target[..target_len]);
+        let _ = reader.process_event(
+            ReadTensor::new(1, "fuzz.bin", Some(source), &target)
+                .with_file_index(file_index)
+                .with_range(file_offset, byte_size),
+        );
+    }
 
     let mut recovery_target = [0_u8; 1];
+    let target = Target::new(&mut recovery_target);
     let recovery = reader
-        .process_event(ReadTensor::new(
-            2,
-            "recovery.bin",
-            Some(b"x"),
-            &mut recovery_target,
-        ))
+        .process_event(ReadTensor::new(2, "recovery.bin", Some(b"x"), &target))
         .expect("the actor must recover after every classified fuzz request");
     assert_eq!(recovery.tensor_id(), 2);
     assert_eq!(recovery.bytes_copied(), 1);
-    assert_eq!(recovery_target, *b"x");
+    assert_eq!(target.try_matches(b"x"), Ok(true));
 });
 
 fn read_u64(data: &[u8], offset: usize) -> u64 {

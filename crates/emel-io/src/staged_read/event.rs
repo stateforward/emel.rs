@@ -1,7 +1,9 @@
 //! Public typed events for bounded staged copying.
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 use core::fmt;
+
+pub use crate::tensor::{Target, TensorLoadSpan as StageSpan};
 
 use super::Stager;
 
@@ -74,7 +76,7 @@ pub struct StageWindowDone {
 }
 
 impl StageWindowDone {
-    pub(crate) const fn new(bytes_committed: u64) -> Self {
+    pub const fn new(bytes_committed: u64) -> Self {
         Self { bytes_committed }
     }
 
@@ -90,7 +92,7 @@ pub struct StageWindowError {
 }
 
 impl StageWindowError {
-    pub(crate) const fn new(error: Error) -> Self {
+    pub const fn new(error: Error) -> Self {
         Self { error }
     }
 
@@ -100,13 +102,13 @@ impl StageWindowError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct StageWindow<'a> {
     pub(crate) file_offset: u64,
     pub(crate) logical_byte_length: u64,
     pub(crate) stage_chunk_bytes: u64,
     pub(crate) source: Option<&'a [u8]>,
-    pub(crate) target: &'a mut [u8],
+    pub(crate) target: &'a Target<'a>,
     pub(crate) on_done: Option<Callback<'a, StageWindowDone>>,
     pub(crate) on_error: Option<Callback<'a, StageWindowError>>,
 }
@@ -118,7 +120,7 @@ impl<'a> StageWindow<'a> {
         logical_byte_length: u64,
         stage_chunk_bytes: u64,
         source: Option<&'a [u8]>,
-        target: &'a mut [u8],
+        target: &'a Target<'a>,
     ) -> Self {
         Self {
             file_offset,
@@ -152,52 +154,39 @@ impl Event for StageWindow<'_> {
     }
 }
 
-#[derive(Debug)]
-pub struct Target<'a> {
-    pub(crate) bytes: RefCell<&'a mut [u8]>,
-}
-
-impl<'a> Target<'a> {
-    #[must_use]
-    pub const fn new(bytes: &'a mut [u8]) -> Self {
-        Self {
-            bytes: RefCell::new(bytes),
-        }
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.bytes.borrow().len()
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
+/// Request to stage one shared tensor-span capability.
 #[derive(Clone, Copy, Debug)]
-pub struct StageSpan<'a> {
-    pub(crate) file_offset: u64,
-    pub(crate) byte_size: u64,
-    pub(crate) source: Option<&'a [u8]>,
-    pub(crate) target: &'a Target<'a>,
+pub struct StageTensor<'a> {
+    pub(crate) tensor: StageSpan<'a>,
+    pub(crate) stage_chunk_bytes: u64,
 }
 
-impl<'a> StageSpan<'a> {
+impl<'a> StageTensor<'a> {
     #[must_use]
-    pub const fn new(
-        file_offset: u64,
-        byte_size: u64,
-        source: Option<&'a [u8]>,
-        target: &'a Target<'a>,
-    ) -> Self {
+    pub const fn new(tensor: StageSpan<'a>, stage_chunk_bytes: u64) -> Self {
         Self {
-            file_offset,
-            byte_size,
-            source,
-            target,
+            tensor,
+            stage_chunk_bytes,
         }
+    }
+
+    #[must_use]
+    pub const fn tensor(self) -> StageSpan<'a> {
+        self.tensor
+    }
+
+    #[must_use]
+    pub const fn stage_chunk_bytes(self) -> u64 {
+        self.stage_chunk_bytes
+    }
+}
+
+impl sealed::Sealed for StageTensor<'_> {}
+impl Event for StageTensor<'_> {
+    type Output = Result<StageWindowDone, Error>;
+
+    fn dispatch(self, actor: &mut Stager) -> Self::Output {
+        actor.stage_tensor(self)
     }
 }
 
@@ -208,7 +197,7 @@ pub struct StageWindowBatchDone {
 }
 
 impl StageWindowBatchDone {
-    pub(crate) const fn new(done_count: u32, bytes_committed: u64) -> Self {
+    pub const fn new(done_count: u32, bytes_committed: u64) -> Self {
         Self {
             done_count,
             bytes_committed,
@@ -231,7 +220,7 @@ pub struct StageWindowBatchError {
 }
 
 impl StageWindowBatchError {
-    pub(crate) const fn new(error: Error, failed_index: u32) -> Self {
+    pub const fn new(error: Error, failed_index: u32) -> Self {
         Self {
             error,
             failed_index,
@@ -282,5 +271,41 @@ impl Event for StageWindowBatch<'_> {
     type Output = Result<StageWindowBatchDone, StageWindowBatchError>;
     fn dispatch(self, actor: &mut Stager) -> Self::Output {
         actor.stage_window_batch(self)
+    }
+}
+
+/// Request to stage a shared tensor-span batch without adapting descriptors.
+#[derive(Clone, Copy, Debug)]
+pub struct StageTensorBatch<'a> {
+    pub(crate) tensors: &'a [StageSpan<'a>],
+    pub(crate) stage_chunk_bytes: u64,
+}
+
+impl<'a> StageTensorBatch<'a> {
+    #[must_use]
+    pub const fn new(tensors: &'a [StageSpan<'a>], stage_chunk_bytes: u64) -> Self {
+        Self {
+            tensors,
+            stage_chunk_bytes,
+        }
+    }
+
+    #[must_use]
+    pub const fn tensors(self) -> &'a [StageSpan<'a>] {
+        self.tensors
+    }
+
+    #[must_use]
+    pub const fn stage_chunk_bytes(self) -> u64 {
+        self.stage_chunk_bytes
+    }
+}
+
+impl sealed::Sealed for StageTensorBatch<'_> {}
+impl Event for StageTensorBatch<'_> {
+    type Output = Result<StageWindowBatchDone, StageWindowBatchError>;
+
+    fn dispatch(self, actor: &mut Stager) -> Self::Output {
+        actor.stage_tensor_batch(self)
     }
 }

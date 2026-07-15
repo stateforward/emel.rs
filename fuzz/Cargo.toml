@@ -54,6 +54,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "emel_io_loader"
+path = "fuzz_targets/emel_io_loader.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 resolver = "3"

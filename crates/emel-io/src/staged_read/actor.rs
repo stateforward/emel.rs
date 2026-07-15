@@ -1,6 +1,6 @@
 //! Owned staged-copy actor boundary.
 
-use core::cell::{Cell, RefCell};
+use core::cell::Cell;
 use core::fmt;
 
 use super::event::{self, Event};
@@ -38,11 +38,10 @@ impl Stager {
             logical_byte_length,
             stage_chunk_bytes,
             source,
-            target: target_bytes,
+            target,
             on_done,
             on_error,
         } = event;
-        let target = RefCell::new(&mut *target_bytes);
         let status = Cell::new(SingleStatus::new());
         self.machine
             .process_event(IoStagedReadEvents::Single(SingleRuntime {
@@ -50,9 +49,31 @@ impl Stager {
                 logical_byte_length,
                 stage_chunk_bytes,
                 source,
-                target: &target,
+                target: &target.bytes,
                 on_done,
                 on_error,
+                status: &status,
+            }))
+            .expect("staged-read SML callbacks are infallible");
+        status.get().result
+    }
+
+    pub(crate) fn stage_tensor(
+        &mut self,
+        event: event::StageTensor<'_>,
+    ) -> Result<event::StageWindowDone, event::Error> {
+        let status = Cell::new(SingleStatus::new());
+        let done = Cell::new(None);
+        let error = Cell::new(None);
+        self.machine
+            .process_event(IoStagedReadEvents::Single(SingleRuntime {
+                file_offset: event.tensor.file_offset,
+                logical_byte_length: event.tensor.byte_size,
+                stage_chunk_bytes: event.stage_chunk_bytes,
+                source: event.tensor.source,
+                target: &event.tensor.target.bytes,
+                on_done: Some(event::Callback::store(&done)),
+                on_error: Some(event::Callback::store(&error)),
                 status: &status,
             }))
             .expect("staged-read SML callbacks are infallible");
@@ -71,6 +92,27 @@ impl Stager {
                 stage_chunk_bytes: event.stage_chunk_bytes,
                 on_done: event.on_done,
                 on_error: event.on_error,
+                assessment: &assessment,
+                status: &status,
+            }))
+            .expect("staged-read SML callbacks are infallible");
+        status.get().result
+    }
+
+    pub(crate) fn stage_tensor_batch(
+        &mut self,
+        event: event::StageTensorBatch<'_>,
+    ) -> Result<event::StageWindowBatchDone, event::StageWindowBatchError> {
+        let status = Cell::new(BatchStatus::new());
+        let assessment = Cell::new(BatchAssessment::pending());
+        let done = Cell::new(None);
+        let error = Cell::new(None);
+        self.machine
+            .process_event(IoStagedReadEvents::Batch(BatchRuntime {
+                tensors: event.tensors,
+                stage_chunk_bytes: event.stage_chunk_bytes,
+                on_done: Some(event::Callback::store(&done)),
+                on_error: Some(event::Callback::store(&error)),
                 assessment: &assessment,
                 status: &status,
             }))

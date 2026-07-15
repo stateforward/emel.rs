@@ -19,7 +19,8 @@ impl ModelSource {
         Self::File(path.as_ref().to_path_buf())
     }
 }
-pub(crate) mod loader;
+pub mod loader;
 pub mod mmap;
 pub mod read;
 pub mod staged_read;
+mod tensor;
