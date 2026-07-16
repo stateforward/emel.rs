@@ -1,6 +1,5 @@
 //! Safe public events and the explicit backing-file stability capability.
 
-use core::cell::RefCell;
 use core::fmt;
 use std::fs::File;
 use std::path::Path;
@@ -36,7 +35,6 @@ pub enum Error {
     UnmapFailed,
     InvalidAdviceRange,
     AdviceFailed,
-    CallbackPanicked,
     InternalError,
 }
 
@@ -160,6 +158,36 @@ impl MapTensor {
         self.file_index = file_index;
         self
     }
+
+    /// Returns the tensor identifier owned by this mapping request.
+    #[must_use]
+    pub const fn tensor_id(&self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the split-file index.
+    #[must_use]
+    pub const fn file_index(&self) -> u16 {
+        self.file_index
+    }
+
+    /// Returns the source byte offset.
+    #[must_use]
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the requested mapping length.
+    #[must_use]
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Returns whether the requested mapping is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 /// Successful committed mapping descriptor.
@@ -171,7 +199,12 @@ pub struct MapDone {
 }
 
 impl MapDone {
-    pub(super) const fn new(handle: u32, tensor_id: i32, len: u64) -> Self {
+    /// Creates a successful mapping outcome.
+    ///
+    /// This constructor lets a statically injected mapper actor return the
+    /// same typed outcome as the production mapper.
+    #[must_use]
+    pub const fn new(handle: u32, tensor_id: i32, len: u64) -> Self {
         Self {
             handle,
             tensor_id,
@@ -211,6 +244,18 @@ impl ReleaseMapping {
     #[must_use]
     pub const fn new(tensor_id: i32, handle: u32) -> Self {
         Self { tensor_id, handle }
+    }
+
+    /// Returns the dependency-owned tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the mapping handle to release.
+    #[must_use]
+    pub const fn handle(self) -> u32 {
+        self.handle
     }
 }
 
@@ -270,58 +315,78 @@ impl AdviseDontNeed {
     }
 }
 
-/// Allocation-free borrowed callback invoked before dispatch returns.
-type MappingFn<'state> = dyn for<'view> FnMut(&'view [u8]) + 'state;
+/// A statically dispatched synchronous operation over mapped bytes.
+///
+/// The mapper invokes the concrete operation before dispatch returns and never
+/// retains either the operation or the mapped view. A panic is a programming
+/// defect and is deliberately not translated into a domain error.
+pub trait MappingOperation {
+    /// Operation result returned by [`WithMapping`].
+    type Output;
 
-pub struct MappingCallback<'state> {
-    callback: RefCell<&'state mut MappingFn<'state>>,
+    /// Applies the operation to one immutable mapped view.
+    fn apply(&mut self, bytes: &[u8]) -> Self::Output;
 }
 
-impl<'state> MappingCallback<'state> {
-    #[must_use]
-    pub fn new<Callback>(callback: &'state mut Callback) -> Self
-    where
-        Callback: for<'view> FnMut(&'view [u8]),
-    {
-        Self {
-            callback: RefCell::new(callback),
-        }
-    }
+impl<Output, Operation> MappingOperation for Operation
+where
+    Operation: FnMut(&[u8]) -> Output,
+{
+    type Output = Output;
 
-    pub(super) fn invoke(&self, bytes: &[u8]) -> Result<(), ()> {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.callback.borrow_mut())(bytes);
-        }))
-        .map_err(|_| ())
+    fn apply(&mut self, bytes: &[u8]) -> Self::Output {
+        self(bytes)
     }
 }
 
-impl fmt::Debug for MappingCallback<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MappingCallback").finish_non_exhaustive()
-    }
-}
-
-/// Invoke a callback synchronously with immutable access to a live mapping.
-#[derive(Clone, Copy, Debug)]
-pub struct WithMapping<'state> {
+/// Invoke a concrete operation synchronously with a live immutable mapping.
+pub struct WithMapping<'state, Operation> {
     pub(super) tensor_id: i32,
     pub(super) handle: u32,
-    pub(super) callback: &'state MappingCallback<'state>,
+    pub(super) operation: &'state mut Operation,
 }
 
-impl<'state> WithMapping<'state> {
+impl<'state, Operation> WithMapping<'state, Operation> {
     #[must_use]
-    pub const fn new(
-        tensor_id: i32,
-        handle: u32,
-        callback: &'state MappingCallback<'state>,
-    ) -> Self {
+    pub const fn new(tensor_id: i32, handle: u32, operation: &'state mut Operation) -> Self {
         Self {
             tensor_id,
             handle,
-            callback,
+            operation,
         }
+    }
+
+    /// Returns the dependency-owned tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(&self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the mapping handle selected for access.
+    #[must_use]
+    pub const fn handle(&self) -> u32 {
+        self.handle
+    }
+
+    /// Applies the caller's operation synchronously to replacement-owned bytes.
+    ///
+    /// The byte view cannot escape through this event and the operation is consumed
+    /// before the replacement actor returns.
+    pub fn apply(self, bytes: &[u8]) -> Operation::Output
+    where
+        Operation: MappingOperation,
+    {
+        self.operation.apply(bytes)
+    }
+}
+
+impl<Operation> fmt::Debug for WithMapping<'_, Operation> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WithMapping")
+            .field("tensor_id", &self.tensor_id)
+            .field("handle", &self.handle)
+            .finish_non_exhaustive()
     }
 }
 
@@ -370,9 +435,12 @@ impl Event for AdviseDontNeed {
     }
 }
 
-impl sealed::Sealed for WithMapping<'_> {}
-impl Event for WithMapping<'_> {
-    type Output = Result<(), Error>;
+impl<Operation> sealed::Sealed for WithMapping<'_, Operation> where Operation: MappingOperation {}
+impl<Operation> Event for WithMapping<'_, Operation>
+where
+    Operation: MappingOperation,
+{
+    type Output = Result<Operation::Output, Error>;
 
     fn dispatch(self, mapper: &mut Mapper) -> Self::Output {
         mapper.with_mapping(self)

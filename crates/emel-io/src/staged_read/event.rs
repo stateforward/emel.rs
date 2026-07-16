@@ -29,7 +29,8 @@ impl<'a, T: Copy> Callback<'a, T> {
         Self { slot }
     }
 
-    pub(crate) fn publish(self, value: T) {
+    /// Publishes an outcome synchronously through this callback capability.
+    pub fn publish(self, value: T) {
         self.slot.set(Some(value));
     }
 }
@@ -102,7 +103,7 @@ impl StageWindowError {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct StageWindow<'a> {
     pub(crate) file_offset: u64,
     pub(crate) logical_byte_length: u64,
@@ -143,6 +144,48 @@ impl<'a> StageWindow<'a> {
     pub const fn on_error(mut self, callback: Callback<'a, StageWindowError>) -> Self {
         self.on_error = Some(callback);
         self
+    }
+
+    /// Returns the logical source offset represented by this window.
+    #[must_use]
+    pub const fn file_offset(&self) -> u64 {
+        self.file_offset
+    }
+
+    /// Returns the exact logical byte count to commit.
+    #[must_use]
+    pub const fn logical_byte_length(&self) -> u64 {
+        self.logical_byte_length
+    }
+
+    /// Returns the bounded staging chunk size.
+    #[must_use]
+    pub const fn stage_chunk_bytes(&self) -> u64 {
+        self.stage_chunk_bytes
+    }
+
+    /// Returns the immutable staged source capability, when present.
+    #[must_use]
+    pub const fn source(&self) -> Option<&'a [u8]> {
+        self.source
+    }
+
+    /// Returns the caller-owned safe target capability.
+    #[must_use]
+    pub const fn target(&self) -> &'a Target<'a> {
+        self.target
+    }
+
+    /// Returns the optional synchronous success callback capability.
+    #[must_use]
+    pub const fn done_callback(&self) -> Option<Callback<'a, StageWindowDone>> {
+        self.on_done
+    }
+
+    /// Returns the optional synchronous error callback capability.
+    #[must_use]
+    pub const fn error_callback(&self) -> Option<Callback<'a, StageWindowError>> {
+        self.on_error
     }
 }
 

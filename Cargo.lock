@@ -47,6 +47,7 @@ dependencies = [
 name = "emel-bench"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "emel-gguf",
  "emel-io",
  "emel-model",
@@ -141,6 +142,7 @@ name = "emel-model"
 version = "0.1.0"
 dependencies = [
  "allocation-counter",
+ "emel-io",
  "stateforward-sml",
 ]
 
@@ -227,18 +229,18 @@ dependencies = [
 
 [[package]]
 name = "stateforward-sml"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "535fb9d5b5f5619ef4cb49d54f94af0422402c83aaa47dd3e7da06ec93341102"
+checksum = "07416f564315111c73fc7fe324e2ecdcef59afb2ad93128b5be30e3d7ea21a84"
 dependencies = [
  "stateforward-sml-macros",
 ]
 
 [[package]]
 name = "stateforward-sml-macros"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "643762aee94cccb8a08bf7ddb26b6d422ceb52a2ed27e81b5f5c787d29c59ffa"
+checksum = "8bf4ded059ce737134f98673a1c1f2b95da4ed2472b6eefdef5893191835f389"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -115,10 +115,11 @@ CARGO_LLVM_COV_TARGET_DIR="$IO_LOADER_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOO
   --ignore-filename-regex 'crates/emel-io/(src/(lib\.rs|mmap/|read/|staged_read/|loader/tests\.rs)|tests/|examples/)' \
   --summary-only --json --output-path "$IO_LOADER_REPORT"
 
-echo "Running maintained emel-model tensor-core coverage"
+echo "Running maintained emel-model tensor coverage with caller-owned mapped capability proof"
 CARGO_LLVM_COV_TARGET_DIR="$MODEL_TENSOR_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-model --all-features --locked --branch \
-  --ignore-filename-regex 'crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/)' \
+  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-model --package emel-bench \
+  --all-features --locked --branch \
+  --ignore-filename-regex '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/))' \
   --summary-only --json --output-path "$MODEL_TENSOR_REPORT"
 
 python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \

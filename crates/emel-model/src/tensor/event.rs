@@ -2,7 +2,10 @@
 
 use core::fmt;
 
+use emel_io::{mmap, read, staged_read};
+
 use super::Store;
+use super::dependency::TensorDependencies;
 
 mod sealed {
     pub trait Sealed {}
@@ -42,6 +45,27 @@ pub enum Error {
     Busy,
     /// The requested load strategy is not supported.
     UnsupportedStrategy,
+    /// No mapped-I/O actor is present in the static dependency set.
+    MmapUnavailable,
+    /// No read actor is present in the static dependency set.
+    ReadUnavailable,
+    /// No staged-read actor is present in the static dependency set.
+    StagerUnavailable,
+    /// A mapped-I/O child actor returned a classified failure.
+    Mmap(mmap::event::Error),
+    /// A read child actor returned a classified failure.
+    Read(read::event::Error),
+    /// A staged-read child actor returned a classified failure.
+    Staged(staged_read::event::Error),
+    /// A replacement child actor returned a success value that violates the dispatched contract.
+    DependencyContract,
+    /// A malformed mapped success could not be released and remains actor-owned for retry.
+    DependencyContractCleanup {
+        /// Live mapping handle retained by the tensor actor.
+        mapping_handle: u32,
+        /// Typed failure returned by the immediate cleanup attempt.
+        error: mmap::event::Error,
+    },
     /// A planned effect failed in its owning backend.
     BackendError,
     /// The actor encountered an internal or unexpected event error.
@@ -58,6 +82,16 @@ impl fmt::Display for Error {
             Self::MappedTensorRequiresRelease => "mapped tensor requires mapped release",
             Self::Busy => "tensor store is awaiting effect results",
             Self::UnsupportedStrategy => "unsupported tensor load strategy",
+            Self::MmapUnavailable => "tensor mapper capability unavailable",
+            Self::ReadUnavailable => "tensor reader capability unavailable",
+            Self::StagerUnavailable => "tensor stager capability unavailable",
+            Self::Mmap(_) => "tensor mapped I/O failed",
+            Self::Read(_) => "tensor read I/O failed",
+            Self::Staged(_) => "tensor staged I/O failed",
+            Self::DependencyContract => "tensor dependency returned an invalid success value",
+            Self::DependencyContractCleanup { .. } => {
+                "tensor dependency returned an invalid mapping and cleanup failed"
+            }
             Self::BackendError => "tensor effect backend failed",
             Self::Internal => "internal tensor actor error",
         })
@@ -561,6 +595,8 @@ pub enum Lifecycle {
     Evicted,
     /// A future mapped-load slice owns native mapped residency.
     MappedResident,
+    /// A malformed mapped success remains owned only for release retry.
+    MappedCleanupPending,
     /// The slot encountered an unrecoverable internal lifecycle failure.
     InternalError,
 }
@@ -698,6 +734,266 @@ pub struct CaptureTensorState {
     pub(crate) tensor_id: i32,
 }
 
+/// Successful mapped residency outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MappedLoadDone {
+    tensor_id: i32,
+    mapping_handle: u32,
+    mapped_bytes: u64,
+}
+
+impl MappedLoadDone {
+    pub(crate) const fn new(tensor_id: i32, mapping_handle: u32, mapped_bytes: u64) -> Self {
+        Self {
+            tensor_id,
+            mapping_handle,
+            mapped_bytes,
+        }
+    }
+
+    /// Returns the tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the release token owned by the mapper actor.
+    #[must_use]
+    pub const fn mapping_handle(self) -> u32 {
+        self.mapping_handle
+    }
+
+    /// Returns the mapped byte length.
+    #[must_use]
+    pub const fn mapped_bytes(self) -> u64 {
+        self.mapped_bytes
+    }
+}
+
+/// Request file-backed residency through a caller-created mapping capability.
+#[derive(Debug)]
+pub struct MappedLoad {
+    pub(crate) tensor_id: i32,
+    pub(crate) file_index: u16,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+    pub(crate) source: mmap::event::MmapSource,
+}
+
+impl MappedLoad {
+    /// Creates a mapped-load request without opening or recreating a file.
+    #[must_use]
+    pub const fn new(
+        tensor_id: i32,
+        source: mmap::event::MmapSource,
+        offset: u64,
+        len: u64,
+    ) -> Self {
+        Self {
+            tensor_id,
+            file_index: 0,
+            offset,
+            len,
+            source,
+        }
+    }
+
+    /// Sets the split-file index.
+    #[must_use]
+    pub const fn with_file_index(mut self, file_index: u16) -> Self {
+        self.file_index = file_index;
+        self
+    }
+}
+
+/// Successful owned read or staged-copy residency outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnedLoadDone {
+    tensor_id: i32,
+    bytes_copied: u64,
+}
+
+impl OwnedLoadDone {
+    pub(crate) const fn new(tensor_id: i32, bytes_copied: u64) -> Self {
+        Self {
+            tensor_id,
+            bytes_copied,
+        }
+    }
+
+    /// Returns the tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the resident byte count.
+    #[must_use]
+    pub const fn bytes_copied(self) -> u64 {
+        self.bytes_copied
+    }
+}
+
+/// Request an owned read/copy into setup-allocated slot storage.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadLoad<'source> {
+    pub(crate) tensor_id: i32,
+    pub(crate) file_index: u16,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+    pub(crate) file_path: &'source str,
+    pub(crate) source: Option<&'source [u8]>,
+    pub(crate) source_error: Option<read::event::SourceError>,
+}
+
+impl<'source> ReadLoad<'source> {
+    /// Creates an owned read/copy request.
+    #[must_use]
+    pub const fn new(
+        tensor_id: i32,
+        file_path: &'source str,
+        source: Option<&'source [u8]>,
+        offset: u64,
+        len: u64,
+    ) -> Self {
+        Self {
+            tensor_id,
+            file_index: 0,
+            offset,
+            len,
+            file_path,
+            source,
+            source_error: None,
+        }
+    }
+
+    /// Sets the split-file index.
+    #[must_use]
+    pub const fn with_file_index(mut self, file_index: u16) -> Self {
+        self.file_index = file_index;
+        self
+    }
+
+    /// Preserves a setup-time source acquisition failure for the child actor.
+    #[must_use]
+    pub const fn with_source_error(mut self, error: read::event::SourceError) -> Self {
+        self.source_error = Some(error);
+        self
+    }
+}
+
+/// Request an owned staged copy into setup-allocated slot storage.
+#[derive(Clone, Copy, Debug)]
+pub struct StagedLoad<'source> {
+    pub(crate) tensor_id: i32,
+    pub(crate) offset: u64,
+    pub(crate) len: u64,
+    pub(crate) stage_chunk_bytes: u64,
+    pub(crate) source: Option<&'source [u8]>,
+}
+
+impl<'source> StagedLoad<'source> {
+    /// Creates an owned staged-copy request.
+    #[must_use]
+    pub const fn new(
+        tensor_id: i32,
+        source: Option<&'source [u8]>,
+        offset: u64,
+        len: u64,
+        stage_chunk_bytes: u64,
+    ) -> Self {
+        Self {
+            tensor_id,
+            offset,
+            len,
+            stage_chunk_bytes,
+            source,
+        }
+    }
+}
+
+/// Successful mapped release.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseMappedDone {
+    tensor_id: i32,
+}
+
+impl ReleaseMappedDone {
+    pub(crate) const fn new(tensor_id: i32) -> Self {
+        Self { tensor_id }
+    }
+
+    /// Returns the released tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(self) -> i32 {
+        self.tensor_id
+    }
+}
+
+/// Release file-backed residency through the owning mapper actor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseMapped {
+    pub(crate) tensor_id: i32,
+    pub(crate) mapping_handle: u32,
+}
+
+impl ReleaseMapped {
+    /// Creates a mapped-release request.
+    #[must_use]
+    pub const fn new(tensor_id: i32, mapping_handle: u32) -> Self {
+        Self {
+            tensor_id,
+            mapping_handle,
+        }
+    }
+}
+
+/// A statically dispatched synchronous tensor operation.
+pub trait TensorOperation {
+    /// Result returned before dispatch completes.
+    type Output;
+
+    /// Applies the operation to immutable resident bytes.
+    fn apply(&mut self, bytes: &[u8]) -> Self::Output;
+}
+
+impl<Output, Operation> TensorOperation for Operation
+where
+    Operation: FnMut(&[u8]) -> Output,
+{
+    type Output = Output;
+
+    fn apply(&mut self, bytes: &[u8]) -> Self::Output {
+        self(bytes)
+    }
+}
+
+/// Invoke a concrete operation with resident bytes during the same RTC chain.
+pub struct WithTensor<'operation, Operation> {
+    pub(crate) tensor_id: i32,
+    pub(crate) operation: &'operation mut Operation,
+}
+
+impl<'operation, Operation> WithTensor<'operation, Operation> {
+    /// Creates a synchronous tensor-access request.
+    #[must_use]
+    pub const fn new(tensor_id: i32, operation: &'operation mut Operation) -> Self {
+        Self {
+            tensor_id,
+            operation,
+        }
+    }
+}
+
+impl<Operation> fmt::Debug for WithTensor<'_, Operation> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WithTensor")
+            .field("tensor_id", &self.tensor_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl CaptureTensorState {
     /// Creates a state-capture request.
     #[must_use]
@@ -775,5 +1071,66 @@ impl<D> Event<D> for ApplyEffectError {
 
     fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
         actor.apply_effect_error(self)
+    }
+}
+
+impl sealed::Sealed for MappedLoad {}
+impl<D> Event<D> for MappedLoad
+where
+    D: TensorDependencies,
+{
+    type Output = Result<MappedLoadDone, Error>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.mapped_load(self)
+    }
+}
+
+impl sealed::Sealed for ReadLoad<'_> {}
+impl<D> Event<D> for ReadLoad<'_>
+where
+    D: TensorDependencies,
+{
+    type Output = Result<OwnedLoadDone, Error>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.read_load(self)
+    }
+}
+
+impl sealed::Sealed for StagedLoad<'_> {}
+impl<D> Event<D> for StagedLoad<'_>
+where
+    D: TensorDependencies,
+{
+    type Output = Result<OwnedLoadDone, Error>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.staged_load(self)
+    }
+}
+
+impl sealed::Sealed for ReleaseMapped {}
+impl<D> Event<D> for ReleaseMapped
+where
+    D: TensorDependencies,
+{
+    type Output = Result<ReleaseMappedDone, Error>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.release_mapped(self)
+    }
+}
+
+impl<Operation> sealed::Sealed for WithTensor<'_, Operation> where Operation: TensorOperation {}
+impl<D, Operation> Event<D> for WithTensor<'_, Operation>
+where
+    D: TensorDependencies,
+    Operation: TensorOperation,
+{
+    type Output = Result<Operation::Output, Error>;
+
+    fn dispatch(self, actor: &mut Store<D>) -> Self::Output {
+        actor.with_tensor(self)
     }
 }

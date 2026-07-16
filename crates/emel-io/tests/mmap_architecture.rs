@@ -176,15 +176,13 @@ fn map_setup_and_native_outcomes_stay_in_one_explicit_dispatch() {
     assert!(events.contains("mapper.map(&self)"));
     assert!(!events.contains("PreparedMapping"));
 
-    assert!(machine.contains(
-        "\"state_access_callback_decision\"_s <= \"state_access_owner_decision\"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_owned] / effect_invoke_access,"
-    ));
-    assert!(machine.contains("guard_access_succeeded"));
-    assert!(machine.contains("guard_access_panicked"));
-    assert!(machine.contains("effect_access_panicked"));
+    assert!(machine.contains("IoMmapAccess"));
+    assert!(machine.contains("[guard_access_owned] / effect_invoke_access"));
     assert!(machine.contains("mapping_view_len_supported(event.request.len)"));
-    assert!(events.contains("std::panic::catch_unwind"));
-    assert!(events.contains("dyn for<'view> FnMut(&'view [u8])"));
+    assert!(events.contains("pub trait MappingOperation"));
+    assert!(!events.contains("catch_unwind"));
+    assert!(!events.contains("dyn for<'view>"));
+    assert!(!events.contains("Box<dyn"));
     assert!(!events.contains("AccessToken"));
 }
 

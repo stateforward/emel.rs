@@ -5,7 +5,7 @@ source_tree=06306d4ffad3455fcf5df71dc692df52514b9865
 source_files=src/emel/model/tensor/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,sm.hpp
 source_tests=tests/model/tensor/lifecycle_tests.cpp
 fixture_config=public_actor_typed_events,owned_batches,two_tensors,supported_strategy_families_plus_rust_unknown_extension
-contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;mapped_success_deferred
+contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;rust_mmap_requires_a_caller_stability_capability
 case=bind outcome=done active_extent=2
 case=plan_none outcome=done effect_count=2 first=none:0:1:4096:2 second=none:1:2:8192:3
 extension=typed_busy reference_behavior=unexpected_recovery_to_ready rust_error=busy phase=awaiting_bound
@@ -21,3 +21,16 @@ extension=typed_unknown reference_behavior=planned_as_io_load rust_error=unsuppo
 case=plan_mapped outcome=done effect_count=1 first=mapped_file:0:5:16384:4
 case=mapped_error outcome=error error=backend_error phase=ready
 case=result_without_plan outcome=error error=invalid_request
+case=direct_read outcome=done bytes=4 checksum=154
+case=direct_read_already_resident outcome=error error=tensor_already_resident
+case=direct_read_invalid outcome=error error=invalid_request
+case=direct_read_error outcome=error error=read_failed
+case=direct_staged outcome=done bytes=4 checksum=154
+case=direct_staged_invalid outcome=error error=invalid_request
+case=missing_reader outcome=error error=read_unavailable
+case=missing_stager outcome=error error=stager_unavailable
+case=mapped_load outcome=done tensor_id=0 bytes=4096 lifecycle=mapped_resident
+case=mapped_resident_plan outcome=done first=none:0:0:1234:5678
+case=mapped_duplicate outcome=error error=tensor_already_resident retained_bytes=4096
+case=mapped_wrong_release outcome=error error=invalid_request lifecycle=mapped_resident
+case=mapped_release outcome=done tensor_id=0 lifecycle=evicted

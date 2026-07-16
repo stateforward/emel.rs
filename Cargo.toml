@@ -51,7 +51,7 @@ emel-text = { path = "crates/emel-text", version = "0.1.0" }
 emel-speech = { path = "crates/emel-speech", version = "0.1.0" }
 emel-diarization = { path = "crates/emel-diarization", version = "0.1.0" }
 emel = { path = "crates/emel", version = "0.1.0" }
-sml = { package = "stateforward-sml", version = "1.1.0" }
+sml = { package = "stateforward-sml", version = "=1.2.0" }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

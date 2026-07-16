@@ -10,7 +10,7 @@ use core::cell::{Cell, RefCell};
 use sml::sml;
 
 use super::event::{
-    AdviceRequest, Error, MapDone, MapTensor, MappingCallback, ReleaseMapping, WithMapping,
+    AdviceRequest, Error, MapDone, MapTensor, MappingOperation, ReleaseMapping, WithMapping,
 };
 use super::platform::{Platform, PlatformError, Region, SetupError};
 
@@ -72,12 +72,9 @@ pub(super) struct AdviceRuntime<'dispatch> {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct AccessRuntime<'dispatch, 'data> {
+pub(super) struct AccessRequest {
     tensor_id: i32,
     handle: u32,
-    callback: &'data MappingCallback<'data>,
-    callback_result: &'dispatch Cell<Option<Result<(), ()>>>,
-    result: &'dispatch Cell<Result<(), Error>>,
 }
 
 sml! {
@@ -136,13 +133,6 @@ sml! {
         "state_ready"_s <= "state_dont_need_native_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_advice_succeeded] / effect_restore_advice_success,
         "state_ready"_s <= "state_dont_need_native_decision"_s + completion<DontNeed>(AdviceRuntime<'dispatch>) [guard_advice_failed] / effect_restore_advice_failure,
 
-        // Immediate immutable callback access; panic is captured and explicitly classified.
-        "state_access_owner_decision"_s <= "state_ready"_s + Access(AccessRuntime<'dispatch, 'data>),
-        "state_access_callback_decision"_s <= "state_access_owner_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_owned] / effect_invoke_access,
-        "state_ready"_s <= "state_access_owner_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_invalid] / effect_access_invalid,
-        "state_ready"_s <= "state_access_callback_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_succeeded] / effect_access_succeeded,
-        "state_ready"_s <= "state_access_callback_decision"_s + completion<Access>(AccessRuntime<'dispatch, 'data>) [guard_access_panicked] / effect_access_panicked,
-
         // Explicit unexpected events preserve every decision state.
         "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_unexpected,
         "state_ready"_s <= "state_request_decision"_s + unexpected_event<_> / effect_unexpected,
@@ -163,8 +153,102 @@ sml! {
         "state_ready"_s <= "state_dont_need_owner_decision"_s + unexpected_event<_> / effect_unexpected,
         "state_ready"_s <= "state_dont_need_range_decision"_s + unexpected_event<_> / effect_unexpected,
         "state_ready"_s <= "state_dont_need_native_decision"_s + unexpected_event<_> / effect_unexpected,
-        "state_ready"_s <= "state_access_owner_decision"_s + unexpected_event<_> / effect_unexpected,
-        "state_ready"_s <= "state_access_callback_decision"_s + unexpected_event<_> / effect_unexpected,
+    }
+}
+
+pub(super) struct AccessRuntime<'dispatch, Operation>
+where
+    Operation: MappingOperation,
+{
+    request: AccessRequest,
+    operation: &'dispatch RefCell<&'dispatch mut Operation>,
+    result: &'dispatch RefCell<Option<Result<Operation::Output, Error>>>,
+}
+
+impl<Operation> Clone for AccessRuntime<'_, Operation>
+where
+    Operation: MappingOperation,
+{
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Operation> Copy for AccessRuntime<'_, Operation> where Operation: MappingOperation {}
+
+struct AccessContext<'access, P: Platform> {
+    mappings: &'access Context<P>,
+}
+
+sml! {
+    IoMmapAccess<'dispatch, Operation>
+    where
+        Operation: MappingOperation + 'dispatch,
+    {
+        X <= *"state_owner_decision"_s + Access(AccessRuntime<'dispatch, Operation>) [guard_access_owned] / effect_invoke_access,
+        X <= "state_owner_decision"_s + Access(AccessRuntime<'dispatch, Operation>) [guard_access_invalid] / effect_access_invalid,
+        X <= "state_owner_decision"_s + unexpected_event<_> / effect_access_unexpected,
+    }
+}
+
+impl<P> IoMmapAccessStateMachineContext for AccessContext<'_, P>
+where
+    P: Platform,
+{
+    fn guard_access_owned<'dispatch, Operation>(
+        &self,
+        event: &AccessRuntime<'dispatch, Operation>,
+    ) -> Result<bool, ()>
+    where
+        Operation: MappingOperation + 'dispatch,
+    {
+        Ok(self
+            .mappings
+            .owned(event.request.tensor_id, event.request.handle))
+    }
+
+    fn guard_access_invalid<'dispatch, Operation>(
+        &self,
+        event: &AccessRuntime<'dispatch, Operation>,
+    ) -> Result<bool, ()>
+    where
+        Operation: MappingOperation + 'dispatch,
+    {
+        Ok(!self
+            .mappings
+            .owned(event.request.tensor_id, event.request.handle))
+    }
+
+    fn effect_invoke_access<'dispatch, Operation>(
+        &mut self,
+        event: AccessRuntime<'dispatch, Operation>,
+    ) -> Result<(), ()>
+    where
+        Operation: MappingOperation + 'dispatch,
+    {
+        let bytes = self.mappings.slots[event.request.handle as usize]
+            .region
+            .as_ref()
+            .expect("access guard selected an owned live mapping")
+            .bytes();
+        let output = event.operation.borrow_mut().apply(bytes);
+        event.result.replace(Some(Ok(output)));
+        Ok(())
+    }
+
+    fn effect_access_invalid<'dispatch, Operation>(
+        &mut self,
+        event: AccessRuntime<'dispatch, Operation>,
+    ) -> Result<(), ()>
+    where
+        Operation: MappingOperation + 'dispatch,
+    {
+        event.result.replace(Some(Err(Error::InvalidRequest)));
+        Ok(())
+    }
+
+    fn effect_access_unexpected(&mut self) -> Result<(), ()> {
+        Err(())
     }
 }
 
@@ -256,19 +340,37 @@ impl<P: Platform> MapperCore<P> {
         result.get()
     }
 
-    pub(super) fn with_mapping(&mut self, request: WithMapping<'_>) -> Result<(), Error> {
-        let callback_result = Cell::new(None);
-        let result = Cell::new(Err(Error::InternalError));
-        self.machine
-            .process_event(IoMmapEvents::Access(AccessRuntime {
-                tensor_id: request.tensor_id,
-                handle: request.handle,
-                callback: request.callback,
-                callback_result: &callback_result,
+    #[allow(
+        clippy::needless_pass_by_ref_mut,
+        clippy::needless_pass_by_value,
+        reason = "the event is consumed at the single-writer actor boundary even though immutable mapped bytes satisfy this operation"
+    )]
+    pub(super) fn with_mapping<Operation>(
+        &mut self,
+        request: WithMapping<'_, Operation>,
+    ) -> Result<Operation::Output, Error>
+    where
+        Operation: MappingOperation,
+    {
+        let operation = RefCell::new(request.operation);
+        let result = RefCell::new(None);
+        let access = AccessContext {
+            mappings: self.machine.context(),
+        };
+        let mut machine = IoMmapAccessStateMachine::new(access);
+        machine
+            .process_event(IoMmapAccessEvents::Access(AccessRuntime {
+                request: AccessRequest {
+                    tensor_id: request.tensor_id,
+                    handle: request.handle,
+                },
+                operation: &operation,
                 result: &result,
             }))
-            .expect("mmap SML callbacks are infallible");
-        result.get()
+            .expect("mmap access SML callbacks are infallible");
+        result
+            .into_inner()
+            .expect("mapped access SML stores one typed outcome")
     }
 }
 
@@ -579,41 +681,6 @@ impl<P: Platform> IoMmapStateMachineContext for Context<P> {
     fn effect_restore_advice_failure(&mut self, event: AdviceRuntime<'_>) -> Result<(), ()> {
         self.restore_region(event.request.handle, event.region);
         event.result.set(Err(Error::AdviceFailed));
-        Ok(())
-    }
-    fn guard_access_owned(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
-        Ok(self.owned(event.tensor_id, event.handle))
-    }
-    fn guard_access_invalid(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
-        Ok(!self.owned(event.tensor_id, event.handle))
-    }
-    fn effect_invoke_access(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
-        let bytes = self.slots[event.handle as usize]
-            .region
-            .as_ref()
-            .expect("access guard selected an owned live mapping")
-            .bytes();
-        event
-            .callback_result
-            .set(Some(event.callback.invoke(bytes)));
-        Ok(())
-    }
-    fn guard_access_succeeded(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
-        Ok(matches!(event.callback_result.get(), Some(Ok(()))))
-    }
-    fn guard_access_panicked(&self, event: &AccessRuntime<'_, '_>) -> Result<bool, ()> {
-        Ok(matches!(event.callback_result.get(), Some(Err(()))))
-    }
-    fn effect_access_succeeded(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
-        event.result.set(Ok(()));
-        Ok(())
-    }
-    fn effect_access_panicked(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
-        event.result.set(Err(Error::CallbackPanicked));
-        Ok(())
-    }
-    fn effect_access_invalid(&mut self, event: AccessRuntime<'_, '_>) -> Result<(), ()> {
-        event.result.set(Err(Error::InvalidRequest));
         Ok(())
     }
     fn effect_unexpected(&mut self) -> Result<(), ()> {

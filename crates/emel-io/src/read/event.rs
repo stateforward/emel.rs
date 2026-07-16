@@ -45,7 +45,8 @@ impl<'a, T: Copy> Callback<'a, T> {
         Self::new(slot, store_outcome::<T>)
     }
 
-    pub(crate) fn publish(self, outcome: T) {
+    /// Publishes an outcome synchronously through this callback capability.
+    pub fn publish(self, outcome: T) {
         (self.handler)(self.slot, outcome);
     }
 }
@@ -153,7 +154,7 @@ impl ReadTensorError {
 }
 
 /// Request to copy one tensor range from immutable source bytes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct ReadTensor<'a> {
     pub(crate) tensor_id: i32,
     pub(crate) file_index: u16,
@@ -213,6 +214,13 @@ impl<'a> ReadTensor<'a> {
         self
     }
 
+    /// Sets the optional setup-time source outcome without runtime routing.
+    #[must_use]
+    pub const fn with_source_error_option(mut self, error: Option<SourceError>) -> Self {
+        self.source_error = error;
+        self
+    }
+
     /// Installs a synchronous success callback.
     #[must_use]
     pub const fn on_done(mut self, callback: Callback<'a, ReadTensorDone>) -> Self {
@@ -225,6 +233,66 @@ impl<'a> ReadTensor<'a> {
     pub const fn on_error(mut self, callback: Callback<'a, ReadTensorError>) -> Self {
         self.on_error = Some(callback);
         self
+    }
+
+    /// Returns the tensor identifier.
+    #[must_use]
+    pub const fn tensor_id(&self) -> i32 {
+        self.tensor_id
+    }
+
+    /// Returns the split-file index.
+    #[must_use]
+    pub const fn file_index(&self) -> u16 {
+        self.file_index
+    }
+
+    /// Returns the byte offset within the source.
+    #[must_use]
+    pub const fn file_offset(&self) -> u64 {
+        self.file_offset
+    }
+
+    /// Returns the requested byte count.
+    #[must_use]
+    pub const fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
+    /// Returns the source path metadata.
+    #[must_use]
+    pub const fn file_path(&self) -> &'a str {
+        self.file_path
+    }
+
+    /// Returns the immutable source capability, when setup succeeded.
+    #[must_use]
+    pub const fn source(&self) -> Option<&'a [u8]> {
+        self.source
+    }
+
+    /// Returns the setup-time source failure, when one was supplied.
+    #[must_use]
+    pub const fn source_error(&self) -> Option<SourceError> {
+        self.source_error
+    }
+
+    /// Returns the caller-owned safe target capability.
+    #[must_use]
+    pub const fn target(&self) -> &'a Target<'a> {
+        self.target
+    }
+
+    /// Returns the optional synchronous success callback capability.
+    #[must_use]
+    pub const fn done_callback(&self) -> Option<Callback<'a, ReadTensorDone>> {
+        self.on_done
+    }
+
+    /// Returns the optional synchronous error callback capability.
+    #[must_use]
+    pub const fn error_callback(&self) -> Option<Callback<'a, ReadTensorError>> {
+        self.on_error
     }
 }
 

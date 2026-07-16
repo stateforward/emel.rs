@@ -11,8 +11,8 @@ use emel_io::loader::Loader as IoLoader;
 use emel_io::loader::event::{LoadTensor, StrategyKind, StrategyPolicy, TensorLoadSpan};
 use emel_io::mmap::Mapper;
 use emel_io::mmap::event::{
-    AdviseDontNeed, AdviseSequential, AdviseWillNeed, MapTensor, MappingCallback, MmapSource,
-    ReleaseMapping, WithMapping,
+    AdviseDontNeed, AdviseSequential, AdviseWillNeed, MapTensor, MmapSource, ReleaseMapping,
+    WithMapping,
 };
 use emel_io::read::Reader;
 use emel_io::read::event::{ReadTensor, Target as ReadTarget};
@@ -21,10 +21,13 @@ use emel_io::staged_read::event::{
     Callback as StageCallback, StageWindow, StageWindowDone, StageWindowError,
     Target as StageTarget,
 };
-use emel_model::model_tensor_proof::Store as TensorStore;
-use emel_model::model_tensor_proof::event::{
-    ApplyEffectError, BindStorage, EffectBuffer, EffectError, EffectRequest, Error as TensorError,
-    PlanLoad, StorageBatch, StorageEntry, StrategyKind as TensorStrategy, TensorMetadata,
+use emel_model::tensor::Store as TensorStore;
+use emel_model::tensor::dependency::Actors as TensorActors;
+use emel_model::tensor::event::{
+    ApplyEffectError, BindStorage, CaptureTensorState, EffectBuffer, EffectError, EffectRequest,
+    Error as TensorError, Lifecycle as TensorLifecycle, MappedLoad, PlanLoad, ReadLoad,
+    ReleaseMapped, StorageBatch, StorageEntry, StrategyKind as TensorStrategy, TensorMetadata,
+    WithTensor,
 };
 use std::cell::Cell;
 
@@ -60,9 +63,119 @@ impl Default for Config {
 }
 
 fn main() {
+    let arguments = env::args().collect::<Vec<_>>();
+    if arguments
+        .get(1)
+        .is_some_and(|value| value == "--model-tensor-mapped-parity")
+    {
+        let Some(path) = arguments.get(2) else {
+            eprintln!("emel-bench: mapped parity requires a fixture path");
+            std::process::exit(2);
+        };
+        if let Err(error) = run_model_tensor_mapped_parity(&PathBuf::from(path)) {
+            eprintln!("emel-bench: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("emel-bench: {error}");
         std::process::exit(2);
+    }
+}
+
+fn run_model_tensor_mapped_parity(
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = (0_u8..=255).cycle().take(4_096).collect::<Vec<_>>();
+    std::fs::write(path, &bytes)?;
+    let source = open_benchmark_source(path)?;
+    let duplicate_source = source.clone();
+    let dependencies = TensorActors::new(Mapper::new(), (), ());
+    let mut store = TensorStore::with_dependencies(1, dependencies)?;
+    store
+        .process_event(BindStorage::new(StorageBatch::new(
+            vec![StorageEntry::new(
+                TensorMetadata::new(1_234, 5_678, 0, 0),
+                None,
+            )]
+            .into_boxed_slice(),
+        )))
+        .map_err(|error| error.error())?;
+    let mapped = store.process_event(MappedLoad::new(0, source, 0, 4_096))?;
+    let state = store.process_event(CaptureTensorState::new(0))?;
+    println!(
+        "case=mapped_load outcome=done tensor_id={} bytes={} lifecycle={}",
+        mapped.tensor_id(),
+        mapped.mapped_bytes(),
+        tensor_lifecycle(state.lifecycle())
+    );
+    let planned = store
+        .process_event(PlanLoad::new(
+            TensorStrategy::None,
+            EffectBuffer::new(vec![EffectRequest::Empty].into_boxed_slice()),
+        ))
+        .map_err(|error| error.error())?;
+    let effects = planned.into_effects();
+    let EffectRequest::None {
+        tensor_id,
+        file_index,
+        offset,
+        size,
+    } = effects.effects()[0]
+    else {
+        return Err("mapped resident plan produced the wrong strategy".into());
+    };
+    println!(
+        "case=mapped_resident_plan outcome=done first=none:{tensor_id}:{file_index}:{offset}:{size}"
+    );
+    if store.process_event(ApplyEffectError::new(0, EffectError::Backend))
+        != Err(TensorError::BackendError)
+    {
+        return Err("mapped resident plan did not recover through typed backend error".into());
+    }
+    let duplicate = store
+        .process_event(MappedLoad::new(0, duplicate_source, 0, 4_096))
+        .expect_err("duplicate mapping is rejected");
+    let state = store.process_event(CaptureTensorState::new(0))?;
+    println!(
+        "case=mapped_duplicate outcome=error error={} retained_bytes={}",
+        tensor_error(duplicate),
+        state.buffer_bytes()
+    );
+    let wrong_release = store
+        .process_event(ReleaseMapped::new(0, mapped.mapping_handle() + 1))
+        .expect_err("wrong release token is rejected");
+    let state = store.process_event(CaptureTensorState::new(0))?;
+    println!(
+        "case=mapped_wrong_release outcome=error error={} lifecycle={}",
+        tensor_error(wrong_release),
+        tensor_lifecycle(state.lifecycle())
+    );
+    let released = store.process_event(ReleaseMapped::new(0, mapped.mapping_handle()))?;
+    let state = store.process_event(CaptureTensorState::new(0))?;
+    println!(
+        "case=mapped_release outcome=done tensor_id={} lifecycle={}",
+        released.tensor_id(),
+        tensor_lifecycle(state.lifecycle())
+    );
+    drop(store);
+    Ok(())
+}
+
+const fn tensor_lifecycle(lifecycle: TensorLifecycle) -> &'static str {
+    match lifecycle {
+        TensorLifecycle::MappedResident => "mapped_resident",
+        TensorLifecycle::Evicted => "evicted",
+        _ => "other",
+    }
+}
+
+const fn tensor_error(error: TensorError) -> &'static str {
+    match error {
+        TensorError::InvalidRequest => "invalid_request",
+        TensorError::TensorAlreadyResident => "tensor_already_resident",
+        _ => "other",
     }
 }
 
@@ -189,13 +302,19 @@ fn run_model_tensor(config: Config) -> Result<(), TensorError> {
     println!("# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
     println!("# source_tree: 06306d4ffad3455fcf5df71dc692df52514b9865");
     println!(
-        "# benchmark_fixture: proof-feature Store/process_event, 64 bound metadata records, preallocated mapped effect buffer"
+        "# benchmark_fixture: production Store/process_event, direct read/copy bytes=4096 with preallocated actor-owned targets, plus 64 bound metadata records and a preallocated mapped effect buffer"
     );
     println!(
-        "# benchmark_validation: timed phase is only 64-effect mapped planning; typed count checked; recovery is checked outside timing; returned allocation reset and reused"
+        "# benchmark_validation: direct read times public child dispatch and copy on both lanes with typed completion and byte checks outside timing; mapped planning checks typed count and lane-native recovery with returned allocation reset and reused"
     );
     println!(
-        "# contract_delta: mapped success deferred; each timed plan is closed afterward with the lane-native backend-error event"
+        "# contract_delta: direct-read target ownership differs but both timed lanes dispatch the public tensor actor and copy 4096 bytes into preallocated target storage; each timed plan closes with its lane-native backend-error event"
+    );
+
+    print_case(
+        "model/tensor/rust/direct_read_4k",
+        benchmark_model_tensor_direct_read(config)?,
+        config,
     );
 
     let entries = (0..TENSORS)
@@ -255,6 +374,66 @@ fn run_model_tensor(config: Config) -> Result<(), TensorError> {
     samples.sort_by(f64::total_cmp);
     print_case("model/tensor/rust/plan_mapped_64", median(&samples), config);
     Ok(())
+}
+
+fn benchmark_model_tensor_direct_read(config: Config) -> Result<f64, TensorError> {
+    const COPY_BYTES: usize = 4_096;
+    let source = vec![0xa5_u8; COPY_BYTES];
+    let expected_checksum = u64::from(0xa5_u8) * u64::try_from(COPY_BYTES).expect("fixture size");
+    let execute = |count: u64| -> Result<f64, TensorError> {
+        let count = usize::try_from(count).map_err(|_| TensorError::Capacity)?;
+        if count == 0 || count > 65_536 {
+            return Err(TensorError::Capacity);
+        }
+        let count_f64 = f64::from(u32::try_from(count).map_err(|_| TensorError::Capacity)?);
+        let entries = (0..count)
+            .map(|_| {
+                StorageEntry::new(
+                    TensorMetadata::new(0, COPY_BYTES as u64, 0, 0),
+                    Some(vec![0; COPY_BYTES].into_boxed_slice()),
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let dependencies = TensorActors::new((), Reader::new(), ());
+        let mut store = TensorStore::with_dependencies(count, dependencies)?;
+        store
+            .process_event(BindStorage::new(StorageBatch::new(entries)))
+            .map_err(|error| error.error())?;
+
+        let started = Instant::now();
+        for tensor_id in 0..count {
+            let done = store.process_event(ReadLoad::new(
+                i32::try_from(tensor_id).expect("tensor capacity fits i32"),
+                "benchmark.bin",
+                Some(black_box(&source)),
+                0,
+                COPY_BYTES as u64,
+            ))?;
+            black_box(done);
+        }
+        let elapsed = started.elapsed().as_secs_f64() * 1_000_000_000.0;
+
+        for tensor_id in [0, count - 1] {
+            let mut checksum = |bytes: &[u8]| bytes.iter().copied().map(u64::from).sum::<u64>();
+            if store.process_event(WithTensor::new(
+                i32::try_from(tensor_id).expect("tensor capacity fits i32"),
+                &mut checksum,
+            ))? != expected_checksum
+            {
+                return Err(TensorError::Internal);
+            }
+        }
+        Ok(elapsed / count_f64)
+    };
+
+    black_box(execute(config.warmup_iterations)?);
+    let mut samples = Vec::with_capacity(config.runs);
+    for _ in 0..config.runs {
+        samples.push(execute(config.iterations)?);
+    }
+    samples.sort_by(f64::total_cmp);
+    Ok(median(&samples))
 }
 
 fn run_io_mmap(config: Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -370,10 +549,8 @@ fn benchmark_mmap_case(
         if done.len() != mapping_bytes as u64 {
             return Err(emel_io::mmap::event::Error::InternalError);
         }
-        let mut checksum = 0_u64;
-        let mut observe = |mapped: &[u8]| checksum = fnv1a64(mapped);
-        let callback = MappingCallback::new(&mut observe);
-        mapper.process_event(WithMapping::new(71, done.handle(), &callback))?;
+        let mut observe = |mapped: &[u8]| fnv1a64(mapped);
+        let checksum = mapper.process_event(WithMapping::new(71, done.handle(), &mut observe))?;
         mapper.process_event(AdviseSequential::new(
             71,
             done.handle(),
@@ -600,15 +777,158 @@ fn tensor_fixture() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use allocation_counter::measure;
     use emel_gguf::Loader as GgufLoader;
     use emel_gguf::event::{Load, ParseDone};
+    use emel_model::tensor::event::{
+        ApplyBoundEffectResults, ApplyOwnedEffectResults, CaptureTensorState,
+        Lifecycle as TensorLifecycle, MappedLoad, OwnedEffectResult, ReleaseMapped,
+    };
 
-    use super::{median, metadata_fixture, tensor_fixture};
+    use super::{
+        BindStorage, EffectBuffer, EffectRequest, Mapper, PlanLoad, StorageBatch, StorageEntry,
+        TensorActors, TensorMetadata, TensorStore, TensorStrategy, WithTensor, median,
+        metadata_fixture, open_benchmark_source, tensor_fixture,
+    };
 
     fn load(file_image: &[u8]) -> ParseDone<'_> {
         GgufLoader::new()
             .process_event(Load::new(file_image))
             .expect("fixture loads")
+    }
+
+    fn assert_tensor_lifecycle<Dependencies>(
+        store: &mut TensorStore<Dependencies>,
+        expected: TensorLifecycle,
+    ) where
+        Dependencies: emel_model::tensor::dependency::TensorDependencies,
+    {
+        assert_eq!(
+            store
+                .process_event(CaptureTensorState::new(0))
+                .unwrap()
+                .lifecycle(),
+            expected
+        );
+    }
+
+    fn assert_quarantine_rejects_bulk_plan<Dependencies>(
+        store: &mut TensorStore<Dependencies>,
+        live: &std::cell::Cell<bool>,
+    ) where
+        Dependencies: emel_model::tensor::dependency::TensorDependencies,
+    {
+        let plan_result = std::cell::RefCell::new(None);
+        let plan = PlanLoad::new(
+            TensorStrategy::ReadCopy,
+            EffectBuffer::new(vec![EffectRequest::Empty].into_boxed_slice()),
+        );
+        let allocation = measure(|| {
+            plan_result.replace(Some(store.process_event(plan)));
+        });
+        assert_eq!(allocation.count_total, 0);
+        let plan_error = plan_result
+            .borrow_mut()
+            .take()
+            .unwrap()
+            .expect_err("cleanup-pending mapping rejects bulk planning");
+        assert_eq!(
+            plan_error.error(),
+            super::TensorError::MappedTensorRequiresRelease
+        );
+        assert_eq!(plan_error.into_effects().effects(), &[EffectRequest::Empty]);
+
+        let apply_result = std::cell::RefCell::new(None);
+        let results = ApplyOwnedEffectResults::new(
+            vec![OwnedEffectResult::new(0, vec![9; 4_096].into_boxed_slice())].into_boxed_slice(),
+        );
+        let allocation = measure(|| {
+            apply_result.replace(Some(store.process_event(results)));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            apply_result
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .expect_err("rejected plan leaves no result phase")
+                .error(),
+            super::TensorError::InvalidRequest
+        );
+        assert_tensor_lifecycle(store, TensorLifecycle::MappedCleanupPending);
+        assert!(live.get());
+    }
+
+    struct MalformedMapper<'state> {
+        live: &'state std::cell::Cell<bool>,
+        releases: &'state std::cell::Cell<u32>,
+        release_owner: &'state std::cell::Cell<Option<(i32, u32)>>,
+        fail_release: &'state std::cell::Cell<bool>,
+    }
+
+    impl emel_model::tensor::dependency::Mapper for MalformedMapper<'_> {
+        const AVAILABLE: bool = true;
+
+        fn map_tensor(
+            &mut self,
+            event: emel_io::mmap::event::MapTensor,
+        ) -> Result<emel_io::mmap::event::MapDone, emel_io::mmap::event::Error> {
+            assert_eq!(event.tensor_id(), 0);
+            assert_eq!(event.file_index(), 0);
+            assert_eq!(event.offset(), 0);
+            assert_eq!(event.len(), 4_096);
+            self.live.set(true);
+            Ok(emel_io::mmap::event::MapDone::new(7, 99, 3))
+        }
+
+        fn release_mapping(
+            &mut self,
+            event: emel_io::mmap::event::ReleaseMapping,
+        ) -> Result<(), emel_io::mmap::event::Error> {
+            self.release_owner
+                .set(Some((event.tensor_id(), event.handle())));
+            self.releases.set(self.releases.get() + 1);
+            if self.fail_release.get() {
+                Err(emel_io::mmap::event::Error::UnmapFailed)
+            } else {
+                self.live.set(false);
+                Ok(())
+            }
+        }
+
+        fn with_mapping<Operation>(
+            &mut self,
+            event: emel_io::mmap::event::WithMapping<'_, Operation>,
+        ) -> Result<Operation::Output, emel_io::mmap::event::Error>
+        where
+            Operation: emel_io::mmap::event::MappingOperation,
+        {
+            Ok(event.apply(&[1, 2, 3]))
+        }
+    }
+
+    impl emel_model::tensor::dependency::Reader for MalformedMapper<'_> {
+        const AVAILABLE: bool = false;
+
+        fn read_tensor(
+            &mut self,
+            _: emel_io::read::event::ReadTensor<'_>,
+        ) -> Result<emel_io::read::event::ReadTensorDone, emel_io::read::event::Error> {
+            Err(emel_io::read::event::Error::UnsupportedPlatform)
+        }
+    }
+
+    impl emel_model::tensor::dependency::Stager for MalformedMapper<'_> {
+        const AVAILABLE: bool = false;
+
+        fn stage_tensor(
+            &mut self,
+            _: emel_io::staged_read::event::StageWindow<'_>,
+        ) -> Result<emel_io::staged_read::event::StageWindowDone, emel_io::staged_read::event::Error>
+        {
+            Err(emel_io::staged_read::event::Error::UnsupportedPlatform)
+        }
     }
 
     #[test]
@@ -621,5 +941,348 @@ mod tests {
     fn median_handles_odd_and_even_samples() {
         assert!((median(&[1.0, 2.0, 3.0]) - 2.0).abs() < f64::EPSILON);
         assert!((median(&[1.0, 2.0, 3.0, 4.0]) - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn malformed_mapped_success_releases_or_retains_ownership_for_retry() {
+        let path = std::env::temp_dir().join(format!(
+            "emel-model-tensor-malformed-mapped-test-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0_u8; 4_096]).unwrap();
+        let source = open_benchmark_source(&path).unwrap();
+        let failure_source = source.clone();
+        let live = std::cell::Cell::new(false);
+        let release_calls = std::cell::Cell::new(0);
+        let release_owner = std::cell::Cell::new(None);
+        let fail_release = std::cell::Cell::new(false);
+        let malformed_mapper = MalformedMapper {
+            live: &live,
+            releases: &release_calls,
+            release_owner: &release_owner,
+            fail_release: &fail_release,
+        };
+        let mut store = TensorStore::with_dependencies(1, malformed_mapper).unwrap();
+        store
+            .process_event(BindStorage::new(StorageBatch::new(
+                vec![StorageEntry::new(TensorMetadata::new(0, 4_096, 0, 0), None)]
+                    .into_boxed_slice(),
+            )))
+            .unwrap();
+
+        let malformed_result = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            malformed_result.set(Some(
+                store.process_event(MappedLoad::new(0, source, 0, 4_096)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            malformed_result.get(),
+            Some(Err(super::TensorError::DependencyContract))
+        );
+        assert_eq!(release_calls.get(), 1);
+        assert_eq!(release_owner.get(), Some((99, 7)));
+        assert!(!live.get());
+        assert_tensor_lifecycle(&mut store, TensorLifecycle::Unbound);
+
+        fail_release.set(true);
+        let malformed_failure = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            malformed_failure.set(Some(store.process_event(MappedLoad::new(
+                0,
+                failure_source,
+                0,
+                4_096,
+            ))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            malformed_failure.get(),
+            Some(Err(super::TensorError::DependencyContractCleanup {
+                mapping_handle: 7,
+                error: emel_io::mmap::event::Error::UnmapFailed,
+            }))
+        );
+        assert_eq!(release_calls.get(), 2);
+        assert_eq!(release_owner.get(), Some((99, 7)));
+        assert!(live.get());
+        assert_tensor_lifecycle(&mut store, TensorLifecycle::MappedCleanupPending);
+
+        let operation_called = std::cell::Cell::new(false);
+        let mut inspect = |_: &[u8]| operation_called.set(true);
+        let quarantined_access = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            quarantined_access.set(Some(store.process_event(WithTensor::new(0, &mut inspect))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            quarantined_access.get(),
+            Some(Err(super::TensorError::MappedTensorRequiresRelease))
+        );
+        assert!(!operation_called.get());
+
+        assert_quarantine_rejects_bulk_plan(&mut store, &live);
+
+        fail_release.set(false);
+        let recovered = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            recovered.set(Some(store.process_event(ReleaseMapped::new(0, 7))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(recovered.get().unwrap().unwrap().tensor_id(), 0);
+        assert_eq!(release_calls.get(), 3);
+        assert_eq!(release_owner.get(), Some((99, 7)));
+        assert!(!live.get());
+        assert_tensor_lifecycle(&mut store, TensorLifecycle::Evicted);
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::too_many_lines,
+        reason = "the mapped capability invariant is proven by one linear end-to-end ownership lifecycle"
+    )]
+    fn model_tensor_mapped_route_owns_access_and_release_through_public_actors() {
+        let path = std::env::temp_dir().join(format!(
+            "emel-model-tensor-mapped-test-{}.bin",
+            std::process::id()
+        ));
+        let bytes = (0_u8..=255).cycle().take(4_096).collect::<Vec<_>>();
+        std::fs::write(&path, &bytes).unwrap();
+        let source = open_benchmark_source(&path).unwrap();
+        let absent_source = source.clone();
+        let resident_source = source.clone();
+        let unbound_source = source.clone();
+        let inactive_source = source.clone();
+
+        let dependencies = TensorActors::new(Mapper::new(), (), ());
+        let mut unbound = TensorStore::with_dependencies(2, dependencies).unwrap();
+        let invalid = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            invalid.set(Some(unbound.process_event(MappedLoad::new(
+                0,
+                unbound_source,
+                0,
+                4_096,
+            ))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(invalid.get(), Some(Err(super::TensorError::InvalidRequest)));
+        unbound
+            .process_event(BindStorage::new(StorageBatch::new(
+                vec![StorageEntry::new(TensorMetadata::new(0, 4_096, 0, 0), None)]
+                    .into_boxed_slice(),
+            )))
+            .unwrap();
+        assert_eq!(
+            unbound.process_event(MappedLoad::new(1, inactive_source, 0, 4_096)),
+            Err(super::TensorError::InvalidRequest)
+        );
+        assert_eq!(
+            unbound.process_event(ReleaseMapped::new(1, 0)),
+            Err(super::TensorError::InvalidRequest)
+        );
+
+        let mut absent = TensorStore::new(1).unwrap();
+        absent
+            .process_event(BindStorage::new(StorageBatch::new(
+                vec![StorageEntry::new(TensorMetadata::new(0, 4_096, 0, 0), None)]
+                    .into_boxed_slice(),
+            )))
+            .unwrap();
+        let unavailable = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            unavailable.set(Some(absent.process_event(MappedLoad::new(
+                0,
+                absent_source,
+                0,
+                4_096,
+            ))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            unavailable.get(),
+            Some(Err(super::TensorError::MmapUnavailable))
+        );
+
+        let dependencies = TensorActors::new(Mapper::new(), (), ());
+        let mut store = TensorStore::with_dependencies(1, dependencies).unwrap();
+        store
+            .process_event(BindStorage::new(StorageBatch::new(
+                vec![StorageEntry::new(
+                    TensorMetadata::new(1_234, 5_678, 0, 0),
+                    None,
+                )]
+                .into_boxed_slice(),
+            )))
+            .unwrap();
+
+        let mapped = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            mapped.set(Some(
+                store.process_event(MappedLoad::new(0, source, 0, 4_096)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        let mapped = mapped.get().unwrap().unwrap();
+        assert_eq!(mapped.mapped_bytes(), 4_096);
+        assert_eq!(mapped.tensor_id(), 0);
+        assert_eq!(
+            store
+                .process_event(CaptureTensorState::new(0))
+                .unwrap()
+                .lifecycle(),
+            TensorLifecycle::MappedResident
+        );
+
+        let planned = std::cell::RefCell::new(None);
+        let effects = EffectBuffer::new(vec![EffectRequest::Empty].into_boxed_slice());
+        let allocation = measure(|| {
+            planned.replace(Some(
+                store.process_event(PlanLoad::new(TensorStrategy::None, effects)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        let planned = planned
+            .borrow_mut()
+            .take()
+            .unwrap()
+            .expect("ordinary mapped residency preserves pinned planning");
+        assert_eq!(
+            planned.into_effects().effects(),
+            &[EffectRequest::None {
+                tensor_id: 0,
+                file_index: 0,
+                offset: 1_234,
+                size: 5_678,
+            }]
+        );
+
+        let bound_result = std::cell::RefCell::new(None);
+        let tensor_ids = vec![0].into_boxed_slice();
+        let allocation = measure(|| {
+            bound_result.replace(Some(
+                store.process_event(ApplyBoundEffectResults::new(tensor_ids)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            bound_result
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .error(),
+            super::TensorError::MappedTensorRequiresRelease
+        );
+        assert_tensor_lifecycle(&mut store, TensorLifecycle::MappedResident);
+
+        let planned = std::cell::RefCell::new(None);
+        let effects = EffectBuffer::new(vec![EffectRequest::Empty].into_boxed_slice());
+        let allocation = measure(|| {
+            planned.replace(Some(
+                store.process_event(PlanLoad::new(TensorStrategy::ReadCopy, effects)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        planned
+            .borrow_mut()
+            .take()
+            .unwrap()
+            .expect("ordinary mapped residency preserves strategy planning");
+        let owned_result = std::cell::RefCell::new(None);
+        let results = ApplyOwnedEffectResults::new(
+            vec![OwnedEffectResult::new(0, vec![9; 5_678].into_boxed_slice())].into_boxed_slice(),
+        );
+        let allocation = measure(|| {
+            owned_result.replace(Some(store.process_event(results)));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            owned_result
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .error(),
+            super::TensorError::MappedTensorRequiresRelease
+        );
+        assert_tensor_lifecycle(&mut store, TensorLifecycle::MappedResident);
+
+        let checksum = std::cell::Cell::new(None);
+        let mut inspect = |mapped: &[u8]| super::fnv1a64(mapped);
+        let allocation = measure(|| {
+            checksum.set(Some(store.process_event(WithTensor::new(0, &mut inspect))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(checksum.get(), Some(Ok(super::fnv1a64(&bytes))));
+
+        let wrong_release = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            wrong_release.set(Some(
+                store.process_event(ReleaseMapped::new(0, mapped.mapping_handle() + 1)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            wrong_release.get(),
+            Some(Err(super::TensorError::InvalidRequest))
+        );
+
+        let already_resident = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            already_resident.set(Some(store.process_event(MappedLoad::new(
+                0,
+                resident_source,
+                0,
+                4_096,
+            ))));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(
+            already_resident.get(),
+            Some(Err(super::TensorError::TensorAlreadyResident))
+        );
+        let mut length = |mapped: &[u8]| mapped.len();
+        assert_eq!(
+            store.process_event(WithTensor::new(0, &mut length)),
+            Ok(4_096)
+        );
+
+        let released = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            released.set(Some(
+                store.process_event(ReleaseMapped::new(0, mapped.mapping_handle())),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(released.get().unwrap().unwrap().tensor_id(), 0);
+        assert_eq!(
+            store
+                .process_event(CaptureTensorState::new(0))
+                .unwrap()
+                .lifecycle(),
+            TensorLifecycle::Evicted
+        );
+
+        let mut after_release = |mapped: &[u8]| mapped.len();
+        let missing = std::cell::Cell::new(None);
+        let allocation = measure(|| {
+            missing.set(Some(
+                store.process_event(WithTensor::new(0, &mut after_release)),
+            ));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(missing.get(), Some(Err(super::TensorError::TensorUnbound)));
+
+        drop(store);
+        drop(absent);
+        drop(unbound);
+        std::fs::remove_file(path).unwrap();
     }
 }

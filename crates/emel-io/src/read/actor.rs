@@ -63,6 +63,10 @@ impl Reader {
         status.get().result
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the non-Copy public request is consumed at the actor dispatch boundary"
+    )]
     fn dispatch_read_tensor(
         &mut self,
         event: event::ReadTensor<'_>,

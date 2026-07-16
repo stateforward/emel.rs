@@ -11,5 +11,8 @@ set(EMEL_ENABLE_FUZZ OFF CACHE BOOL "" FORCE)
 set(EMEL_ENABLE_AARCH64_HOST_FEATURES OFF CACHE BOOL "" FORCE)
 set(EMEL_ENABLE_X86_64_HOST_FEATURES OFF CACHE BOOL "" FORCE)
 add_subdirectory("${EMEL_CPP_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/emel-cpp" EXCLUDE_FROM_ALL)
-add_executable(emel-model-tensor-reference main.cpp)
+add_executable(emel-model-tensor-reference
+  main.cpp
+  "${EMEL_CPP_SOURCE_DIR}/src/emel/io/mmap/actions.cpp"
+)
 target_link_libraries(emel-model-tensor-reference PRIVATE emel_core)

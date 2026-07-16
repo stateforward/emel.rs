@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use emel_io::mmap::Mapper;
 use emel_io::mmap::event::{
-    AdviseDontNeed, AdviseSequential, AdviseWillNeed, Error, MapDone, MapTensor, MappingCallback,
-    MmapSource, ReleaseMapping, WithMapping,
+    AdviseDontNeed, AdviseSequential, AdviseWillNeed, Error, MapDone, MapTensor, MmapSource,
+    ReleaseMapping, WithMapping,
 };
 #[cfg(unix)]
 use libc as _;
@@ -59,19 +59,37 @@ fn map(mapper: &mut Mapper, file: &MmapSource, tensor_id: i32, len: u64) -> MapD
 }
 
 #[test]
+fn replacement_protocol_exposes_immutable_metadata_and_synchronous_apply() {
+    let fixture = Fixture::new();
+    let request = MapTensor::new(12, fixture.mmap_source(), 64, 128).with_file_index(3);
+    assert_eq!(request.tensor_id(), 12);
+    assert_eq!(request.file_index(), 3);
+    assert_eq!(request.offset(), 64);
+    assert_eq!(request.len(), 128);
+    assert!(!request.is_empty());
+
+    let release = ReleaseMapping::new(99, 7);
+    assert_eq!(release.tensor_id(), 99);
+    assert_eq!(release.handle(), 7);
+
+    let mut checksum = |bytes: &[u8]| bytes.iter().copied().map(u16::from).sum::<u16>();
+    let access = WithMapping::new(99, 7, &mut checksum);
+    assert_eq!(access.tensor_id(), 99);
+    assert_eq!(access.handle(), 7);
+    assert_eq!(access.apply(&[1, 2, 3]), 6);
+}
+
+#[test]
 fn map_access_advice_and_release_run_through_public_events() {
     let fixture = Fixture::new();
     let file = fixture.mmap_source();
     let mut mapper = Mapper::new();
     let done = map(&mut mapper, &file, 17, 4_096);
 
-    let mut parsed = 0_u32;
-    let mut parse = |bytes: &[u8]| {
-        parsed = u32::from_le_bytes(bytes[..4].try_into().expect("four mapped bytes"));
-    };
-    let callback = MappingCallback::new(&mut parse);
-    mapper
-        .process_event(WithMapping::new(17, done.handle(), &callback))
+    let mut parse =
+        |bytes: &[u8]| u32::from_le_bytes(bytes[..4].try_into().expect("four mapped bytes"));
+    let parsed = mapper
+        .process_event(WithMapping::new(17, done.handle(), &mut parse))
         .expect("mapping access");
     assert_eq!(
         parsed, 0x0302_0100,
@@ -111,11 +129,9 @@ fn consecutive_dispatches_never_expose_a_waiting_phase() {
         .process_event(AdviseSequential::new(2, second.handle(), 0, 64))
         .expect("advice restores ownership before returning");
 
-    let mut observed_len = 0_usize;
-    let mut observe = |bytes: &[u8]| observed_len = bytes.len();
-    let callback = MappingCallback::new(&mut observe);
-    mapper
-        .process_event(WithMapping::new(2, second.handle(), &callback))
+    let mut observe = |bytes: &[u8]| bytes.len();
+    let observed_len = mapper
+        .process_event(WithMapping::new(2, second.handle(), &mut observe))
         .expect("completed advice left the mapping ready");
     assert_eq!(observed_len, 4_096);
 
@@ -179,9 +195,8 @@ fn invalid_requests_do_not_consume_slots_or_invoke_callbacks() {
 
     let mut invoked = false;
     let mut observe = |_: &[u8]| invoked = true;
-    let callback = MappingCallback::new(&mut observe);
     assert_eq!(
-        mapper.process_event(WithMapping::new(8, done.handle(), &callback)),
+        mapper.process_event(WithMapping::new(8, done.handle(), &mut observe)),
         Err(Error::InvalidRequest),
     );
     assert!(!invoked);
@@ -192,27 +207,13 @@ fn invalid_requests_do_not_consume_slots_or_invoke_callbacks() {
 }
 
 #[test]
-fn callback_panic_is_a_typed_outcome_and_leaves_mapping_accessible() {
+#[should_panic(expected = "operation panic probe")]
+fn operation_panic_propagates_as_a_programming_defect() {
     let fixture = Fixture::new();
     let file = fixture.mmap_source();
     let mut mapper = Mapper::new();
     let done = map(&mut mapper, &file, 9, 4_096);
 
-    let mut panic_callback = |_: &[u8]| panic!("callback panic probe");
-    let callback = MappingCallback::new(&mut panic_callback);
-    assert_eq!(
-        mapper.process_event(WithMapping::new(9, done.handle(), &callback)),
-        Err(Error::CallbackPanicked),
-    );
-
-    let mut observed = false;
-    let mut observe = |_: &[u8]| observed = true;
-    let callback = MappingCallback::new(&mut observe);
-    mapper
-        .process_event(WithMapping::new(9, done.handle(), &callback))
-        .expect("mapping remains ready after callback panic classification");
-    assert!(observed);
-    mapper
-        .process_event(ReleaseMapping::new(9, done.handle()))
-        .expect("release after callback panic classification");
+    let mut panic_operation = |_: &[u8]| panic!("operation panic probe");
+    let _ = mapper.process_event(WithMapping::new(9, done.handle(), &mut panic_operation));
 }

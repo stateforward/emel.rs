@@ -56,10 +56,13 @@ impl Mapper {
         self.core.advise_dont_need(request)
     }
 
-    pub(super) fn with_mapping(
+    pub(super) fn with_mapping<Operation>(
         &mut self,
-        request: event::WithMapping<'_>,
-    ) -> Result<(), event::Error> {
+        request: event::WithMapping<'_, Operation>,
+    ) -> Result<Operation::Output, event::Error>
+    where
+        Operation: event::MappingOperation,
+    {
         self.core.with_mapping(request)
     }
 }

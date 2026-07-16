@@ -29,6 +29,10 @@ impl Stager {
         event.dispatch(self)
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "the non-Copy public request is consumed at the actor dispatch boundary"
+    )]
     pub(crate) fn stage_window(
         &mut self,
         event: event::StageWindow<'_>,

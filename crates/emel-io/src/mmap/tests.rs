@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::event::{
-    AdviceRequest, Error, MapTensor, MappingCallback, MmapSource, ReleaseMapping, WithMapping,
-};
+use super::event::{AdviceRequest, Error, MapTensor, MmapSource, ReleaseMapping, WithMapping};
 use super::platform::{
     Native, Platform, PlatformError, Region, SetupError, abort_on_release_failure,
 };
@@ -326,13 +324,11 @@ fn injected_advice_and_release_failures_restore_exact_mapping_ownership() {
         advice_core.advise_sequential(advice),
         Err(Error::AdviceFailed)
     );
-    let mut observed = false;
-    let mut observe = |_: &[u8]| observed = true;
-    let callback = MappingCallback::new(&mut observe);
-    advice_core
-        .with_mapping(WithMapping::new(2, handle, &callback))
+    let mut observe = |bytes: &[u8]| bytes.len();
+    let observed = advice_core
+        .with_mapping(WithMapping::new(2, handle, &mut observe))
         .expect("failed advice restores region");
-    assert!(observed);
+    assert_eq!(observed, 4_096);
     advice_core
         .release(ReleaseMapping::new(2, handle))
         .expect("release advice test mapping");
@@ -343,13 +339,11 @@ fn injected_advice_and_release_failures_restore_exact_mapping_ownership() {
         release_core.release(ReleaseMapping::new(2, handle)),
         Err(Error::UnmapFailed)
     );
-    let mut observed = false;
-    let mut observe = |_: &[u8]| observed = true;
-    let callback = MappingCallback::new(&mut observe);
-    release_core
-        .with_mapping(WithMapping::new(2, handle, &callback))
+    let mut observe = |bytes: &[u8]| bytes.len();
+    let observed = release_core
+        .with_mapping(WithMapping::new(2, handle, &mut observe))
         .expect("failed release restores region");
-    assert!(observed);
+    assert_eq!(observed, 4_096);
 }
 
 #[test]

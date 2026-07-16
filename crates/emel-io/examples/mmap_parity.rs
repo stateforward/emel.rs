@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use emel_io::mmap::Mapper;
 use emel_io::mmap::event::{
-    AdviseDontNeed, AdviseSequential, AdviseWillNeed, Error, MapDone, MapTensor, MappingCallback,
-    MmapSource, ReleaseMapping, WithMapping,
+    AdviseDontNeed, AdviseSequential, AdviseWillNeed, Error, MapDone, MapTensor, MmapSource,
+    ReleaseMapping, WithMapping,
 };
 #[cfg(unix)]
 use libc as _;
@@ -128,11 +128,9 @@ fn render_lifecycle_cases(manifest: &mut String, file: &MmapSource) {
     let mut mapper = Mapper::new();
     let done = map(&mut mapper, file, 10);
 
-    let mut checksum = 0_u64;
-    let mut observe = |bytes: &[u8]| checksum = fnv1a64(bytes);
-    let callback = MappingCallback::new(&mut observe);
-    mapper
-        .process_event(WithMapping::new(10, done.handle(), &callback))
+    let mut observe = |bytes: &[u8]| fnv1a64(bytes);
+    let checksum = mapper
+        .process_event(WithMapping::new(10, done.handle(), &mut observe))
         .expect("public mapping access");
     writeln!(
         manifest,

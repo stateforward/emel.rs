@@ -1,11 +1,14 @@
 //! Deterministic tensor bulk-protocol parity lane.
 
 use allocation_counter as _;
-use emel_model::model_tensor_proof::Store;
-use emel_model::model_tensor_proof::event::{
+use emel_io::{read, staged_read};
+use emel_model::tensor::Store;
+use emel_model::tensor::dependency::Actors;
+use emel_model::tensor::event::{
     ApplyBoundEffectResults, ApplyEffectError, ApplyOwnedEffectResults, BindStorage,
     CaptureTensorState, EffectBuffer, EffectError, EffectRequest, Error, OwnedEffectResult,
-    PlanLoad, StorageBatch, StorageEntry, StrategyKind, TensorMetadata,
+    PlanLoad, ReadLoad, StagedLoad, StorageBatch, StorageEntry, StrategyKind, TensorMetadata,
+    WithTensor,
 };
 use sml as _;
 
@@ -27,7 +30,7 @@ fn main() {
         "fixture_config=public_actor_typed_events,owned_batches,two_tensors,supported_strategy_families_plus_rust_unknown_extension"
     );
     println!(
-        "contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;mapped_success_deferred"
+        "contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;rust_mmap_requires_a_caller_stability_capability"
     );
 
     let bind = store
@@ -166,6 +169,92 @@ fn main() {
         "case=result_without_plan outcome=error error={}",
         error(no_plan.error())
     );
+
+    let source = [11_u8, 22, 33, 44, 55, 66];
+    let dependencies = Actors::new((), read::Reader::new(), staged_read::Stager::new());
+    let mut io_store = Store::with_dependencies(1, dependencies).expect("I/O fixture capacity");
+    io_store
+        .process_event(BindStorage::new(storage(&[(0, 4, 0, Some(&[0; 4]))])))
+        .expect("read target storage");
+    let read = io_store
+        .process_event(ReadLoad::new(0, "fixture.bin", Some(&source), 1, 4))
+        .expect("direct read route");
+    let mut checksum = |bytes: &[u8]| bytes.iter().copied().map(u64::from).sum::<u64>();
+    let read_checksum = io_store
+        .process_event(WithTensor::new(0, &mut checksum))
+        .expect("read access");
+    println!(
+        "case=direct_read outcome=done bytes={} checksum={read_checksum}",
+        read.bytes_copied()
+    );
+    let duplicate = io_store
+        .process_event(ReadLoad::new(0, "fixture.bin", Some(&source), 1, 4))
+        .expect_err("resident read is rejected");
+    println!(
+        "case=direct_read_already_resident outcome=error error={}",
+        error(duplicate)
+    );
+
+    io_store
+        .process_event(BindStorage::new(storage(&[(0, 4, 0, Some(&[0; 8]))])))
+        .expect("read validation storage");
+    let invalid = io_store
+        .process_event(ReadLoad::new(0, "fixture.bin", Some(&source), 0, 5))
+        .expect_err("logical size is enforced");
+    println!(
+        "case=direct_read_invalid outcome=error error={}",
+        error(invalid)
+    );
+
+    io_store
+        .process_event(BindStorage::new(storage(&[(0, 4, 0, Some(&[0; 8]))])))
+        .expect("read error storage");
+    let failed = io_store
+        .process_event(ReadLoad::new(0, "fixture.bin", Some(&source[..3]), 0, 4))
+        .expect_err("short source reaches the read child");
+    println!(
+        "case=direct_read_error outcome=error error={}",
+        error(failed)
+    );
+
+    io_store
+        .process_event(BindStorage::new(storage(&[(0, 4, 0, Some(&[0; 4]))])))
+        .expect("staged target storage");
+    let staged = io_store
+        .process_event(StagedLoad::new(0, Some(&source), 1, 4, 3))
+        .expect("direct staged route");
+    let mut checksum = |bytes: &[u8]| bytes.iter().copied().map(u64::from).sum::<u64>();
+    let staged_checksum = io_store
+        .process_event(WithTensor::new(0, &mut checksum))
+        .expect("staged access");
+    println!(
+        "case=direct_staged outcome=done bytes={} checksum={staged_checksum}",
+        staged.bytes_copied()
+    );
+
+    io_store
+        .process_event(BindStorage::new(storage(&[(0, 4, 0, Some(&[0; 8]))])))
+        .expect("staged validation storage");
+    let invalid = io_store
+        .process_event(StagedLoad::new(0, Some(&source), 1, 5, 3))
+        .expect_err("staged logical size is enforced");
+    println!(
+        "case=direct_staged_invalid outcome=error error={}",
+        error(invalid)
+    );
+
+    let mut absent = Store::new(1).expect("absent fixture capacity");
+    absent
+        .process_event(BindStorage::new(storage(&[(0, 4, 0, Some(&[0; 4]))])))
+        .expect("absent target storage");
+    let missing = absent
+        .process_event(ReadLoad::new(0, "fixture.bin", Some(&source), 0, 4))
+        .expect_err("missing reader is explicit");
+    println!("case=missing_reader outcome=error error={}", error(missing));
+    let missing = absent
+        .process_event(StagedLoad::new(0, Some(&source[..4]), 0, 4, 2))
+        .expect_err("missing stager is explicit");
+    println!("case=missing_stager outcome=error error={}", error(missing));
 }
 
 fn storage(entries: &[(u64, u64, u16, Option<&[u8]>)]) -> StorageBatch {
@@ -230,6 +319,10 @@ const fn error(value: Error) -> &'static str {
         Error::Busy => "busy",
         Error::UnsupportedStrategy => "unsupported_strategy",
         Error::BackendError => "backend_error",
+        Error::ReadUnavailable => "read_unavailable",
+        Error::StagerUnavailable => "stager_unavailable",
+        Error::TensorAlreadyResident => "tensor_already_resident",
+        Error::Read(_) => "read_failed",
         _ => "other",
     }
 }

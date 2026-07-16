@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <span>
 #include <stdexcept>
@@ -14,6 +15,9 @@
 #include "emel/model/tensor/errors.hpp"
 #include "emel/model/tensor/events.hpp"
 #include "emel/model/tensor/sm.hpp"
+#include "emel/io/mmap/sm.hpp"
+#include "emel/io/read/sm.hpp"
+#include "emel/io/staged_read/sm.hpp"
 
 namespace {
 namespace tensor = emel::model::tensor;
@@ -23,6 +27,79 @@ struct outcome {
   emel::error::type error{};
   std::uint32_t effect_count{};
 };
+
+struct direct_outcome {
+  bool done{};
+  emel::error::type error{};
+  std::uint64_t bytes{};
+};
+
+struct mapped_outcome {
+  bool done{};
+  emel::error::type error{};
+  emel::error::type io_error{};
+  std::uint32_t handle{emel::io::mmap::k_invalid_mapping_handle};
+  std::uint64_t bytes{};
+};
+
+void mapped_done(
+    void *raw,
+    const tensor::events::request_mapped_load_done &event) noexcept {
+  auto &value = *static_cast<mapped_outcome *>(raw);
+  value.done = true;
+  value.handle = event.mapping_handle;
+  value.bytes = event.buffer_bytes;
+}
+
+void mapped_error(
+    void *raw,
+    const tensor::events::request_mapped_load_error &event) noexcept {
+  auto &value = *static_cast<mapped_outcome *>(raw);
+  value.error = event.err;
+  value.io_error = event.io_mmap_err;
+}
+
+void mapped_release_done(
+    void *raw,
+    const tensor::events::release_mapped_load_done &) noexcept {
+  static_cast<mapped_outcome *>(raw)->done = true;
+}
+
+void mapped_release_error(
+    void *raw,
+    const tensor::events::release_mapped_load_error &event) noexcept {
+  auto &value = *static_cast<mapped_outcome *>(raw);
+  value.error = event.err;
+  value.io_error = event.io_mmap_err;
+}
+
+void read_done(
+    void *raw,
+    const tensor::events::request_read_load_done &event) noexcept {
+  auto &value = *static_cast<direct_outcome *>(raw);
+  value.done = true;
+  value.bytes = event.buffer_bytes;
+}
+
+void read_error(
+    void *raw,
+    const tensor::events::request_read_load_error &event) noexcept {
+  static_cast<direct_outcome *>(raw)->error = event.err;
+}
+
+void on_direct_staged_done(
+    void *raw,
+    const tensor::events::request_staged_load_done &event) noexcept {
+  auto &value = *static_cast<direct_outcome *>(raw);
+  value.done = true;
+  value.bytes = event.buffer_bytes;
+}
+
+void on_direct_staged_error(
+    void *raw,
+    const tensor::events::request_staged_load_error &event) noexcept {
+  static_cast<direct_outcome *>(raw)->error = event.err;
+}
 
 void bind_done(void *raw, const tensor::events::bind_storage_done &) noexcept {
   static_cast<outcome *>(raw)->done = true;
@@ -50,7 +127,6 @@ void apply_error(
     const tensor::events::apply_effect_results_error &event) noexcept {
   static_cast<outcome *>(raw)->error = event.err;
 }
-
 void *fake(std::uintptr_t address) {
   return reinterpret_cast<void *>(address);
 }
@@ -141,6 +217,18 @@ std::string_view error_text(const emel::error::type error) {
   if (error == emel::error::cast(tensor::error::backend_error)) {
     return "backend_error";
   }
+  if (error == emel::error::cast(tensor::error::tensor_already_resident)) {
+    return "tensor_already_resident";
+  }
+  if (error == emel::error::cast(tensor::error::io_read_unsupported)) {
+    return "read_unavailable";
+  }
+  if (error == emel::error::cast(tensor::error::io_read_failed)) {
+    return "read_failed";
+  }
+  if (error == emel::error::cast(tensor::error::io_staged_read_unsupported)) {
+    return "stager_unavailable";
+  }
   return "other";
 }
 
@@ -194,8 +282,148 @@ double benchmark(std::uint64_t iterations, std::size_t runs,
   return samples[samples.size() / 2u];
 }
 
+double benchmark_direct_read(std::uint64_t iterations, std::size_t runs,
+                             std::uint64_t warmup) {
+  constexpr std::size_t copy_bytes = 4096u;
+  std::array<std::uint8_t, copy_bytes> source{};
+  source.fill(0xa5u);
+  auto execute = [&](std::uint64_t count) {
+    require(count > 0u && count <= 65536u, "direct benchmark count");
+    const auto count_size = static_cast<std::size_t>(count);
+    std::vector<std::array<std::uint8_t, copy_bytes>> targets(count_size);
+    std::vector<emel::model::data::tensor_record> records(count_size);
+    for (std::size_t index = 0; index < count_size; ++index) {
+      records[index].data_size = copy_bytes;
+      records[index].data = targets[index].data();
+    }
+    auto io_read = std::make_unique<emel::io::read::sm>();
+    auto machine = std::make_unique<tensor::sm>(io_read.get());
+    require(run_bind(*machine, records).done, "direct benchmark bind");
+
+    const auto begin = std::chrono::steady_clock::now();
+    for (std::size_t index = 0; index < count_size; ++index) {
+      direct_outcome value{};
+      tensor::event::request_read_load request{
+          static_cast<std::int32_t>(index), "benchmark.bin", 0u,
+          copy_bytes};
+      request.source_buffer = source.data();
+      request.source_buffer_bytes = source.size();
+      request.target_buffer = targets[index].data();
+      request.target_buffer_bytes = targets[index].size();
+      request.on_done = {&value, read_done};
+      request.on_error = {&value, read_error};
+      require(machine->process_event(request) && value.done &&
+                  value.bytes == copy_bytes,
+              "direct benchmark read");
+    }
+    const auto elapsed = std::chrono::duration<double, std::nano>(
+                             std::chrono::steady_clock::now() - begin)
+                             .count();
+    require(std::equal(source.begin(), source.end(), targets.front().begin()) &&
+                std::equal(source.begin(), source.end(), targets.back().begin()),
+            "direct benchmark bytes");
+    return elapsed / static_cast<double>(count);
+  };
+
+  (void)execute(warmup);
+  std::vector<double> samples;
+  samples.reserve(runs);
+  for (std::size_t run = 0; run < runs; ++run) {
+    samples.push_back(execute(iterations));
+  }
+  std::sort(samples.begin(), samples.end());
+  return samples[samples.size() / 2u];
+}
+
+void mapped_parity(std::string_view path) {
+  auto mapper = std::make_unique<emel::io::mmap::sm>();
+  auto machine = std::make_unique<tensor::sm>(mapper.get());
+  std::array<emel::model::data::tensor_record, 1> records{};
+  records[0].file_offset = 1234u;
+  records[0].data_size = 5678u;
+  require(run_bind(*machine, records).done, "mapped parity bind");
+
+  mapped_outcome mapped{};
+  tensor::event::request_mapped_load request{0, path, 0u, 4096u};
+  request.on_done = {&mapped, mapped_done};
+  request.on_error = {&mapped, mapped_error};
+  require(machine->process_event(request) && mapped.done &&
+              mapped.bytes == 4096u,
+          "mapped parity load");
+  const auto mapped_state = capture(*machine, 0);
+
+  std::array<tensor::event::effect_request, 1> mapped_effect{};
+  const auto mapped_plan =
+      plan(*machine, mapped_effect,
+           emel::io::loader::event::strategy_kind::none);
+  require(mapped_plan.done && mapped_plan.effect_count == 1u &&
+              mapped_effect[0].strategy ==
+                  emel::io::loader::event::strategy_kind::none &&
+              mapped_effect[0].tensor_id == 0 &&
+              mapped_effect[0].file_index == 0u &&
+              mapped_effect[0].offset == 1234u &&
+              mapped_effect[0].size == 5678u,
+          "mapped resident planning preserves metadata");
+  std::array<tensor::event::effect_result, 1> failed{};
+  failed[0].kind = tensor::event::effect_kind::k_io_load;
+  failed[0].err = emel::error::cast(tensor::error::out_of_memory);
+  require(run_apply(*machine, failed).error ==
+              emel::error::cast(tensor::error::backend_error),
+          "mapped resident plan recovery");
+
+  mapped_outcome duplicate{};
+  request.on_done = {&duplicate, mapped_done};
+  request.on_error = {&duplicate, mapped_error};
+  require(!machine->process_event(request), "mapped parity duplicate");
+  const auto duplicate_state = capture(*machine, 0);
+
+  mapped_outcome wrong_release{};
+  tensor::event::release_mapped_load wrong_request{0, mapped.handle + 1u};
+  wrong_request.on_done = {&wrong_release, mapped_release_done};
+  wrong_request.on_error = {&wrong_release, mapped_release_error};
+  require(!machine->process_event(wrong_request),
+          "mapped parity wrong release");
+  require(wrong_release.io_error ==
+              emel::error::cast(emel::io::mmap::error::invalid_request),
+          "mapped parity wrong release classification");
+  const auto retained_state = capture(*machine, 0);
+
+  mapped_outcome released{};
+  tensor::event::release_mapped_load release_request{0, mapped.handle};
+  release_request.on_done = {&released, mapped_release_done};
+  release_request.on_error = {&released, mapped_release_error};
+  require(machine->process_event(release_request) && released.done,
+          "mapped parity release");
+  const auto released_state = capture(*machine, 0);
+
+  std::cout
+      << "case=mapped_load outcome=done tensor_id=0 bytes=" << mapped.bytes
+      << " lifecycle="
+      << (mapped_state.lifecycle_state == tensor::event::lifecycle::mmap_resident
+              ? "mapped_resident"
+              : "other")
+      << '\n'
+      << "case=mapped_resident_plan outcome=done first=none:0:0:1234:5678\n"
+      << "case=mapped_duplicate outcome=error error="
+      << error_text(duplicate.error)
+      << " retained_bytes=" << duplicate_state.buffer_bytes << '\n'
+      << "case=mapped_wrong_release outcome=error error=invalid_request"
+      << " lifecycle="
+      << (retained_state.lifecycle_state ==
+                  tensor::event::lifecycle::mmap_resident
+              ? "mapped_resident"
+              : "other")
+      << '\n'
+      << "case=mapped_release outcome=done tensor_id=0 lifecycle="
+      << (released_state.lifecycle_state == tensor::event::lifecycle::evicted
+              ? "evicted"
+              : "other")
+      << '\n';
+}
+
 void parity() {
-  tensor::sm machine{};
+  auto machine_storage = std::make_unique<tensor::sm>();
+  auto &machine = *machine_storage;
   std::array<emel::model::data::tensor_record, 2> records{};
   records[0].file_offset = 4096u;
   records[0].data_size = 2u;
@@ -225,7 +453,8 @@ void parity() {
   require(effects[1].tensor_id == 1 && effects[1].file_index == 2u &&
               effects[1].offset == 8192u && effects[1].size == 3u,
           "second none effect");
-  tensor::sm busy_machine{};
+  auto busy_machine_storage = std::make_unique<tensor::sm>();
+  auto &busy_machine = *busy_machine_storage;
   require(run_bind(busy_machine, records).done, "busy bind");
   std::array<tensor::event::effect_request, 2> busy_effects{};
   require(plan(busy_machine, busy_effects,
@@ -330,7 +559,8 @@ void parity() {
   require(preserved_state.file_offset == 16384u,
           "invalid bind preserves metadata");
 
-  tensor::sm unknown_machine{};
+  auto unknown_machine_storage = std::make_unique<tensor::sm>();
+  auto &unknown_machine = *unknown_machine_storage;
   require(run_bind(unknown_machine, read_record).done, "unknown bind");
   std::array<tensor::event::effect_request, 1> unknown_effect{};
   const auto unknown_strategy =
@@ -366,6 +596,114 @@ void parity() {
               emel::error::cast(tensor::error::invalid_request),
           "ready result rejection");
 
+  constexpr std::array<std::uint8_t, 6> direct_source{11u, 22u, 33u,
+                                                       44u, 55u, 66u};
+  std::array<std::uint8_t, 8> direct_target{};
+  std::array<emel::model::data::tensor_record, 1> direct_record{};
+  direct_record[0].data_size = 4u;
+  direct_record[0].data = direct_target.data();
+
+  auto read_actor = std::make_unique<emel::io::read::sm>();
+  auto direct_read_machine = std::make_unique<tensor::sm>(read_actor.get());
+  require(run_bind(*direct_read_machine, direct_record).done,
+          "direct read bind");
+  direct_outcome direct_read{};
+  tensor::event::request_read_load read_request{0, "fixture.bin", 1u, 4u};
+  read_request.source_buffer = direct_source.data();
+  read_request.source_buffer_bytes = direct_source.size();
+  read_request.target_buffer = direct_target.data();
+  read_request.target_buffer_bytes = direct_target.size();
+  read_request.on_done = {&direct_read, read_done};
+  read_request.on_error = {&direct_read, read_error};
+  require(direct_read_machine->process_event(read_request) && direct_read.done,
+          "direct read success");
+  const auto direct_read_checksum = std::uint64_t{direct_target[0]} +
+                                    direct_target[1] + direct_target[2] +
+                                    direct_target[3];
+
+  direct_outcome duplicate_read{};
+  read_request.on_done = {&duplicate_read, read_done};
+  read_request.on_error = {&duplicate_read, read_error};
+  require(!direct_read_machine->process_event(read_request),
+          "direct read duplicate rejected");
+
+  require(run_bind(*direct_read_machine, direct_record).done,
+          "direct read validation reset");
+  direct_outcome invalid_read{};
+  tensor::event::request_read_load invalid_read_request{0, "fixture.bin", 0u,
+                                                         5u};
+  invalid_read_request.source_buffer = direct_source.data();
+  invalid_read_request.source_buffer_bytes = direct_source.size();
+  invalid_read_request.target_buffer = direct_target.data();
+  invalid_read_request.target_buffer_bytes = direct_target.size();
+  invalid_read_request.on_done = {&invalid_read, read_done};
+  invalid_read_request.on_error = {&invalid_read, read_error};
+  require(!direct_read_machine->process_event(invalid_read_request),
+          "direct read validation rejection");
+
+  require(run_bind(*direct_read_machine, direct_record).done,
+          "direct read error reset");
+  direct_outcome failed_read{};
+  tensor::event::request_read_load failed_read_request{0, "fixture.bin", 0u,
+                                                        4u};
+  failed_read_request.source_buffer = direct_source.data();
+  failed_read_request.source_buffer_bytes = 3u;
+  failed_read_request.target_buffer = direct_target.data();
+  failed_read_request.target_buffer_bytes = direct_target.size();
+  failed_read_request.on_done = {&failed_read, read_done};
+  failed_read_request.on_error = {&failed_read, read_error};
+  require(!direct_read_machine->process_event(failed_read_request),
+          "direct read child failure");
+
+  auto staged_actor = std::make_unique<emel::io::staged_read::sm>();
+  auto direct_staged_machine =
+      std::make_unique<tensor::sm>(staged_actor.get());
+  require(run_bind(*direct_staged_machine, direct_record).done,
+          "direct staged bind");
+  direct_outcome direct_staged{};
+  tensor::event::request_staged_load staged_request{0, 1u, 4u};
+  staged_request.stage_chunk_bytes = 3u;
+  staged_request.source_buffer = direct_source.data();
+  staged_request.source_buffer_bytes = direct_source.size();
+  staged_request.target_buffer = direct_target.data();
+  staged_request.target_buffer_bytes = direct_target.size();
+  staged_request.on_done = {&direct_staged, on_direct_staged_done};
+  staged_request.on_error = {&direct_staged, on_direct_staged_error};
+  require(direct_staged_machine->process_event(staged_request) &&
+              direct_staged.done,
+          "direct staged success");
+  const auto direct_staged_checksum = std::uint64_t{direct_target[0]} +
+                                      direct_target[1] + direct_target[2] +
+                                      direct_target[3];
+
+  require(run_bind(*direct_staged_machine, direct_record).done,
+          "direct staged validation reset");
+  direct_outcome invalid_staged{};
+  tensor::event::request_staged_load invalid_staged_request{0, 1u, 5u};
+  invalid_staged_request.stage_chunk_bytes = 3u;
+  invalid_staged_request.source_buffer = direct_source.data();
+  invalid_staged_request.source_buffer_bytes = direct_source.size();
+  invalid_staged_request.target_buffer = direct_target.data();
+  invalid_staged_request.target_buffer_bytes = direct_target.size();
+  invalid_staged_request.on_done = {&invalid_staged, on_direct_staged_done};
+  invalid_staged_request.on_error = {&invalid_staged, on_direct_staged_error};
+  require(!direct_staged_machine->process_event(invalid_staged_request),
+          "direct staged validation rejection");
+
+  auto missing_read_machine = std::make_unique<tensor::sm>();
+  require(run_bind(*missing_read_machine, direct_record).done,
+          "missing reader bind");
+  direct_outcome missing_read{};
+  read_request.on_done = {&missing_read, read_done};
+  read_request.on_error = {&missing_read, read_error};
+  require(!missing_read_machine->process_event(read_request),
+          "missing reader rejection");
+  direct_outcome missing_staged{};
+  staged_request.on_done = {&missing_staged, on_direct_staged_done};
+  staged_request.on_error = {&missing_staged, on_direct_staged_error};
+  require(!missing_read_machine->process_event(staged_request),
+          "missing stager rejection");
+
   std::cout << "model-tensor-parity-snapshot/v1\n"
          "source_repository=stateforward/emel.cpp\n"
          "source_commit=843a117386ef17dc5a50549bbfc821074c2141d6\n"
@@ -373,7 +711,7 @@ void parity() {
          "source_files=src/emel/model/tensor/events.hpp,errors.hpp,context.hpp,detail.hpp,guards.hpp,actions.hpp,sm.hpp\n"
          "source_tests=tests/model/tensor/lifecycle_tests.cpp\n"
          "fixture_config=public_actor_typed_events,owned_batches,two_tensors,supported_strategy_families_plus_rust_unknown_extension\n"
-         "contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;mapped_success_deferred\n"
+         "contract_delta=rust_owned_batches_replace_raw_spans_and_pointers;rust_busy_is_typed;rust_mmap_requires_a_caller_stability_capability\n"
       << "reference_observation=second_plan behavior="
       << (busy_recovered_ready ? "unexpected_recovery_to_ready" : "other")
       << '\n'
@@ -425,7 +763,26 @@ void parity() {
       << "case=result_without_plan outcome="
       << (no_plan.error == emel::error::cast(tensor::error::none) ? "done" : "error")
       << " error=" << error_text(no_plan.error)
-      << '\n';
+      << '\n'
+      << "case=direct_read outcome=" << (direct_read.done ? "done" : "error")
+      << " bytes=" << direct_read.bytes
+      << " checksum=" << direct_read_checksum << '\n'
+      << "case=direct_read_already_resident outcome=error error="
+      << error_text(duplicate_read.error) << '\n'
+      << "case=direct_read_invalid outcome=error error="
+      << error_text(invalid_read.error) << '\n'
+      << "case=direct_read_error outcome=error error="
+      << error_text(failed_read.error) << '\n'
+      << "case=direct_staged outcome="
+      << (direct_staged.done ? "done" : "error")
+      << " bytes=" << direct_staged.bytes
+      << " checksum=" << direct_staged_checksum << '\n'
+      << "case=direct_staged_invalid outcome=error error="
+      << error_text(invalid_staged.error) << '\n'
+      << "case=missing_reader outcome=error error="
+      << error_text(missing_read.error) << '\n'
+      << "case=missing_stager outcome=error error="
+      << error_text(missing_staged.error) << '\n';
 }
 } // namespace
 
@@ -438,7 +795,14 @@ int main(int argc, char **argv) {
       std::cout << "model/tensor/reference/plan_mapped_64 ns_per_op="
                 << std::fixed << std::setprecision(3)
                 << benchmark(iterations, runs, warmup)
+                << " iter=" << iterations << " runs=" << runs << '\n'
+                << "model/tensor/reference/direct_read_4k ns_per_op="
+                << benchmark_direct_read(iterations, runs, warmup)
                 << " iter=" << iterations << " runs=" << runs << '\n';
+      return 0;
+    }
+    if (argc == 3 && std::string_view{argv[1]} == "--mapped-parity") {
+      mapped_parity(argv[2]);
       return 0;
     }
     parity();

@@ -242,12 +242,12 @@ fn prepared_core_dispatches_do_not_allocate() {
 }
 
 #[test]
-fn tensor_actor_remains_private_and_uses_generated_state_inspection() {
+fn tensor_actor_exports_only_its_actor_surface_and_uses_generated_state_inspection() {
     let crate_root = include_str!("../lib.rs");
     let module_root = include_str!("mod.rs");
     let actor = include_str!("actor.rs");
 
-    assert!(crate_root.contains("pub(crate) mod tensor;"));
+    assert!(crate_root.contains("pub mod tensor;"));
     assert!(module_root.contains("mod actor;"));
     assert!(module_root.contains("mod sm;"));
     assert!(!module_root.contains("pub mod sm;"));

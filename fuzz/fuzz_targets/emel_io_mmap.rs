@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 
 use emel_io::mmap::Mapper;
 use emel_io::mmap::event::{
-    AdviseDontNeed, AdviseSequential, AdviseWillNeed, MapTensor, MappingCallback, MmapSource,
-    ReleaseMapping, WithMapping,
+    AdviseDontNeed, AdviseSequential, AdviseWillNeed, MapTensor, MmapSource, ReleaseMapping,
+    WithMapping,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -37,20 +37,18 @@ fuzz_target!(|data: &[u8]| {
         let mut observe = |bytes: &[u8]| {
             checksum = bytes.iter().fold(0, |value, byte| value ^ byte);
         };
-        let callback = MappingCallback::new(&mut observe);
         mapper
-            .process_event(WithMapping::new(tensor_id, done.handle(), &callback))
+            .process_event(WithMapping::new(tensor_id, done.handle(), &mut observe))
             .expect("a committed fuzz mapping must remain accessible");
         std::hint::black_box(checksum);
 
         let wrong_owner = tensor_id.wrapping_add(1);
         let wrong_handle = done.handle().wrapping_add(read_u32(data, 17) | 1);
         let mut never_called = |_: &[u8]| panic!("invalid ownership invoked callback");
-        let invalid_callback = MappingCallback::new(&mut never_called);
         let _ = mapper.process_event(WithMapping::new(
             wrong_owner,
             wrong_handle,
-            &invalid_callback,
+            &mut never_called,
         ));
 
         let advice_offset = read_u64(data, 21);

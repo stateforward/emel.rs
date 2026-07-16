@@ -7,13 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-# Internal cross-crate proof surface. This deliberately exports only the actor
-# and typed events; the production tensor cutover remains deferred.
-model-tensor-proof = []
-
 [dependencies]
+emel-io = { workspace = true }
 sml = { workspace = true }
 
 [dev-dependencies]
@@ -21,7 +16,6 @@ allocation-counter = "=0.8.1"
 
 [[example]]
 name = "tensor_parity"
-required-features = ["model-tensor-proof"]
 
 [lints]
 workspace = true

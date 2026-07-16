@@ -1,11 +1,14 @@
 #![no_main]
 
-use emel_model::model_tensor_proof::event::{
+use emel_io::{read, staged_read};
+use emel_model::tensor::dependency::Actors;
+use emel_model::tensor::event::{
     ApplyBoundEffectResults, ApplyEffectError, ApplyOwnedEffectResults, BindStorage,
     CaptureTensorState, EffectBuffer, EffectError, EffectRequest, Lifecycle, OwnedEffectResult,
-    PlanLoad, StorageBatch, StorageEntry, StrategyKind, TensorMetadata,
+    PlanLoad, ReadLoad, ReleaseMapped, StagedLoad, StorageBatch, StorageEntry, StrategyKind,
+    TensorMetadata, WithTensor,
 };
-use emel_model::model_tensor_proof::Store;
+use emel_model::tensor::Store;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -125,7 +128,80 @@ fuzz_target!(|data: &[u8]| {
             .lifecycle(),
         Lifecycle::Resident
     );
+
+    fuzz_io_routes(data);
 });
+
+fn fuzz_io_routes(data: &[u8]) {
+    const TARGET_BYTES: usize = 16;
+    let dependencies = Actors::new((), read::Reader::new(), staged_read::Stager::new());
+    let mut store = Store::with_dependencies(1, dependencies).expect("bounded I/O fuzz capacity");
+    store
+        .process_event(BindStorage::new(io_storage(TARGET_BYTES)))
+        .expect("I/O fuzz target storage");
+
+    let offset = u64::from(byte(data, 20));
+    let len = u64::from(byte(data, 21) % 24);
+    let source = (byte(data, 22) & 1 == 0).then_some(data);
+    if byte(data, 23) & 1 == 0 {
+        let path = if byte(data, 24) & 1 == 0 {
+            "fuzz.bin"
+        } else {
+            ""
+        };
+        let request = ReadLoad::new(0, path, source, offset, len)
+            .with_file_index(u16::from(byte(data, 25)));
+        let _ = store.process_event(request);
+    } else {
+        let chunk = u64::from(byte(data, 24));
+        let _ = store.process_event(StagedLoad::new(0, source, offset, len, chunk));
+    }
+
+    let mut checksum = |bytes: &[u8]| {
+        bytes.iter().fold(0_u64, |value, byte| {
+            value.wrapping_mul(16_777_619) ^ u64::from(*byte)
+        })
+    };
+    let _ = store.process_event(WithTensor::new(0, &mut checksum));
+    let _ = store.process_event(ReleaseMapped::new(0, u32::from(byte(data, 26))));
+
+    store
+        .process_event(BindStorage::new(io_storage(4)))
+        .expect("I/O actor recovers after every classified route");
+    store
+        .process_event(ReadLoad::new(
+            0,
+            "recovery.bin",
+            Some(&[1, 2, 3, 4]),
+            0,
+            4,
+        ))
+        .expect("valid recovery read");
+    let mut capture = |bytes: &[u8]| <[u8; 4]>::try_from(bytes).ok();
+    assert_eq!(
+        store.process_event(WithTensor::new(0, &mut capture)),
+        Ok(Some([1, 2, 3, 4]))
+    );
+
+    let mut absent = Store::new(1).expect("missing-capability fuzz capacity");
+    absent
+        .process_event(BindStorage::new(io_storage(4)))
+        .expect("missing-capability target storage");
+    let _ = absent.process_event(ReadLoad::new(0, "fuzz.bin", Some(data), offset, len));
+    let _ = absent.process_event(StagedLoad::new(0, Some(data), offset, len, 4));
+    let mut capture = |bytes: &[u8]| bytes.len();
+    let _ = absent.process_event(WithTensor::new(0, &mut capture));
+}
+
+fn io_storage(bytes: usize) -> StorageBatch {
+    StorageBatch::new(
+        vec![StorageEntry::new(
+            TensorMetadata::new(0, bytes as u64, 0, 0),
+            Some(vec![0; bytes].into_boxed_slice()),
+        )]
+        .into_boxed_slice(),
+    )
+}
 
 fn byte(data: &[u8], index: usize) -> u8 {
     data.get(index).copied().unwrap_or_default()

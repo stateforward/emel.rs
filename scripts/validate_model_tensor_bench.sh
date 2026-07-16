@@ -10,9 +10,9 @@ for expected in \
   '# source_repository: stateforward/emel.cpp' \
   '# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6' \
   '# source_tree: 06306d4ffad3455fcf5df71dc692df52514b9865' \
-  '# benchmark_fixture: proof-feature Store/process_event, 64 bound metadata records, preallocated mapped effect buffer' \
-  '# benchmark_validation: timed phase is only 64-effect mapped planning; typed count checked; recovery is checked outside timing; returned allocation reset and reused' \
-  '# contract_delta: mapped success deferred; each timed plan is closed afterward with the lane-native backend-error event'; do
+  '# benchmark_fixture: production Store/process_event, direct read/copy bytes=4096 with preallocated actor-owned targets, plus 64 bound metadata records and a preallocated mapped effect buffer' \
+  '# benchmark_validation: direct read times public child dispatch and copy on both lanes with typed completion and byte checks outside timing; mapped planning checks typed count and lane-native recovery with returned allocation reset and reused' \
+  '# contract_delta: direct-read target ownership differs but both timed lanes dispatch the public tensor actor and copy 4096 bytes into preallocated target storage; each timed plan closes with its lane-native backend-error event'; do
   field_prefix="${expected%%:*}: "
   if ! awk -v expected="$expected" -v field_prefix="$field_prefix" '
     index($0, field_prefix) == 1 { fields += 1; exact += ($0 == expected) }
@@ -33,7 +33,8 @@ if ! awk -v expected_iterations="$expected_iterations" -v expected_runs="$expect
   /^[[:space:]]*$/ || /^#/ { next }
   {
     rows += 1
-    if ($1 != "model/tensor/plan_mapped_64" || seen_case[$1]++) { invalid = 1 }
+    if (($1 != "model/tensor/plan_mapped_64" && $1 != "model/tensor/direct_read_4k") ||
+        seen_case[$1]++) { invalid = 1 }
     delete fields
     delete values
     for (field_index = 2; field_index <= NF; ++field_index) {
@@ -57,7 +58,8 @@ if ! awk -v expected_iterations="$expected_iterations" -v expected_runs="$expect
         ("value:" values["iter"]) != ("value:" expected_iterations) ||
         ("value:" values["runs"]) != ("value:" expected_runs)) { invalid = 1 }
   }
-  END { exit !(rows == 1 && !invalid && seen_case["model/tensor/plan_mapped_64"] == 1) }
+  END { exit !(rows == 2 && !invalid && seen_case["model/tensor/plan_mapped_64"] == 1 &&
+               seen_case["model/tensor/direct_read_4k"] == 1) }
 ' "$artifact"; then
   echo "error: $label has an invalid model tensor benchmark result schema" >&2
   exit 1

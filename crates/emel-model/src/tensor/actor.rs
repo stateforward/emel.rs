@@ -3,11 +3,12 @@
 use core::cell::{Cell, RefCell};
 use core::fmt;
 
+use super::dependency::TensorDependencies;
 use super::event::{self, Event};
 use super::sm::{
-    ApplyBoundRuntime, ApplyEffectErrorRuntime, ApplyOwnedRuntime, BindRuntime, BindStorageRuntime,
-    CaptureRuntime, Context, EvictRuntime, ModelTensorEvents, ModelTensorStateMachine,
-    PlanLoadRuntime,
+    AccessRequest, ApplyBoundRuntime, ApplyEffectErrorRuntime, ApplyOwnedRuntime, BindRuntime,
+    BindStorageRuntime, CaptureRuntime, Context, EvictRuntime, IoDispatcher, ModelTensorEvents,
+    ModelTensorStateMachine, ModelTensorStates, PlanLoadRuntime, TensorAccessDispatcher,
 };
 
 /// Maximum tensor slots supported by one store.
@@ -193,33 +194,103 @@ impl<D> Store<D> {
 
     #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
-        use super::sm::ModelTensorStates;
-
         self.machine.is(&ModelTensorStates::StateReady)
     }
 
     #[cfg(test)]
     pub(crate) fn is_awaiting_bound_results(&self) -> bool {
-        use super::sm::ModelTensorStates;
-
         self.machine
             .is(&ModelTensorStates::StateAwaitingBoundResults)
     }
 
     #[cfg(test)]
     pub(crate) fn is_awaiting_owned_results(&self) -> bool {
-        use super::sm::ModelTensorStates;
-
         self.machine
             .is(&ModelTensorStates::StateAwaitingOwnedResults)
     }
 
     #[cfg(test)]
     pub(crate) fn is_awaiting_mapped_results(&self) -> bool {
-        use super::sm::ModelTensorStates;
-
         self.machine
             .is(&ModelTensorStates::StateAwaitingMappedResults)
+    }
+}
+
+impl<D> Store<D>
+where
+    D: TensorDependencies,
+{
+    pub(crate) fn mapped_load(
+        &mut self,
+        event: event::MappedLoad,
+    ) -> Result<event::MappedLoadDone, event::Error> {
+        let Self {
+            machine,
+            dependencies,
+        } = self;
+        let owner_ready = machine.is(&ModelTensorStates::StateReady);
+        IoDispatcher::new(machine.context_mut(), dependencies).process_mapped(event, owner_ready)
+    }
+
+    pub(crate) fn read_load(
+        &mut self,
+        event: event::ReadLoad<'_>,
+    ) -> Result<event::OwnedLoadDone, event::Error> {
+        let Self {
+            machine,
+            dependencies,
+        } = self;
+        let owner_ready = machine.is(&ModelTensorStates::StateReady);
+        IoDispatcher::new(machine.context_mut(), dependencies).process_read(event, owner_ready)
+    }
+
+    pub(crate) fn staged_load(
+        &mut self,
+        event: event::StagedLoad<'_>,
+    ) -> Result<event::OwnedLoadDone, event::Error> {
+        let Self {
+            machine,
+            dependencies,
+        } = self;
+        let owner_ready = machine.is(&ModelTensorStates::StateReady);
+        IoDispatcher::new(machine.context_mut(), dependencies).process_staged(event, owner_ready)
+    }
+
+    pub(crate) fn release_mapped(
+        &mut self,
+        event: event::ReleaseMapped,
+    ) -> Result<event::ReleaseMappedDone, event::Error> {
+        let Self {
+            machine,
+            dependencies,
+        } = self;
+        let owner_ready = machine.is(&ModelTensorStates::StateReady);
+        IoDispatcher::new(machine.context_mut(), dependencies).process_release(event, owner_ready)
+    }
+
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "typed events are consumed at the public actor dispatch boundary"
+    )]
+    pub(crate) fn with_tensor<Operation>(
+        &mut self,
+        event: event::WithTensor<'_, Operation>,
+    ) -> Result<Operation::Output, event::Error>
+    where
+        Operation: event::TensorOperation,
+    {
+        let Self {
+            machine,
+            dependencies,
+        } = self;
+        let owner_ready = machine.is(&ModelTensorStates::StateReady);
+        TensorAccessDispatcher::new(machine.context_mut(), dependencies).process_event(
+            AccessRequest {
+                tensor_id: event.tensor_id,
+            },
+            event.operation,
+            owner_ready,
+        )
     }
 }
 

@@ -511,8 +511,15 @@ run_model_tensor_parity() {
   rust_output="$MODEL_TENSOR_BUILD_DIR/rust.out"
   reference_output="$MODEL_TENSOR_BUILD_DIR/reference.out"
   cargo run --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
-    -p emel-model --example tensor_parity --features model-tensor-proof >"$rust_output"
+    -p emel-model --example tensor_parity >"$rust_output"
+  local mapped_fixture="$MODEL_TENSOR_BUILD_DIR/mapped-fixture.bin"
+  cargo run --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-bench -- --model-tensor-mapped-parity "$mapped_fixture" \
+    >>"$rust_output"
   "$MODEL_TENSOR_BUILD_DIR/reference-build/emel-model-tensor-reference" >"$reference_output"
+  "$MODEL_TENSOR_BUILD_DIR/reference-build/emel-model-tensor-reference" \
+    --mapped-parity "$mapped_fixture" >>"$reference_output"
+  rm -f "$mapped_fixture"
 
   grep -v '^extension=' "$rust_output" >"$MODEL_TENSOR_BUILD_DIR/rust.shared"
   grep -v '^reference_observation=' "$reference_output" >"$MODEL_TENSOR_BUILD_DIR/reference.shared"

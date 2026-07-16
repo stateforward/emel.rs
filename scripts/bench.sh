@@ -278,9 +278,18 @@ elif [[ "$SUITE" == "model-tensor" ]]; then
   mv "$CURRENT" "$rust_current"
   awk '
     function field(name, i,p){for(i=2;i<=NF;i++){split($i,p,"=");if(p[1]==name)return p[2]}return ""}
-    FNR==NR {if($0~/^#/){print;next} if($1=="model/tensor/rust/plan_mapped_64"){r=field("ns_per_op");it=field("iter");runs=field("runs")} next}
-    $1=="model/tensor/reference/plan_mapped_64" {c=field("ns_per_op")}
-    END {printf "model/tensor/plan_mapped_64 rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n",r,c,r/c,it,runs}
+    FNR==NR {
+      if($0~/^#/){print;next}
+      if($1=="model/tensor/rust/plan_mapped_64"){rp=field("ns_per_op");it=field("iter");runs=field("runs")}
+      if($1=="model/tensor/rust/direct_read_4k"){rd=field("ns_per_op")}
+      next
+    }
+    $1=="model/tensor/reference/plan_mapped_64" {cp=field("ns_per_op")}
+    $1=="model/tensor/reference/direct_read_4k" {cd=field("ns_per_op")}
+    END {
+      printf "model/tensor/plan_mapped_64 rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n",rp,cp,rp/cp,it,runs
+      printf "model/tensor/direct_read_4k rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f iter=%s runs=%s\n",rd,cd,rd/cd,it,runs
+    }
   ' "$rust_current" "$reference_current" >"$CURRENT"
 else
   "$RUNNER" "${runner_args[@]}" >"$CURRENT"
