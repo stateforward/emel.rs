@@ -20,6 +20,7 @@ members = [
     "tools/emel-inspect",
     "tools/emel-bench",
     "tools/emel-gguf-parity",
+    "tools/emel-model-parity-inventory",
 ]
 resolver = "3"
 

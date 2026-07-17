@@ -61,66 +61,61 @@ echo "Coverage scope: emel-gguf, maintained emel-io, and emel-model tensor-core 
 echo "Generated GGUF sm.rs is excluded; maintained emel-io and tensor-core SML sources are fully enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
+run_coverage() {
+  local target_dir="$1"
+  local report="$2"
+  local ignore_filename_regex="$3"
+  shift 3
+
+  # Keep each campaign in its own freshly cleaned target directory. Running the
+  # report separately avoids cargo-llvm-cov expanding every unselected workspace
+  # package into a repeated absolute-path regex. That generated regex can exhaust
+  # the pinned LLVM regex engine as the workspace grows; it is redundant because
+  # the isolated target directory contains only the selected campaign's objects.
+  CARGO_LLVM_COV_TARGET_DIR="$target_dir" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
+    --manifest-path "$ROOT_DIR/Cargo.toml" \
+    --all-features \
+    --locked \
+    --branch \
+    --no-report \
+    "$@"
+  CARGO_LLVM_COV_TARGET_DIR="$target_dir" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov report \
+    --manifest-path "$ROOT_DIR/Cargo.toml" \
+    --locked \
+    --ignore-filename-regex "$ignore_filename_regex" \
+    --summary-only \
+    --json \
+    --output-path "$report"
+}
+
 echo "Running emel-gguf coverage"
-CARGO_LLVM_COV_TARGET_DIR="$GGUF_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" \
-  --package emel-gguf \
-  --all-features \
-  --locked \
-  --branch \
-  --ignore-filename-regex '(^|/)sm\.rs$' \
-  --summary-only \
-  --json \
-  --output-path "$GGUF_REPORT"
+run_coverage "$GGUF_COVERAGE_TARGET_DIR" "$GGUF_REPORT" '(^|/)sm\.rs$' \
+  --package emel-gguf
 
 echo "Running emel-io coverage"
-CARGO_LLVM_COV_TARGET_DIR="$IO_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" \
-  --package emel-io \
-  --all-features \
-  --locked \
-  --branch \
-  --ignore-filename-regex 'crates/emel-io/src/(loader|mmap|staged_read)/' \
-  --summary-only \
-  --json \
-  --output-path "$IO_REPORT"
+run_coverage "$IO_COVERAGE_TARGET_DIR" "$IO_REPORT" \
+  'crates/emel-io/src/(loader|mmap|staged_read)/' \
+  --package emel-io
 
 echo "Running maintained emel-io mmap coverage"
-CARGO_LLVM_COV_TARGET_DIR="$IO_MMAP_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" \
-  --package emel-io \
-  --all-features \
-  --locked \
-  --branch \
-  --ignore-filename-regex 'crates/emel-io/(src/(lib\.rs|loader/|read/|staged_read/|mmap/tests\.rs)|tests/|examples/)' \
-  --summary-only \
-  --json \
-  --output-path "$IO_MMAP_REPORT"
+run_coverage "$IO_MMAP_COVERAGE_TARGET_DIR" "$IO_MMAP_REPORT" \
+  'crates/emel-io/(src/(lib\.rs|loader/|read/|staged_read/|mmap/tests\.rs)|tests/|examples/)' \
+  --package emel-io
 
 echo "Running maintained emel-io staged-read coverage"
-CARGO_LLVM_COV_TARGET_DIR="$IO_STAGED_READ_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" \
-  --package emel-io \
-  --all-features \
-  --locked \
-  --branch \
-  --ignore-filename-regex 'crates/emel-io/(src/(lib\.rs|loader/|read/|mmap/|staged_read/tests\.rs)|tests/|examples/)' \
-  --summary-only \
-  --json \
-  --output-path "$IO_STAGED_READ_REPORT"
+run_coverage "$IO_STAGED_READ_COVERAGE_TARGET_DIR" "$IO_STAGED_READ_REPORT" \
+  'crates/emel-io/(src/(lib\.rs|loader/|read/|mmap/|staged_read/tests\.rs)|tests/|examples/)' \
+  --package emel-io
 
 echo "Running maintained emel-io loader coverage"
-CARGO_LLVM_COV_TARGET_DIR="$IO_LOADER_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-io --all-features --locked --branch \
-  --ignore-filename-regex 'crates/emel-io/(src/(lib\.rs|mmap/|read/|staged_read/|loader/tests\.rs)|tests/|examples/)' \
-  --summary-only --json --output-path "$IO_LOADER_REPORT"
+run_coverage "$IO_LOADER_COVERAGE_TARGET_DIR" "$IO_LOADER_REPORT" \
+  'crates/emel-io/(src/(lib\.rs|mmap/|read/|staged_read/|loader/tests\.rs)|tests/|examples/)' \
+  --package emel-io
 
 echo "Running maintained emel-model tensor coverage with caller-owned mapped capability proof"
-CARGO_LLVM_COV_TARGET_DIR="$MODEL_TENSOR_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
-  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-model --package emel-bench \
-  --all-features --locked --branch \
-  --ignore-filename-regex '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/))' \
-  --summary-only --json --output-path "$MODEL_TENSOR_REPORT"
+run_coverage "$MODEL_TENSOR_COVERAGE_TARGET_DIR" "$MODEL_TENSOR_REPORT" \
+  '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/))' \
+  --package emel-model --package emel-bench
 
 python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-gguf=$GGUF_REPORT" "emel-io=$IO_REPORT" \
