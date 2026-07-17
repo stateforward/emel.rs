@@ -16,10 +16,17 @@ IO_LOADER_SNAPSHOT="${EMEL_IO_LOADER_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity
 IO_LOADER_BUILD_DIR="${EMEL_IO_LOADER_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-loader-parity}"
 MODEL_TENSOR_SNAPSHOT="${EMEL_MODEL_TENSOR_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-tensor/manifest.txt}"
 MODEL_TENSOR_BUILD_DIR="${EMEL_MODEL_TENSOR_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-tensor-parity}"
+MODEL_DATA_SNAPSHOT="${EMEL_MODEL_DATA_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-data/manifest.txt}"
+MODEL_DATA_BUILD_DIR="${EMEL_MODEL_DATA_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-data-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
 EMEL_CPP_MODEL_TENSOR_TREE=06306d4ffad3455fcf5df71dc692df52514b9865
+EMEL_CPP_MODEL_TREE=278b7b20545b630be33bee8bed0cb4c8db8990c3
+EMEL_CPP_MODEL_DATA_HEADER_BLOB=78a25b987423d8cbef17965a8ca92596ffc0ecef
+EMEL_CPP_MODEL_DATA_IMPLEMENTATION_BLOB=b33ace170b569d076844a36146c7ca86d4ffa7fc
+EMEL_CPP_MODEL_DATA_HEADER_SHA256=4b604d57fef1c22c8a9ebee36779a0c9cd4e7fe811856455d5cafd645498a151
+EMEL_CPP_MODEL_DATA_IMPLEMENTATION_SHA256=c8231f4feb2bc395a642bf3d66e74f5ee6ad243d706f277245b2b28c620c8816
 EXPECTED_REF="$(tr -d '[:space:]' <"$ROOT_DIR/tools/llama-gguf-reference/reference_ref.txt")"
 RUN_SNAPSHOT=true
 RUN_LIVE=true
@@ -45,7 +52,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, or model-tensor (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, or model-data (default: all)
 
 Model paths are checked during the live phase. Without paths, the deterministic
 fixture corpus is used.
@@ -82,6 +89,7 @@ for argument in "$@"; do
     --suite=io-staged-read) SUITE=io-staged-read ;;
     --suite=io-loader) SUITE=io-loader ;;
     --suite=model-tensor) SUITE=model-tensor ;;
+    --suite=model-data) SUITE=model-data ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -107,6 +115,7 @@ RUN_IO_MMAP=false
 RUN_IO_STAGED_READ=false
 RUN_IO_LOADER=false
 RUN_MODEL_TENSOR=false
+RUN_MODEL_DATA=false
 case "$SUITE" in
   all)
     RUN_GGUF=true
@@ -115,6 +124,7 @@ case "$SUITE" in
     RUN_IO_STAGED_READ=true
     RUN_IO_LOADER=true
     RUN_MODEL_TENSOR=true
+    RUN_MODEL_DATA=true
     ;;
   gguf) RUN_GGUF=true ;;
   io-read) RUN_IO_READ=true ;;
@@ -122,6 +132,7 @@ case "$SUITE" in
   io-staged-read) RUN_IO_STAGED_READ=true ;;
   io-loader) RUN_IO_LOADER=true ;;
   model-tensor) RUN_MODEL_TENSOR=true ;;
+  model-data) RUN_MODEL_DATA=true ;;
 esac
 
 fixture_models=()
@@ -540,6 +551,58 @@ run_model_tensor_parity() {
   echo "Model tensor shared parity passed with explicit Rust extensions (emel.cpp $EMEL_CPP_COMMIT)"
 }
 
+run_model_data_parity() {
+  local source_commit source_tree header_blob implementation_blob
+  local header_sha256 implementation_sha256 candidate
+  source_commit="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD)"
+  source_tree="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/model)"
+  header_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/model/data.hpp)"
+  implementation_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse HEAD:src/emel/model/data.cpp)"
+  if [[ "$source_commit" != "$EMEL_CPP_COMMIT" || \
+        "$source_tree" != "$EMEL_CPP_MODEL_TREE" || \
+        "$header_blob" != "$EMEL_CPP_MODEL_DATA_HEADER_BLOB" || \
+        "$implementation_blob" != "$EMEL_CPP_MODEL_DATA_IMPLEMENTATION_BLOB" ]]; then
+    echo "error: emel.cpp model data reference identity drifted" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- \
+    src/emel/model/data.hpp src/emel/model/data.cpp; then
+    echo "error: emel.cpp model data reference files are dirty" >&2
+    exit 1
+  fi
+  if ! command -v shasum >/dev/null 2>&1; then
+    echo "error: shasum is required for model data parity" >&2
+    exit 1
+  fi
+  header_sha256="$(git -C "$EMEL_CPP_SOURCE" cat-file blob "$header_blob" | shasum -a 256 | awk '{print $1}')"
+  implementation_sha256="$(git -C "$EMEL_CPP_SOURCE" cat-file blob "$implementation_blob" | shasum -a 256 | awk '{print $1}')"
+  if [[ "$header_sha256" != "$EMEL_CPP_MODEL_DATA_HEADER_SHA256" || \
+        "$implementation_sha256" != "$EMEL_CPP_MODEL_DATA_IMPLEMENTATION_SHA256" ]]; then
+    echo "error: emel.cpp model data content digest drifted" >&2
+    exit 1
+  fi
+
+  mkdir -p "$MODEL_DATA_BUILD_DIR"
+  candidate="$MODEL_DATA_BUILD_DIR/manifest.rust.txt"
+  rm -f "$candidate"
+  if $RUN_UPDATE; then
+    EMEL_MODEL_DATA_PARITY_OUTPUT="$candidate" \
+      EMEL_MODEL_DATA_PARITY_UPDATE=1 \
+      cargo test --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
+        -p emel-model --lib data::tests::parity_snapshot_cases_are_derived_from_behavior \
+        -- --exact
+    mkdir -p "$(dirname "$MODEL_DATA_SNAPSHOT")"
+    install -m 0644 "$candidate" "$MODEL_DATA_SNAPSHOT"
+  else
+    EMEL_MODEL_DATA_PARITY_OUTPUT="$candidate" \
+      cargo test --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
+        -p emel-model --lib data::tests::parity_snapshot_cases_are_derived_from_behavior \
+        -- --exact
+  fi
+  diff -u "$MODEL_DATA_SNAPSHOT" "$candidate"
+  echo "Model data parity passed with exact source identity (emel.cpp $EMEL_CPP_COMMIT)"
+}
+
 if $RUN_GGUF; then
   if $RUN_UPDATE; then
     update_snapshot
@@ -566,4 +629,7 @@ if $RUN_IO_LOADER; then
 fi
 if $RUN_MODEL_TENSOR; then
   run_model_tensor_parity
+fi
+if $RUN_MODEL_DATA; then
+  run_model_data_parity
 fi

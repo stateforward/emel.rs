@@ -57,8 +57,8 @@ mkdir -p \
   "$(dirname "$IO_STAGED_READ_REPORT")" \
   "$(dirname "$IO_LOADER_REPORT")" \
   "$(dirname "$MODEL_TENSOR_REPORT")"
-echo "Coverage scope: emel-gguf, maintained emel-io, and emel-model tensor-core sources"
-echo "Generated GGUF sm.rs is excluded; maintained emel-io and tensor-core SML sources are fully enforced"
+echo "Coverage scope: emel-gguf, maintained emel-io, and maintained emel-model data/tensor sources"
+echo "Generated GGUF sm.rs is excluded; maintained emel-io and model data/tensor sources are enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
 run_coverage() {
@@ -112,7 +112,7 @@ run_coverage "$IO_LOADER_COVERAGE_TARGET_DIR" "$IO_LOADER_REPORT" \
   'crates/emel-io/(src/(lib\.rs|mmap/|read/|staged_read/|loader/tests\.rs)|tests/|examples/)' \
   --package emel-io
 
-echo "Running maintained emel-model tensor coverage with caller-owned mapped capability proof"
+echo "Running maintained emel-model data/tensor coverage with caller-owned mapped capability proof"
 run_coverage "$MODEL_TENSOR_COVERAGE_TARGET_DIR" "$MODEL_TENSOR_REPORT" \
   '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/))' \
   --package emel-model --package emel-bench

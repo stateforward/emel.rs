@@ -12,6 +12,9 @@ SNAPSHOT_MODE=false
 UPDATE=false
 SUITE=gguf
 runner_args=(gguf)
+model_data_iterations=5
+model_data_runs=5
+model_data_warmup_iterations=1
 
 usage() {
   cat <<'USAGE'
@@ -21,7 +24,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -31,13 +34,25 @@ for argument in "$@"; do
   case "$argument" in
     --snapshot|--compare) SNAPSHOT_MODE=true ;;
     --update) UPDATE=true ;;
-    --iterations=*|--runs=*|--warmup-iterations=*) runner_args+=("$argument") ;;
+    --iterations=*)
+      runner_args+=("$argument")
+      model_data_iterations="${argument#*=}"
+      ;;
+    --runs=*)
+      runner_args+=("$argument")
+      model_data_runs="${argument#*=}"
+      ;;
+    --warmup-iterations=*)
+      runner_args+=("$argument")
+      model_data_warmup_iterations="${argument#*=}"
+      ;;
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
     --suite=io-mmap) SUITE=io-mmap; runner_args[0]=io-mmap ;;
     --suite=io-staged-read) SUITE=io-staged-read; runner_args[0]=io-staged-read ;;
     --suite=io-loader) SUITE=io-loader; runner_args[0]=io-loader ;;
     --suite=model-tensor) SUITE=model-tensor; runner_args[0]=model-tensor ;;
+    --suite=model-data) SUITE=model-data ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
   esac
@@ -60,7 +75,16 @@ else
 fi
 mkdir -p "$BUILD_DIR"
 CURRENT="$BUILD_DIR/$SUITE-current.txt"
-if [[ "$SUITE" == "io-mmap" ]]; then
+if [[ "$SUITE" == "model-data" ]]; then
+  raw_output="$CURRENT.raw"
+  EMEL_MODEL_DATA_BENCH_ITERATIONS="$model_data_iterations" \
+    EMEL_MODEL_DATA_BENCH_RUNS="$model_data_runs" \
+    EMEL_MODEL_DATA_BENCH_WARMUP_ITERATIONS="$model_data_warmup_iterations" \
+    cargo test --locked --manifest-path "$ROOT_DIR/Cargo.toml" --release \
+      -p emel-model --lib data::tests::benchmark_model_data_foundation -- \
+      --ignored --exact --nocapture >"$raw_output"
+  grep -E '^(# bench_|# benchmark_|# source_|model/data/)' "$raw_output" >"$CURRENT"
+elif [[ "$SUITE" == "io-mmap" ]]; then
   fixture="$BUILD_DIR/io-mmap-fixture.bin"
   EMEL_IO_MMAP_BENCH_FIXTURE="$fixture" \
     "$RUNNER" "${runner_args[@]}" >"$CURRENT"
@@ -345,7 +369,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" ]]; then
+if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -512,6 +536,44 @@ validate_model_tensor_artifact() {
   bash "$ROOT_DIR/scripts/validate_model_tensor_bench.sh" "$@"
 }
 
+validate_model_data_artifact() {
+  local artifact="$1"
+  local label="$2"
+  local expected
+  for expected in \
+    '# source_repository: stateforward/emel.cpp' \
+    '# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6' \
+    '# source_header_blob: 78a25b987423d8cbef17965a8ca92596ffc0ecef' \
+    '# benchmark_fixture: complete fixed-capacity model data schema' \
+    '# benchmark_validation: safe construction; allocation-free reset and accessors'; do
+    if [[ "$(grep -Fxc "$expected" "$artifact")" -ne 1 ]]; then
+      echo "error: $label must contain exactly one model-data field: $expected" >&2
+      exit 1
+    fi
+  done
+  if ! awk '
+    /^#/ { next }
+    $1 == "model/data/construction" || $1 == "model/data/reset" || $1 == "model/data/accessors" {
+      cases[$1] += 1
+      for (i = 2; i <= NF; ++i) {
+        split($i, part, "=")
+        if (part[1] == "ns_per_op" && part[2] + 0 > 0) timing[$1] += 1
+      }
+      next
+    }
+    NF { invalid = 1 }
+    END {
+      exit invalid || cases["model/data/construction"] != 1 ||
+        cases["model/data/reset"] != 1 || cases["model/data/accessors"] != 1 ||
+        timing["model/data/construction"] != 1 || timing["model/data/reset"] != 1 ||
+        timing["model/data/accessors"] != 1
+    }
+  ' "$artifact"; then
+    echo "error: $label has invalid model-data benchmark cases" >&2
+    exit 1
+  fi
+}
+
 if [[ "$SUITE" == "io-read" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   current_iterations="${current_config_values%% *}"
@@ -540,6 +602,9 @@ elif [[ "$SUITE" == "model-tensor" ]]; then
   current_iterations="${current_config_values%% *}"
   current_runs="${current_config_values#* }"
   validate_model_tensor_artifact "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
+elif [[ "$SUITE" == "model-data" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  validate_model_data_artifact "$CURRENT" "current benchmark artifact"
 fi
 
 if $UPDATE; then
@@ -658,6 +723,21 @@ elif [[ "$SUITE" == "model-tensor" ]]; then
   for field in source_repository source_commit source_tree benchmark_fixture benchmark_validation contract_delta; do
     [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
       echo "error: model tensor benchmark $field differs from baseline" >&2
+      exit 1
+    }
+  done
+elif [[ "$SUITE" == "model-data" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width" >/dev/null
+  validate_model_data_artifact "$BASELINE" "benchmark baseline"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: model data benchmark architecture differs from baseline" >&2
+    exit 1
+  fi
+  for field in source_repository source_commit source_header_blob benchmark_fixture benchmark_validation; do
+    [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
+      echo "error: model data benchmark $field differs from baseline" >&2
       exit 1
     }
   done

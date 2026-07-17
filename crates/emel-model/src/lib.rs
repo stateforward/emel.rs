@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs, dead_code)]
 
+pub(crate) mod data;
 pub(crate) mod loader;
 pub mod tensor;
 
