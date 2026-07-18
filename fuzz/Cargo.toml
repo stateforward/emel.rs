@@ -11,6 +11,7 @@ cargo-fuzz = true
 emel-gguf = { path = "../crates/emel-gguf" }
 emel-io = { path = "../crates/emel-io" }
 emel-model = { path = "../crates/emel-model" }
+emel-token = { path = "../crates/emel-token" }
 libfuzzer-sys = "0.4.13"
 
 [[bin]]
@@ -72,6 +73,13 @@ bench = false
 [[bin]]
 name = "emel_model_tensor"
 path = "fuzz_targets/emel_model_tensor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_token_profile"
+path = "fuzz_targets/emel_token_profile.rs"
 test = false
 doc = false
 bench = false

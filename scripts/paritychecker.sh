@@ -19,6 +19,8 @@ MODEL_TENSOR_SNAPSHOT="${EMEL_MODEL_TENSOR_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/
 MODEL_TENSOR_BUILD_DIR="${EMEL_MODEL_TENSOR_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-tensor-parity}"
 MODEL_DATA_SNAPSHOT="${EMEL_MODEL_DATA_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-data/manifest.txt}"
 MODEL_DATA_BUILD_DIR="${EMEL_MODEL_DATA_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-data-parity}"
+TOKEN_PROFILE_SNAPSHOT="${EMEL_TOKEN_PROFILE_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/token-profile/manifest.txt}"
+TOKEN_PROFILE_BUILD_DIR="${EMEL_TOKEN_PROFILE_PARITY_BUILD_DIR:-$ROOT_DIR/target/token-profile-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
@@ -28,6 +30,10 @@ EMEL_CPP_MODEL_DATA_HEADER_BLOB=78a25b987423d8cbef17965a8ca92596ffc0ecef
 EMEL_CPP_MODEL_DATA_IMPLEMENTATION_BLOB=b33ace170b569d076844a36146c7ca86d4ffa7fc
 EMEL_CPP_MODEL_DATA_HEADER_SHA256=4b604d57fef1c22c8a9ebee36779a0c9cd4e7fe811856455d5cafd645498a151
 EMEL_CPP_MODEL_DATA_IMPLEMENTATION_SHA256=c8231f4feb2bc395a642bf3d66e74f5ee6ad243d706f277245b2b28c620c8816
+EMEL_CPP_TOKEN_MODEL_BLOB=ef7ff8da51f1f281082901bf4919a4b9a63f2671
+EMEL_CPP_TOKEN_PRE_BLOB=16b2982ca16dfdfbee016d50d0eb924a7cdc18c4
+EMEL_CPP_TOKEN_MODEL_SHA256=60e10d81dda5c2c3a47a4d22c1b93b20c5d2077a4869f5a815b9c1e6881829b0
+EMEL_CPP_TOKEN_PRE_SHA256=b9c8cf6a0680802f94c3b8b2247af0306c5233adaada0b00fe14df178e5a9721
 GGUF_LIVE_MODEL_RELATIVE=tests/models/Llama-68M-Chat-v1-Q2_K.gguf
 GGUF_LIVE_MODEL_LFS_BLOB=49aa0ba91b29a4015339757cc67544f614e0fa21
 GGUF_LIVE_MODEL_SHA256=8ed06dc5bd84bce3154a2b7e751c45a56562691933ee25b5823393f909329a67
@@ -58,7 +64,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, or model-data (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, or token-profile (default: all)
 
 Model paths are checked during the live phase. Without paths, both the
 deterministic fixture corpus and the pinned independently sourced model run.
@@ -96,6 +102,7 @@ for argument in "$@"; do
     --suite=io-loader) SUITE=io-loader ;;
     --suite=model-tensor) SUITE=model-tensor ;;
     --suite=model-data) SUITE=model-data ;;
+    --suite=token-profile) SUITE=token-profile ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -122,6 +129,7 @@ RUN_IO_STAGED_READ=false
 RUN_IO_LOADER=false
 RUN_MODEL_TENSOR=false
 RUN_MODEL_DATA=false
+RUN_TOKEN_PROFILE=false
 case "$SUITE" in
   all)
     RUN_GGUF=true
@@ -131,6 +139,7 @@ case "$SUITE" in
     RUN_IO_LOADER=true
     RUN_MODEL_TENSOR=true
     RUN_MODEL_DATA=true
+    RUN_TOKEN_PROFILE=true
     ;;
   gguf) RUN_GGUF=true ;;
   io-read) RUN_IO_READ=true ;;
@@ -139,14 +148,19 @@ case "$SUITE" in
   io-loader) RUN_IO_LOADER=true ;;
   model-tensor) RUN_MODEL_TENSOR=true ;;
   model-data) RUN_MODEL_DATA=true ;;
+  token-profile) RUN_TOKEN_PROFILE=true ;;
 esac
 
 if $RUN_GGUF || $RUN_IO_READ || $RUN_IO_MMAP || $RUN_IO_STAGED_READ || \
-  $RUN_IO_LOADER || $RUN_MODEL_TENSOR; then
+  $RUN_IO_LOADER || $RUN_MODEL_TENSOR || $RUN_TOKEN_PROFILE; then
   if ! command -v cmake >/dev/null 2>&1; then
     echo "error: cmake is required for the selected parity suite" >&2
     exit 2
   fi
+fi
+if $RUN_TOKEN_PROFILE && ! command -v rg >/dev/null 2>&1; then
+  echo "error: rg is required for tokenizer profile dependency checks" >&2
+  exit 2
 fi
 
 fixture_models=()
@@ -729,6 +743,78 @@ run_model_data_parity() {
   echo "Model data parity passed with exact source identity (emel.cpp $EMEL_CPP_COMMIT)"
 }
 
+run_token_profile_parity() {
+  local model_blob pre_blob model_sha256 pre_sha256 candidate dependency_tree
+  local materialized_source reference_build reference_output reference_runner
+  model_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/text/tokenizer/detail.hpp")"
+  pre_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/text/tokenizer/preprocessor/detail.hpp")"
+  if [[ "$model_blob" != "$EMEL_CPP_TOKEN_MODEL_BLOB" || \
+        "$pre_blob" != "$EMEL_CPP_TOKEN_PRE_BLOB" ]]; then
+    echo "error: emel.cpp tokenizer profile source identity drifted" >&2
+    exit 1
+  fi
+  model_sha256="$(git -C "$EMEL_CPP_SOURCE" cat-file blob "$model_blob" | shasum -a 256 | awk '{print $1}')"
+  pre_sha256="$(git -C "$EMEL_CPP_SOURCE" cat-file blob "$pre_blob" | shasum -a 256 | awk '{print $1}')"
+  if [[ "$model_sha256" != "$EMEL_CPP_TOKEN_MODEL_SHA256" || \
+        "$pre_sha256" != "$EMEL_CPP_TOKEN_PRE_SHA256" ]]; then
+    echo "error: emel.cpp tokenizer profile source digest drifted" >&2
+    exit 1
+  fi
+  if ! git -C "$EMEL_CPP_SOURCE" diff --quiet -- \
+    src/emel/text/tokenizer/detail.hpp \
+    src/emel/text/tokenizer/preprocessor/detail.hpp; then
+    echo "error: emel.cpp tokenizer profile source files are dirty" >&2
+    exit 1
+  fi
+  dependency_tree="$(cargo tree --locked --manifest-path "$ROOT_DIR/Cargo.toml" -p emel-token --prefix none)"
+  if grep -Eq '^emel-(model|text|gguf) ' <<<"$dependency_tree"; then
+    echo "error: emel-token profile owner depends on a downstream model/text/GGUF crate" >&2
+    exit 1
+  fi
+  if rg -n '^pub use .*profile::event' "$ROOT_DIR/crates/emel-token/src/lib.rs" >/dev/null; then
+    echo "error: tokenizer profile events must remain in the coherent owner namespace" >&2
+    exit 1
+  fi
+
+  mkdir -p "$TOKEN_PROFILE_BUILD_DIR"
+  materialized_source="$TOKEN_PROFILE_BUILD_DIR/emel-cpp-source"
+  reference_build="$TOKEN_PROFILE_BUILD_DIR/reference-build"
+  reference_output="$TOKEN_PROFILE_BUILD_DIR/manifest.cpp.txt"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E remove_directory "$reference_build"
+  cmake -E make_directory "$materialized_source"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | \
+    tar -x -C "$materialized_source"
+  cmake -S "$ROOT_DIR/tools/emel-token-profile-reference" \
+    -B "$reference_build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  cmake --build "$reference_build"
+  reference_runner="$reference_build/emel-token-profile-reference"
+  "$reference_runner" >"$reference_output"
+
+  candidate="$TOKEN_PROFILE_BUILD_DIR/manifest.rust.txt"
+  EMEL_TOKEN_PROFILE_PARITY_OUTPUT="$candidate" \
+    cargo test --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
+      -p emel-token --lib profile::tests::parity_snapshot_is_source_backed -- --exact
+  diff -u "$reference_output" "$candidate"
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$TOKEN_PROFILE_SNAPSHOT")"
+    install -m 0644 "$candidate" "$TOKEN_PROFILE_SNAPSHOT"
+    echo "Updated tokenizer profile parity snapshot from emel.cpp $EMEL_CPP_COMMIT"
+  fi
+  if $RUN_LIVE; then
+    echo "Tokenizer profile independent C++/Rust live comparison passed"
+  fi
+  if $RUN_SNAPSHOT; then
+    diff -u "$TOKEN_PROFILE_SNAPSHOT" "$candidate"
+    echo "Tokenizer profile checked snapshot passed"
+  fi
+  echo "Tokenizer profile parity passed (10 model inputs including aliases/unknown, 61 pre inputs, unknown success)"
+}
+
 if $RUN_GGUF; then
   if $RUN_UPDATE; then
     update_snapshot
@@ -758,4 +844,7 @@ if $RUN_MODEL_TENSOR; then
 fi
 if $RUN_MODEL_DATA; then
   run_model_data_parity
+fi
+if $RUN_TOKEN_PROFILE; then
+  run_token_profile_parity
 fi
