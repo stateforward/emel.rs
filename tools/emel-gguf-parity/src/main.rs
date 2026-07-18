@@ -57,6 +57,9 @@ const TENSOR_LAYOUTS: &[(u32, u64, usize)] = &[
     (39, 32, 17),
 ];
 
+const PACKED_TENSOR_LAYOUTS: &[(u32, [u64; 2], usize)] =
+    &[(41, [256, 9], 2304), (42, [512, 1], 2304)];
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("emel-gguf-parity: {error}");
@@ -475,7 +478,12 @@ fn append_tensor_output(
         write!(output, "tensor.{index}.name=").unwrap();
         append_hex(output, &scratch.tensor_name);
         output.push('\n');
-        writeln!(output, "tensor.{index}.type={}", tensor.tensor_type()).unwrap();
+        writeln!(
+            output,
+            "tensor.{index}.type={}",
+            tensor.tensor_type().wire_code()
+        )
+        .unwrap();
         let dimensions = tensor.dimensions();
         writeln!(
             output,
@@ -682,7 +690,8 @@ fn tensor_fixture() -> Vec<u8> {
     append_header(
         &mut bytes,
         VERSION,
-        u64::try_from(TENSOR_LAYOUTS.len()).expect("fixture count fits u64"),
+        u64::try_from(TENSOR_LAYOUTS.len() + PACKED_TENSOR_LAYOUTS.len())
+            .expect("fixture count fits u64"),
         0,
     );
     let mut offset = 0_u64;
@@ -694,8 +703,22 @@ fn tensor_fixture() -> Vec<u8> {
         append_u64(&mut bytes, offset);
         offset += u64::try_from(type_size.next_multiple_of(ALIGNMENT)).expect("size fits u64");
     }
+    for (tensor_type, dimensions, type_size) in PACKED_TENSOR_LAYOUTS {
+        append_string(&mut bytes, format!("tensor.{tensor_type}").as_bytes());
+        append_u32(&mut bytes, 2);
+        append_u64(&mut bytes, dimensions[0]);
+        append_u64(&mut bytes, dimensions[1]);
+        append_u32(&mut bytes, *tensor_type);
+        append_u64(&mut bytes, offset);
+        offset += u64::try_from(type_size.next_multiple_of(ALIGNMENT)).expect("size fits u64");
+    }
     pad(&mut bytes, ALIGNMENT);
     for (_, _, type_size) in TENSOR_LAYOUTS {
+        let start = bytes.len();
+        bytes.resize(start + type_size, u8::try_from(type_size % 251).unwrap());
+        pad(&mut bytes, ALIGNMENT);
+    }
+    for (_, _, type_size) in PACKED_TENSOR_LAYOUTS {
         let start = bytes.len();
         bytes.resize(start + type_size, u8::try_from(type_size % 251).unwrap());
         pad(&mut bytes, ALIGNMENT);

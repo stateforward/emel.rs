@@ -2,6 +2,7 @@
 
 use core::fmt;
 use core::marker::PhantomData;
+use emel_tensor::dtype::SerializedType;
 use std::sync::Arc;
 
 use crate::Loader;
@@ -598,7 +599,7 @@ where
 /// Semantic descriptor for one tensor payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TensorDescriptor {
-    tensor_type: u32,
+    tensor_type: SerializedType,
     dimension_count: u32,
     dimensions: [u64; 4],
     data_offset: u64,
@@ -608,7 +609,7 @@ pub struct TensorDescriptor {
 
 impl TensorDescriptor {
     pub(crate) const fn new(
-        tensor_type: u32,
+        tensor_type: SerializedType,
         dimension_count: u32,
         dimensions: [u64; 4],
         data_offset: u64,
@@ -625,9 +626,9 @@ impl TensorDescriptor {
         }
     }
 
-    /// Returns the GGML tensor type identifier.
+    /// Returns the validated serialized tensor representation.
     #[must_use]
-    pub const fn tensor_type(self) -> u32 {
+    pub const fn tensor_type(self) -> SerializedType {
         self.tensor_type
     }
 

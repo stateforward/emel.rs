@@ -10,6 +10,7 @@ use emel_gguf::event::{
     VisitF32Array, VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor,
     WithString, WithStringArrayElement, WithTensor,
 };
+use emel_tensor::dtype::SerializedType;
 use sml as _;
 use std::sync::Arc;
 
@@ -196,6 +197,24 @@ fn tensor_fixture() -> Vec<u8> {
     bytes.resize(bytes.len().next_multiple_of(32), 0);
     bytes.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     bytes.resize(bytes.len().next_multiple_of(32), 0);
+    bytes
+}
+
+fn serialized_tensor_fixture(tensor_type: u32, dimensions: &[u64], data_size: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    append_u32(&mut bytes, VERSION);
+    append_u64(&mut bytes, 1);
+    append_u64(&mut bytes, 0);
+    append_string(&mut bytes, b"packed");
+    append_u32(&mut bytes, u32::try_from(dimensions.len()).unwrap());
+    for dimension in dimensions {
+        append_u64(&mut bytes, *dimension);
+    }
+    append_u32(&mut bytes, tensor_type);
+    append_u64(&mut bytes, 0);
+    bytes.resize(bytes.len().next_multiple_of(32), 0);
+    bytes.resize(bytes.len() + data_size, 7);
     bytes
 }
 
@@ -916,7 +935,10 @@ fn tensor_queries_expose_only_semantic_data_from_the_bound_source() {
         )),
         Ok(Some(()))
     );
-    assert_eq!(observed, Some((0, 1, [4, 1, 1, 1], 0, 16, 0,)));
+    assert_eq!(
+        observed,
+        Some((SerializedType::F32, 1, [4, 1, 1, 1], 0, 16, 0,))
+    );
     assert_eq!(name, b"weight");
     assert_eq!(data, (1_u8..=16).collect::<Vec<_>>());
     assert_eq!(
@@ -926,6 +948,38 @@ fn tensor_queries_expose_only_semantic_data_from_the_bound_source() {
         )),
         Ok(None)
     );
+}
+
+#[test]
+fn packed_types_are_typed_and_kernel_only_wire_codes_are_rejected() {
+    for (wire_code, expected) in [
+        (41, SerializedType::Q4Kx8Bl4),
+        (42, SerializedType::Q4Kx8Bl8),
+    ] {
+        let file = serialized_tensor_fixture(wire_code, &[256, 9], 2304);
+        let mut loader = load(&file).unwrap();
+        let observed = loader
+            .process_event(WithTensor::new(
+                0,
+                |_name: &[u8], descriptor: TensorDescriptor, _data: &[u8]| {
+                    (descriptor.tensor_type(), descriptor.data_size())
+                },
+            ))
+            .unwrap();
+        assert_eq!(observed, Some((expected, 2304)));
+    }
+
+    for wire_code in [31, 32, 33, 36, 37, 38, 40, 43, 44, 45, 256, u32::MAX] {
+        let file = serialized_tensor_fixture(wire_code, &[256, 8], 4096);
+        assert_eq!(load(&file).unwrap_err(), Error::ModelInvalid);
+    }
+
+    let product_overflow = serialized_tensor_fixture(0, &[u64::MAX, 2], 0);
+    assert_eq!(load(&product_overflow).unwrap_err(), Error::Capacity);
+    let byte_overflow = serialized_tensor_fixture(28, &[u64::MAX], 0);
+    assert_eq!(load(&byte_overflow).unwrap_err(), Error::Capacity);
+    let packed_misaligned = serialized_tensor_fixture(41, &[255, 8], 0);
+    assert_eq!(load(&packed_misaligned).unwrap_err(), Error::ModelInvalid);
 }
 
 #[test]

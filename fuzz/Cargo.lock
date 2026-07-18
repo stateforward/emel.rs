@@ -39,6 +39,7 @@ dependencies = [
  "emel-gguf",
  "emel-io",
  "emel-model",
+ "emel-tensor",
  "emel-token",
  "libfuzzer-sys",
 ]
@@ -47,6 +48,7 @@ dependencies = [
 name = "emel-gguf"
 version = "0.1.0"
 dependencies = [
+ "emel-tensor",
  "stateforward-sml",
 ]
 
@@ -67,6 +69,13 @@ dependencies = [
  "emel-gguf",
  "emel-io",
  "emel-token",
+ "stateforward-sml",
+]
+
+[[package]]
+name = "emel-tensor"
+version = "0.1.0"
+dependencies = [
  "stateforward-sml",
 ]
 

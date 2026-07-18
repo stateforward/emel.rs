@@ -7,6 +7,7 @@ mod sm;
 pub mod tensor;
 
 use core::fmt;
+use emel_tensor::dtype::SerializedType;
 
 use self::sm::{GgufLoaderContext, GgufLoaderEvents, GgufLoaderStateMachine, GgufLoaderStates};
 
@@ -62,8 +63,8 @@ pub struct TensorInfo {
     pub name_offset: u32,
     /// Tensor name length in bytes.
     pub name_length: u32,
-    /// Raw GGML tensor-type tag.
-    pub tensor_type: u32,
+    /// Validated serialized tensor representation.
+    pub tensor_type: SerializedType,
     /// Number of active entries in [`Self::dimensions`].
     pub dimension_count: u32,
     /// Tensor dimensions, with unused entries set to one.

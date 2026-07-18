@@ -32,6 +32,7 @@ use emel_model::tensor::event::{
     ReleaseMapped, StorageBatch, StorageEntry, StrategyKind as TensorStrategy, TensorMetadata,
     WithTensor,
 };
+use emel_tensor::dtype::SerializedType;
 use std::cell::Cell;
 
 const ALIGNMENT: usize = 32;
@@ -205,17 +206,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn run_gguf(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     println!("# source_repository: ggml-org/llama.cpp");
     println!("# source_commit: ecbcb7ea9d3303097519723b264a8b5f1e977028");
+    println!("# contract_source_repository: stateforward/emel.cpp");
+    println!("# contract_source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
     println!(
-        "# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index"
+        "# contract_source_blobs: kernel_events=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9 kernel_detail=c8a82643eabfe8f2d7883e655955f455794511b0 gguf_loader_detail=4ec9829c6d640cfa65a6d546c5891cb048b29f90"
     );
     println!(
-        "# benchmark_validation: public_typed_outcomes every_timed_observation exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125"
+        "# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 packed_tensor_entries=64 packed_wire_codes=41,42 packed_shapes=256x9,512x8 packed_tensor_bytes=2304 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index"
+    );
+    println!(
+        "# benchmark_validation: public_typed_outcomes every_timed_observation serialized_q4_k_bytes=9437184 serialized_packed_41_bytes=2304 serialized_packed_42_bytes=2304 exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125"
     );
     println!(
         "# benchmark_allocation: probe times Arc capability clone; load includes caller preallocation; parse reuses bound storage; string query times allocation-free RTC dispatch over a preloaded actor"
     );
     let metadata = metadata_fixture();
     let tensors = tensor_fixture();
+    let packed_tensors = packed_tensor_fixture();
     let string_array = string_array_fixture();
     print_case(
         "gguf/probe/metadata_64",
@@ -238,6 +245,11 @@ fn run_gguf(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         config,
     );
     print_case(
+        "gguf/parse/packed_41_42_tensors_64",
+        benchmark_parse(&packed_tensors, config)?,
+        config,
+    );
+    print_case(
         "gguf/load/tensors_64",
         benchmark_load(&tensors, config)?,
         config,
@@ -247,7 +259,33 @@ fn run_gguf(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         benchmark_string_array_visit(&string_array, config)?,
         config,
     );
+    print_case(
+        "tensor/dtype/serialized_size",
+        benchmark_serialized_dtype(config)?,
+        config,
+    );
     Ok(())
+}
+
+fn benchmark_serialized_dtype(config: Config) -> Result<f64, core::convert::Infallible> {
+    measure(config, || {
+        let ordinary = SerializedType::try_from(black_box(12)).unwrap();
+        let ordinary_size = ordinary
+            .data_size(black_box([4096, 4096, 1, 1]), black_box(2))
+            .unwrap();
+        let packed_41 = SerializedType::try_from(black_box(41)).unwrap();
+        let packed_41_size = packed_41
+            .data_size(black_box([256, 9, 1, 1]), black_box(2))
+            .unwrap();
+        let packed_42 = SerializedType::try_from(black_box(42)).unwrap();
+        let packed_42_size = packed_42
+            .data_size(black_box([512, 8, 1, 1]), black_box(2))
+            .unwrap();
+        assert_eq!(black_box(ordinary_size), 9_437_184);
+        assert_eq!(black_box(packed_41_size), 2_304);
+        assert_eq!(black_box(packed_42_size), 2_304);
+        Ok(())
+    })
 }
 
 fn run_io_read(config: Config) -> Result<(), emel_io::read::event::Error> {
@@ -909,6 +947,36 @@ fn tensor_fixture() -> Vec<u8> {
     bytes
 }
 
+fn packed_tensor_fixture() -> Vec<u8> {
+    const TENSOR_COUNT: u64 = 64;
+    const TENSOR_BYTES: u64 = 2_304;
+    let mut bytes = Vec::new();
+    append_header(&mut bytes, TENSOR_COUNT, 0);
+    for index in 0..TENSOR_COUNT {
+        append_string(
+            &mut bytes,
+            format!("benchmark.packed-tensor.{index:02}").as_bytes(),
+        );
+        append_u32(&mut bytes, 2);
+        if index.is_multiple_of(2) {
+            append_u64(&mut bytes, 256);
+            append_u64(&mut bytes, 9);
+            append_u32(&mut bytes, 41);
+        } else {
+            append_u64(&mut bytes, 512);
+            append_u64(&mut bytes, 8);
+            append_u32(&mut bytes, 42);
+        }
+        append_u64(&mut bytes, index * TENSOR_BYTES);
+    }
+    bytes.resize(bytes.len().next_multiple_of(ALIGNMENT), 0);
+    bytes.resize(
+        bytes.len() + usize::try_from(TENSOR_COUNT * TENSOR_BYTES).expect("fixture size"),
+        0xa5,
+    );
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use allocation_counter::measure;
@@ -923,7 +991,7 @@ mod tests {
     use super::{
         BindStorage, EffectBuffer, EffectRequest, Mapper, PlanLoad, StorageBatch, StorageEntry,
         TensorActors, TensorMetadata, TensorStore, TensorStrategy, WithTensor, median,
-        metadata_fixture, open_benchmark_source, tensor_fixture,
+        metadata_fixture, open_benchmark_source, packed_tensor_fixture, tensor_fixture,
     };
 
     fn load(file_image: &[u8]) -> ParseDone {
@@ -1075,6 +1143,7 @@ mod tests {
     fn representative_fixtures_load() {
         assert_eq!(load(&metadata_fixture()).metadata_count(), 64);
         assert_eq!(load(&tensor_fixture()).tensor_count(), 64);
+        assert_eq!(load(&packed_tensor_fixture()).tensor_count(), 64);
     }
 
     #[test]

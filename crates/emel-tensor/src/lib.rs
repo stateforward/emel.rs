@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs, dead_code)]
 
+pub mod dtype;
+
 /// The element representation used by a tensor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]

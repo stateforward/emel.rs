@@ -151,6 +151,7 @@ dependencies = [
  "emel-gguf",
  "emel-io",
  "emel-model",
+ "emel-tensor",
 ]
 
 [[package]]
@@ -176,6 +177,7 @@ name = "emel-gguf"
 version = "0.1.0"
 dependencies = [
  "allocation-counter",
+ "emel-tensor",
  "stateforward-sml",
 ]
 

@@ -311,7 +311,10 @@ fn hash_tensors(loader: &mut Loader, count: u32) -> u64 {
                 |name: &[u8], descriptor: TensorDescriptor, data: &[u8]| {
                     hash_bytes(&mut hash, &index.to_le_bytes());
                     hash_bytes(&mut hash, name);
-                    hash_bytes(&mut hash, &descriptor.tensor_type().to_le_bytes());
+                    hash_bytes(
+                        &mut hash,
+                        &descriptor.tensor_type().wire_code().to_le_bytes(),
+                    );
                     hash_bytes(&mut hash, &descriptor.dimension_count().to_le_bytes());
                     for dimension in descriptor.dimensions() {
                         hash_bytes(&mut hash, &dimension.to_le_bytes());

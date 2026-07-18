@@ -11,6 +11,7 @@ cargo-fuzz = true
 emel-gguf = { path = "../crates/emel-gguf" }
 emel-io = { path = "../crates/emel-io" }
 emel-model = { path = "../crates/emel-model" }
+emel-tensor = { path = "../crates/emel-tensor" }
 emel-token = { path = "../crates/emel-token" }
 libfuzzer-sys = "0.4.13"
 
@@ -87,6 +88,13 @@ bench = false
 [[bin]]
 name = "emel_model_vocabulary"
 path = "fuzz_targets/emel_model_vocabulary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_tensor_dtype"
+path = "fuzz_targets/emel_tensor_dtype.rs"
 test = false
 doc = false
 bench = false

@@ -14,6 +14,7 @@ IO_LOADER_REPORT="${EMEL_IO_LOADER_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/em
 MODEL_TENSOR_REPORT="${EMEL_MODEL_TENSOR_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-tensor.json}"
 MODEL_VOCABULARY_REPORT="${EMEL_MODEL_VOCABULARY_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-vocabulary.json}"
 TOKEN_PROFILE_REPORT="${EMEL_TOKEN_PROFILE_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-token-profile.json}"
+TENSOR_DTYPE_REPORT="${EMEL_TENSOR_DTYPE_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-tensor-dtype.json}"
 GGUF_COVERAGE_TARGET_DIR="${EMEL_GGUF_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-gguf}"
 IO_COVERAGE_TARGET_DIR="${EMEL_IO_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io}"
 IO_MMAP_COVERAGE_TARGET_DIR="${EMEL_IO_MMAP_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-mmap}"
@@ -22,6 +23,7 @@ IO_LOADER_COVERAGE_TARGET_DIR="${EMEL_IO_LOADER_COVERAGE_TARGET_DIR:-$ROOT_DIR/t
 MODEL_TENSOR_COVERAGE_TARGET_DIR="${EMEL_MODEL_TENSOR_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-tensor}"
 MODEL_VOCABULARY_COVERAGE_TARGET_DIR="${EMEL_MODEL_VOCABULARY_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-vocabulary}"
 TOKEN_PROFILE_COVERAGE_TARGET_DIR="${EMEL_TOKEN_PROFILE_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-token-profile}"
+TENSOR_DTYPE_COVERAGE_TARGET_DIR="${EMEL_TENSOR_DTYPE_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-tensor-dtype}"
 
 if [[ $# -ne 0 ]]; then
   echo "usage: scripts/coverage.sh" >&2
@@ -62,8 +64,9 @@ mkdir -p \
   "$(dirname "$IO_LOADER_REPORT")" \
   "$(dirname "$MODEL_TENSOR_REPORT")" \
   "$(dirname "$MODEL_VOCABULARY_REPORT")" \
-  "$(dirname "$TOKEN_PROFILE_REPORT")"
-echo "Coverage scope: emel-gguf, maintained emel-io, maintained emel-model data/tensor/vocabulary, and emel-token profile sources"
+  "$(dirname "$TOKEN_PROFILE_REPORT")" \
+  "$(dirname "$TENSOR_DTYPE_REPORT")"
+echo "Coverage scope: emel-gguf, maintained emel-io/model/token, emel-tensor dtype sources"
 echo "Generated sm.rs files are excluded; maintained emel-io, model, and token profile sources are enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
@@ -128,6 +131,11 @@ run_coverage "$TOKEN_PROFILE_COVERAGE_TARGET_DIR" "$TOKEN_PROFILE_REPORT" \
   'crates/emel-token/(src/(lib\.rs|batcher/)|tests/)' \
   --package emel-token
 
+echo "Running maintained emel-tensor serialized dtype coverage"
+run_coverage "$TENSOR_DTYPE_COVERAGE_TARGET_DIR" "$TENSOR_DTYPE_REPORT" \
+  'crates/emel-tensor/(src/(lib\.rs|view/)|tests/)' \
+  --package emel-tensor
+
 python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-gguf=$GGUF_REPORT" "emel-io=$IO_REPORT" \
   "emel-io-mmap=$IO_MMAP_REPORT" \
@@ -135,7 +143,8 @@ python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-io-loader=$IO_LOADER_REPORT" \
   "emel-model-tensor=$MODEL_TENSOR_REPORT" \
   "emel-model-vocabulary=$MODEL_VOCABULARY_REPORT" \
-  "emel-token-profile=$TOKEN_PROFILE_REPORT" <<'PY'
+  "emel-token-profile=$TOKEN_PROFILE_REPORT" \
+  "emel-tensor-dtype=$TENSOR_DTYPE_REPORT" <<'PY'
 import json
 import math
 import pathlib

@@ -9,6 +9,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${EMEL_GGUF_PARITY_BUILD_DIR:-$ROOT_DIR/target/gguf-parity}"
 FIXTURE_DIR="$BUILD_DIR/fixtures"
 REFERENCE_BUILD_DIR="$BUILD_DIR/llama-reference"
+PACKED_REFERENCE_BUILD_DIR="$BUILD_DIR/emel-packed-reference"
 SNAPSHOT="${EMEL_GGUF_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/gguf/manifest.txt}"
 LIVE_MODEL_SNAPSHOT="${EMEL_GGUF_LIVE_MODEL_SNAPSHOT:-$ROOT_DIR/snapshots/parity/gguf/live-model.txt}"
 IO_READ_SNAPSHOT="${EMEL_IO_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-read/manifest.txt}"
@@ -50,6 +51,7 @@ RUN_LIVE=true
 RUN_UPDATE=true
 REFERENCE_SOURCE="${LLAMA_CPP_SOURCE_DIR:-}"
 REFERENCE_CONFIGURED=false
+PACKED_REFERENCE_CONFIGURED=false
 SUITE=all
 models=()
 PINNED_LIVE_MODEL=
@@ -282,6 +284,42 @@ configure_reference() {
   REFERENCE_CONFIGURED=true
 }
 
+configure_packed_reference() {
+  if $PACKED_REFERENCE_CONFIGURED; then
+    return
+  fi
+  local source_archive="$PACKED_REFERENCE_BUILD_DIR/emel-cpp-source"
+  [[ "$(git -C "$EMEL_CPP_SOURCE" rev-parse "$EMEL_CPP_COMMIT:src/emel/kernel/events.hpp")" == "4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9" ]] || {
+    echo "error: pinned emel.cpp kernel events identity drifted" >&2
+    exit 1
+  }
+  [[ "$(git -C "$EMEL_CPP_SOURCE" rev-parse "$EMEL_CPP_COMMIT:src/emel/kernel/detail.hpp")" == "c8a82643eabfe8f2d7883e655955f455794511b0" ]] || {
+    echo "error: pinned emel.cpp kernel detail identity drifted" >&2
+    exit 1
+  }
+  [[ "$(git -C "$EMEL_CPP_SOURCE" rev-parse "$EMEL_CPP_COMMIT:src/emel/gguf/loader/detail.hpp")" == "4ec9829c6d640cfa65a6d546c5891cb048b29f90" ]] || {
+    echo "error: pinned emel.cpp GGUF loader detail identity drifted" >&2
+    exit 1
+  }
+  cmake -E remove_directory "$source_archive"
+  cmake -E make_directory "$source_archive"
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" | tar -x -C "$source_archive"
+  local cmake_args=(
+    -S "$ROOT_DIR/tools/emel-gguf-packed-reference"
+    -B "$PACKED_REFERENCE_BUILD_DIR/build"
+    -DCMAKE_BUILD_TYPE=Release
+    "-DEMEL_CPP_SOURCE_DIR=$source_archive"
+  )
+  if command -v ninja >/dev/null 2>&1; then
+    cmake_args+=(-G Ninja)
+  fi
+  cmake "${cmake_args[@]}"
+  cmake --build "$PACKED_REFERENCE_BUILD_DIR/build" --parallel \
+    --target emel-gguf-packed-reference
+  PACKED_REFERENCE_RUNNER="$PACKED_REFERENCE_BUILD_DIR/build/emel-gguf-packed-reference"
+  PACKED_REFERENCE_CONFIGURED=true
+}
+
 run_reference() {
   local model="$1"
   local output="$2"
@@ -289,7 +327,12 @@ run_reference() {
   model_directory="$(cd "$(dirname "$model")" && pwd -P)"
   model_absolute="$model_directory/$(basename "$model")"
 
-  if ! { "$REFERENCE_RUNNER" "$model" >"$output"; } 2>"$BUILD_DIR/reference.err"; then
+  local runner="$REFERENCE_RUNNER"
+  if [[ "$model_absolute" == "$FIXTURE_DIR/valid/tensors.gguf" ]]; then
+    configure_packed_reference >&2
+    runner="$PACKED_REFERENCE_RUNNER"
+  fi
+  if ! { "$runner" "$model" >"$output"; } 2>"$BUILD_DIR/reference.err"; then
     if [[ "$model_absolute" == "$FIXTURE_DIR/invalid/"* ]]; then
       printf 'gguf-parity/v1\nstatus=error\n' >"$output"
       return
@@ -366,6 +409,10 @@ write_manifest() {
   {
     echo "gguf-parity-snapshot/v1"
     echo "reference_ref=$EXPECTED_REF"
+    echo "packed_reference_repository=https://github.com/stateforward/emel.cpp"
+    echo "packed_reference_commit=$EMEL_CPP_COMMIT"
+    echo "packed_reference_loader_detail_blob=4ec9829c6d640cfa65a6d546c5891cb048b29f90"
+    echo "packed_reference_lane=out-of-process-public-loader-events"
     echo "canonical_format=gguf-parity/v1"
     echo "fixture_count=${#fixture_models[@]}"
     local model relative digest bytes

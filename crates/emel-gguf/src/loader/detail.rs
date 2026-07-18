@@ -2,6 +2,7 @@
 
 use super::{Error, KvEntry, Requirements, TensorInfo};
 use crate::{DEFAULT_ALIGNMENT, MAGIC, MAX_TENSOR_DIMS, MIN_VERSION, VERSION};
+use emel_tensor::dtype::{ConversionError, SerializedType};
 
 pub(super) const TYPE_UINT8: u32 = 0;
 pub(super) const TYPE_INT8: u32 = 1;
@@ -59,47 +60,6 @@ fn name_signature(name: &[u8]) -> usize {
         ^ sample(length.saturating_sub(1)).wrapping_mul(0xd3a2)
 }
 
-#[derive(Clone, Copy)]
-struct GgmlLayout {
-    block_size: u64,
-    type_size: u64,
-}
-
-const fn ggml_layout(tensor_type: u32) -> Option<GgmlLayout> {
-    let (block_size, type_size) = match tensor_type {
-        0 | 26 => (1, 4),
-        1 | 25 | 30 => (1, 2),
-        2 | 20 => (32, 18),
-        3 => (32, 20),
-        6 => (32, 22),
-        7 => (32, 24),
-        8 => (32, 34),
-        9 => (32, 36),
-        10 => (256, 84),
-        11 | 21 => (256, 110),
-        12 => (256, 144),
-        13 => (256, 176),
-        14 => (256, 210),
-        15 => (256, 292),
-        16 | 35 => (256, 66),
-        17 => (256, 74),
-        18 => (256, 98),
-        19 => (256, 50),
-        22 => (256, 82),
-        23 => (256, 136),
-        24 => (1, 1),
-        27 | 28 => (1, 8),
-        29 => (256, 56),
-        34 => (256, 54),
-        39 => (32, 17),
-        _ => return None,
-    };
-    Some(GgmlLayout {
-        block_size,
-        type_size,
-    })
-}
-
 const fn scalar_size(value_type: u32) -> Option<usize> {
     match value_type {
         TYPE_UINT8 | TYPE_INT8 | TYPE_BOOL => Some(1),
@@ -113,28 +73,18 @@ const fn scalar_size(value_type: u32) -> Option<usize> {
 fn tensor_data_size(
     dimensions: [u64; 4],
     dimension_count: u32,
-    tensor_type: u32,
+    tensor_type: SerializedType,
 ) -> Result<u64, Error> {
-    let layout = ggml_layout(tensor_type).ok_or(Error::ModelInvalid)?;
-    let first_dimension = if dimension_count == 0 {
-        1
-    } else {
-        dimensions[0]
-    };
-    if !first_dimension.is_multiple_of(layout.block_size) {
-        return Err(Error::ModelInvalid);
-    }
-    let count = dimensions[..usize::try_from(dimension_count).map_err(|_| Error::Capacity)?]
-        .iter()
-        .try_fold(1_u64, |count, dimension| {
-            count.checked_mul(*dimension).ok_or(Error::ModelInvalid)
-        })?;
-    if count >= i64::MAX as u64 {
-        return Err(Error::ModelInvalid);
-    }
-    (count / layout.block_size)
-        .checked_mul(layout.type_size)
-        .ok_or(Error::Capacity)
+    tensor_type
+        .data_size(dimensions, dimension_count)
+        .map_err(|error| match error {
+            ConversionError::Capacity => Error::Capacity,
+            _ => Error::ModelInvalid,
+        })
+}
+
+fn serialized_type(code: u32) -> Result<SerializedType, Error> {
+    SerializedType::try_from(code).map_err(|_| Error::ModelInvalid)
 }
 
 fn align(value: usize, alignment: u32) -> Result<usize, Error> {
@@ -389,11 +339,8 @@ pub(super) fn probe(file_image: &[u8]) -> Result<Requirements, Error> {
             &mut dimensions[..usize::try_from(dimension_count).map_err(|_| Error::Capacity)?]
         {
             *dimension = reader.u64().ok_or(Error::ParseFailed)?;
-            if *dimension > i64::MAX as u64 {
-                return Err(Error::ModelInvalid);
-            }
         }
-        let tensor_type = reader.u32().ok_or(Error::ParseFailed)?;
+        let tensor_type = serialized_type(reader.u32().ok_or(Error::ParseFailed)?)?;
         let data_offset = reader.u64().ok_or(Error::ParseFailed)?;
         let data_size = tensor_data_size(dimensions, dimension_count, tensor_type)?;
         requirements.tensor_data_bytes = requirements
@@ -523,11 +470,8 @@ pub(super) fn parse(
             &mut dimensions[..usize::try_from(dimension_count).map_err(|_| Error::Capacity)?]
         {
             *dimension = reader.u64().ok_or(Error::ParseFailed)?;
-            if *dimension > i64::MAX as u64 {
-                return Err(Error::ModelInvalid);
-            }
         }
-        let tensor_type = reader.u32().ok_or(Error::ParseFailed)?;
+        let tensor_type = serialized_type(reader.u32().ok_or(Error::ParseFailed)?)?;
         let data_offset = reader.u64().ok_or(Error::ParseFailed)?;
         let data_size = tensor_data_size(dimensions, dimension_count, tensor_type)?;
         if data_offset != expected_tensor_offset {
@@ -592,7 +536,7 @@ pub(super) fn required_kv_arena_bytes(requirements: Requirements) -> Result<usiz
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, KvEntry, TensorInfo, parse, probe, tensor_data_size};
+    use super::{Error, KvEntry, TensorInfo, parse, probe, serialized_type};
 
     const TYPE_UINT8: u32 = 0;
     const TYPE_UINT16: u32 = 2;
@@ -699,10 +643,7 @@ mod tests {
 
     #[test]
     fn types_after_pinned_ggml_count_are_rejected() {
-        assert_eq!(
-            tensor_data_size([64, 1, 1, 1], 1, 40),
-            Err(Error::ModelInvalid)
-        );
+        assert_eq!(serialized_type(40), Err(Error::ModelInvalid));
     }
 
     #[test]

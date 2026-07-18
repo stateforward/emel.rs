@@ -635,8 +635,11 @@ validate_gguf_artifact() {
   for expected in \
     '# source_repository: ggml-org/llama.cpp' \
     '# source_commit: ecbcb7ea9d3303097519723b264a8b5f1e977028' \
-    '# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index' \
-    '# benchmark_validation: public_typed_outcomes every_timed_observation exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125' \
+    '# contract_source_repository: stateforward/emel.cpp' \
+    '# contract_source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6' \
+    '# contract_source_blobs: kernel_events=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9 kernel_detail=c8a82643eabfe8f2d7883e655955f455794511b0 gguf_loader_detail=4ec9829c6d640cfa65a6d546c5891cb048b29f90' \
+    '# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 packed_tensor_entries=64 packed_wire_codes=41,42 packed_shapes=256x9,512x8 packed_tensor_bytes=2304 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index' \
+    '# benchmark_validation: public_typed_outcomes every_timed_observation serialized_q4_k_bytes=9437184 serialized_packed_41_bytes=2304 serialized_packed_42_bytes=2304 exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125' \
     '# benchmark_allocation: probe times Arc capability clone; load includes caller preallocation; parse reuses bound storage; string query times allocation-free RTC dispatch over a preloaded actor'; do
     if [[ "$(grep -Fxc "$expected" "$artifact")" -ne 1 ]]; then
       echo "error: $label must contain exactly one GGUF benchmark field: $expected" >&2
@@ -647,7 +650,9 @@ validate_gguf_artifact() {
     /^#/ { next }
     $1 == "gguf/probe/metadata_64" || $1 == "gguf/load/metadata_64" ||
     $1 == "gguf/probe/tensors_64" || $1 == "gguf/parse/tensors_64" ||
-    $1 == "gguf/load/tensors_64" || $1 == "gguf/query/string_array_4096" {
+    $1 == "gguf/parse/packed_41_42_tensors_64" ||
+    $1 == "gguf/load/tensors_64" || $1 == "gguf/query/string_array_4096" ||
+    $1 == "tensor/dtype/serialized_size" {
       cases[$1] += 1
       case_name = $1
       for (i = 2; i <= NF; ++i) {
@@ -678,10 +683,12 @@ validate_gguf_artifact() {
     }
     NF { invalid = 1 }
     END {
-      exit invalid || length(cases) != 6 ||
+      exit invalid || length(cases) != 8 ||
         cases["gguf/probe/metadata_64"] != 1 || cases["gguf/load/metadata_64"] != 1 ||
         cases["gguf/probe/tensors_64"] != 1 || cases["gguf/parse/tensors_64"] != 1 ||
-        cases["gguf/load/tensors_64"] != 1 || cases["gguf/query/string_array_4096"] != 1
+        cases["gguf/parse/packed_41_42_tensors_64"] != 1 ||
+        cases["gguf/load/tensors_64"] != 1 || cases["gguf/query/string_array_4096"] != 1 ||
+        cases["tensor/dtype/serialized_size"] != 1
     }
   ' "$artifact"; then
     echo "error: $label has invalid or configuration-incoherent GGUF benchmark cases" >&2
@@ -986,7 +993,7 @@ if [[ "$SUITE" == "gguf" ]]; then
     echo "error: GGUF benchmark baseline architecture differs from current" >&2
     exit 1
   fi
-  for field in source_repository source_commit benchmark_fixture benchmark_validation benchmark_allocation; do
+  for field in source_repository source_commit contract_source_repository contract_source_commit contract_source_blobs benchmark_fixture benchmark_validation benchmark_allocation; do
     [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
       echo "error: GGUF benchmark $field differs from baseline" >&2; exit 1; }
   done
