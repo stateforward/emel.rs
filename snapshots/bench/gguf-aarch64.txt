@@ -11,4 +11,4 @@ gguf/load/metadata_64 ns_per_op=4887.792 iter=1000 runs=5
 gguf/probe/tensors_64 ns_per_op=414.916 iter=1000 runs=5
 gguf/parse/tensors_64 ns_per_op=4124.916 iter=1000 runs=5
 gguf/load/tensors_64 ns_per_op=4641.000 iter=1000 runs=5
-gguf/query/string_array_4096 ns_per_op=128257.833 iter=1000 runs=5
+gguf/query/string_array_4096 ns_per_op=55042.916 iter=1000 runs=5

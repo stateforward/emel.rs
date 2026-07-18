@@ -5,7 +5,7 @@ use emel_gguf::Loader;
 use emel_gguf::event::{
     Bind, ElementKind, Error, MetadataDescriptor, MetadataKind, Parse, Probe, QueryError,
     ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64,
-    ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadUnsigned,
+    ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned,
     ReadUnsignedArrayElement, Storage, TensorDescriptor, VisitStringArray, WithByteArray,
     WithMetadataDescriptor, WithString, WithStringArrayElement, WithTensor,
 };
@@ -525,6 +525,12 @@ fn array_queries_cover_lengths_elements_visitors_and_byte_views() {
     assert_eq!(visited, [0, 1]);
     assert_eq!(first, b"one");
     assert_eq!(second, [0xff]);
+    let metrics = loader
+        .process_event(ReadStringArrayMetrics::new(b"a.string"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(metrics.element_count(), 2);
+    assert_eq!(metrics.total_string_bytes(), 4);
 
     assert_eq!(
         loader.process_event(WithByteArray::new(b"a.i8", |bytes: &[u8]| {
@@ -598,6 +604,37 @@ fn large_string_array_visit_is_ordered_allocation_free_and_single_pass() {
     );
     assert_eq!(result.unwrap(), Ok(Some(u64::from(ELEMENT_COUNT))));
     assert_eq!(next, ELEMENT_COUNT);
+}
+
+#[test]
+fn string_array_metrics_are_exact_constant_work_and_allocation_free() {
+    const ELEMENT_COUNT: u64 = 4096;
+    const ELEMENT_BYTES: u64 = 4;
+    let file = large_string_array_fixture();
+    let mut loader = load(&file).unwrap();
+    let mut result = None;
+
+    assert_eq!(
+        measure(|| {
+            result = Some(loader.process_event(ReadStringArrayMetrics::new(b"large.string-array")));
+        })
+        .count_total,
+        0
+    );
+
+    let metrics = result.unwrap().unwrap().unwrap();
+    assert_eq!(metrics.element_count(), ELEMENT_COUNT);
+    assert_eq!(metrics.total_string_bytes(), ELEMENT_COUNT * ELEMENT_BYTES);
+    assert_eq!(
+        loader.process_event(ReadStringArrayMetrics::new(b"missing")),
+        Ok(None)
+    );
+
+    let mut typed_loader = load(&typed_metadata_fixture()).unwrap();
+    assert_eq!(
+        typed_loader.process_event(ReadStringArrayMetrics::new(b"a.u16")),
+        Err(QueryError::TypeMismatch)
+    );
 }
 
 #[test]
@@ -801,6 +838,15 @@ fn hostile_headers_and_payloads_are_classified_without_panics() {
     assert_eq!(
         Loader::new()
             .process_event(Probe::new(source(&truncated)))
+            .unwrap_err(),
+        Error::ParseFailed
+    );
+
+    let mut truncated_string_array = large_string_array_fixture();
+    truncated_string_array.pop();
+    assert_eq!(
+        Loader::new()
+            .process_event(Probe::new(source(&truncated_string_array)))
             .unwrap_err(),
         Error::ParseFailed
     );

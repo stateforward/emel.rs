@@ -49,6 +49,10 @@ pub struct KvEntry {
     pub value_length: u32,
     /// Raw GGUF value-type tag.
     pub value_type: u32,
+    /// Exact sum of string payload bytes for a validated string array.
+    pub string_array_bytes: u64,
+    /// Whether parsing fully validated the serialized value.
+    pub validated: bool,
 }
 
 /// Metadata describing one tensor payload in the GGUF image.

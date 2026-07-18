@@ -13,8 +13,8 @@ use super::detail::{
 use crate::event::{
     ElementKind, QueryError, ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32,
     ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement,
-    ReadUnsigned, ReadUnsignedArrayElement, Storage, VisitStringArray, WithByteArray, WithString,
-    WithStringArrayElement,
+    ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, Storage, StringArrayMetrics,
+    VisitStringArray, WithByteArray, WithString, WithStringArrayElement,
 };
 
 mod sm;
@@ -33,6 +33,8 @@ pub enum Decision {
 pub struct Entry<'a> {
     kind: u32,
     bytes: &'a [u8],
+    string_array_bytes: u64,
+    validated: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -40,6 +42,7 @@ pub struct Array<'a> {
     kind: u32,
     count: u64,
     payload: &'a [u8],
+    string_array_bytes: u64,
 }
 
 pub trait Operation {
@@ -177,6 +180,8 @@ fn lookup<'a>(
             return Ok(Some(Entry {
                 kind: entry.value_type,
                 bytes,
+                string_array_bytes: entry.string_array_bytes,
+                validated: entry.validated,
             }));
         }
     }
@@ -225,58 +230,12 @@ fn array(entry: Entry<'_>) -> Option<Array<'_>> {
         kind: read_u32(entry.bytes),
         count: read_u64(&entry.bytes[4..]),
         payload: &entry.bytes[12..],
+        string_array_bytes: entry.string_array_bytes,
     })
 }
 
-fn valid_entry(entry: Entry<'_>) -> bool {
-    match entry.kind {
-        TYPE_UINT8 | TYPE_INT8 | TYPE_BOOL => entry.bytes.len() == 1,
-        TYPE_UINT16 | TYPE_INT16 => entry.bytes.len() == 2,
-        TYPE_UINT32 | TYPE_INT32 | TYPE_FLOAT32 => entry.bytes.len() == 4,
-        TYPE_UINT64 | TYPE_INT64 | TYPE_FLOAT64 => entry.bytes.len() == 8,
-        TYPE_STRING => {
-            entry.bytes.len() >= 8
-                && usize::try_from(read_u64(entry.bytes))
-                    .ok()
-                    .and_then(|length| length.checked_add(8))
-                    == Some(entry.bytes.len())
-        }
-        TYPE_ARRAY => valid_array(entry),
-        _ => false,
-    }
-}
-
-fn valid_array(entry: Entry<'_>) -> bool {
-    let Some(array) = array(entry) else {
-        return false;
-    };
-    if array.kind == TYPE_ARRAY {
-        return false;
-    }
-    if array.kind == TYPE_STRING {
-        let mut cursor = 0_usize;
-        for _ in 0..array.count {
-            let Some(length_bytes) = array.payload.get(cursor..cursor.saturating_add(8)) else {
-                return false;
-            };
-            let Ok(length) = usize::try_from(read_u64(length_bytes)) else {
-                return false;
-            };
-            let Some(next) = cursor
-                .checked_add(8)
-                .and_then(|value| value.checked_add(length))
-            else {
-                return false;
-            };
-            if next > array.payload.len() {
-                return false;
-            }
-            cursor = next;
-        }
-        return cursor == array.payload.len();
-    }
-    scalar_size(array.kind).and_then(|size| usize::try_from(array.count).ok()?.checked_mul(size))
-        == Some(array.payload.len())
+const fn valid_entry(entry: Entry<'_>) -> bool {
+    entry.validated
 }
 
 fn decision<'data, O: Operation + 'data>(request: &QueryRequest<'data, O>) -> Option<Decision> {
@@ -1035,6 +994,26 @@ impl Operation for ReadArrayLength<'_> {
     }
 }
 
+impl Operation for ReadStringArrayMetrics<'_> {
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        if array(entry).is_some_and(|value| value.kind == TYPE_STRING) {
+            Decision::Accept
+        } else {
+            Decision::TypeMismatch
+        }
+    }
+    result_methods!(StringArrayMetrics);
+    fn apply_array_string(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(StringArrayMetrics::new(
+            value.count,
+            value.string_array_bytes,
+        )));
+    }
+}
+
 const fn element_kind(kind: ElementKind) -> u32 {
     match kind {
         ElementKind::Uint8 => TYPE_UINT8,
@@ -1374,6 +1353,7 @@ mod tests {
             kind: TYPE_UINT8,
             count: 0,
             payload: &[],
+            string_array_bytes: 0,
         };
         operation.apply_uint8(0);
         operation.apply_int8(0);
@@ -1406,6 +1386,29 @@ mod tests {
     fn missing_actor_storage_is_malformed() {
         let mut event = ReadUnsigned::new(b"key");
         process(true, None, 1, &mut event);
+        assert_eq!(event.result, Err(QueryError::Malformed));
+    }
+
+    #[test]
+    fn unvalidated_actor_owned_entry_is_malformed() {
+        let storage = Storage {
+            source: std::sync::Arc::from([]),
+            kv_arena: vec![b'k', 7],
+            kv_entries: vec![super::super::KvEntry {
+                key_offset: 0,
+                key_length: 1,
+                value_offset: 1,
+                value_length: 1,
+                value_type: TYPE_UINT8,
+                string_array_bytes: 0,
+                validated: false,
+            }],
+            tensors: Vec::new(),
+        };
+        let mut event = ReadUnsigned::new(b"k");
+
+        process(true, Some(&storage), 1, &mut event);
+
         assert_eq!(event.result, Err(QueryError::Malformed));
     }
 

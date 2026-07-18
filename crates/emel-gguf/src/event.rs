@@ -742,6 +742,63 @@ impl Event for ReadArrayLength<'_> {
     }
 }
 
+/// Exact aggregate metrics for a validated GGUF string array.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StringArrayMetrics {
+    element_count: u64,
+    total_string_bytes: u64,
+}
+
+impl StringArrayMetrics {
+    pub(crate) const fn new(element_count: u64, total_string_bytes: u64) -> Self {
+        Self {
+            element_count,
+            total_string_bytes,
+        }
+    }
+
+    /// Returns the number of string elements.
+    #[must_use]
+    pub const fn element_count(self) -> u64 {
+        self.element_count
+    }
+
+    /// Returns the exact sum of element payload bytes, excluding length prefixes.
+    #[must_use]
+    pub const fn total_string_bytes(self) -> u64 {
+        self.total_string_bytes
+    }
+}
+
+/// Read exact aggregate metrics for a string array.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadStringArrayMetrics<'a> {
+    pub(crate) key: &'a [u8],
+    pub(crate) result: Result<Option<StringArrayMetrics>, QueryError>,
+}
+
+impl<'a> ReadStringArrayMetrics<'a> {
+    /// Creates a string-array aggregate query.
+    #[must_use]
+    pub const fn new(key: &'a [u8]) -> Self {
+        Self {
+            key,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl sealed::Sealed for ReadStringArrayMetrics<'_> {}
+
+impl Event for ReadStringArrayMetrics<'_> {
+    type Output = Result<Option<StringArrayMetrics>, QueryError>;
+
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
+}
+
 macro_rules! array_element_query {
     ($name:ident, $value:ty) => {
         #[doc = concat!("Read one optional array element as `", stringify!($value), "`.")]

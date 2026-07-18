@@ -4,10 +4,10 @@ mod common;
 
 use emel_gguf::Loader;
 use emel_gguf::event::{
-    Bind, ElementKind, MetadataDescriptor, Parse, Probe, ReadArrayLength, ReadBool,
+    Bind, ElementKind, MetadataDescriptor, Parse, Probe, QueryError, ReadArrayLength, ReadBool,
     ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned,
-    ReadSignedArrayElement, ReadUnsigned, ReadUnsignedArrayElement, Storage, VisitStringArray,
-    WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement, QueryError,
+    ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, Storage,
+    VisitStringArray, WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
 };
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -93,6 +93,14 @@ fn exercise_queries(loader: &mut Loader, key: &[u8], index: u64) -> u64 {
             |hash, value| hash_bytes(hash, &value.to_le_bytes()),
         );
     }
+    hash_result(
+        &mut hash,
+        loader.process_event(ReadStringArrayMetrics::new(key)),
+        |hash, value| {
+            hash_bytes(hash, &value.element_count().to_le_bytes());
+            hash_bytes(hash, &value.total_string_bytes().to_le_bytes());
+        },
+    );
     hash_result(
         &mut hash,
         loader.process_event(ReadUnsignedArrayElement::new(key, index)),

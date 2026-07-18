@@ -217,12 +217,18 @@ const fn header_error(file_image: &[u8]) -> Error {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ValueScan {
+    serialized_bytes: usize,
+    string_array_bytes: u64,
+}
+
 fn scan_value(
     reader: &mut Reader<'_>,
     value_type: u32,
     key: &[u8],
     alignment: &mut u32,
-) -> Result<usize, Error> {
+) -> Result<ValueScan, Error> {
     let start = reader.offset;
     if value_type >= TYPE_COUNT {
         return Err(Error::ModelInvalid);
@@ -232,7 +238,10 @@ fn scan_value(
     }
     if value_type == TYPE_STRING {
         reader.string().ok_or(Error::ParseFailed)?;
-        return Ok(reader.offset - start);
+        return Ok(ValueScan {
+            serialized_bytes: reader.offset - start,
+            string_array_bytes: 0,
+        });
     }
     if value_type == TYPE_ARRAY {
         let element_type = reader.u32().ok_or(Error::ParseFailed)?;
@@ -240,9 +249,13 @@ fn scan_value(
         if element_type >= TYPE_COUNT || element_type == TYPE_ARRAY || count > MAX_ARRAY_ELEMENTS {
             return Err(Error::ModelInvalid);
         }
+        let mut string_array_bytes = 0_u64;
         if element_type == TYPE_STRING {
             for _ in 0..count {
-                reader.string().ok_or(Error::ParseFailed)?;
+                let value = reader.string().ok_or(Error::ParseFailed)?;
+                string_array_bytes = string_array_bytes
+                    .checked_add(u64::try_from(value.len()).map_err(|_| Error::Capacity)?)
+                    .ok_or(Error::Capacity)?;
             }
         } else {
             let element_size = scalar_size(element_type).ok_or(Error::ModelInvalid)?;
@@ -252,7 +265,10 @@ fn scan_value(
                 return Err(Error::ParseFailed);
             }
         }
-        return Ok(reader.offset - start);
+        return Ok(ValueScan {
+            serialized_bytes: reader.offset - start,
+            string_array_bytes,
+        });
     }
     let size = scalar_size(value_type).ok_or(Error::ModelInvalid)?;
     if key == GENERAL_ALIGNMENT {
@@ -267,7 +283,10 @@ fn scan_value(
     } else if !reader.skip(size) {
         return Err(Error::ParseFailed);
     }
-    Ok(reader.offset - start)
+    Ok(ValueScan {
+        serialized_bytes: reader.offset - start,
+        string_array_bytes: 0,
+    })
 }
 
 fn metadata_key_previously_seen(
@@ -343,7 +362,7 @@ pub(super) fn probe(file_image: &[u8]) -> Result<Requirements, Error> {
             return Err(Error::ModelInvalid);
         }
         let value_type = reader.u32().ok_or(Error::ParseFailed)?;
-        let value_size = scan_value(&mut reader, value_type, key, &mut alignment)?;
+        let value_size = scan_value(&mut reader, value_type, key, &mut alignment)?.serialized_bytes;
         requirements.max_key_bytes = requirements
             .max_key_bytes
             .max(u32::try_from(key.len()).map_err(|_| Error::Capacity)?);
@@ -450,7 +469,8 @@ pub(super) fn parse(
         }
         let value_type = reader.u32().ok_or(Error::ParseFailed)?;
         let value_start = reader.offset;
-        let value_size = scan_value(&mut reader, value_type, key, &mut alignment)?;
+        let value_scan = scan_value(&mut reader, value_type, key, &mut alignment)?;
+        let value_size = value_scan.serialized_bytes;
         if key.len() > usize::try_from(requirements.max_key_bytes).map_err(|_| Error::Capacity)?
             || value_size
                 > usize::try_from(requirements.max_value_bytes).map_err(|_| Error::Capacity)?
@@ -474,6 +494,8 @@ pub(super) fn parse(
             value_offset: u32::try_from(entry_offset + key.len()).map_err(|_| Error::Capacity)?,
             value_length: u32::try_from(value_size).map_err(|_| Error::Capacity)?,
             value_type,
+            string_array_bytes: value_scan.string_array_bytes,
+            validated: true,
         };
     }
 
