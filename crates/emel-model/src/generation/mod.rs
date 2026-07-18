@@ -422,8 +422,8 @@ pub const fn tensor_type_name(tensor_type: SerializedType) -> &'static str {
 
 use actor::{
     AttentionRuntime, AuditRuntime, BeginRuntime, BlockVisitRuntime, GlobalRuntime, PlanRuntime,
-    ResetRuntime, ShortconvRuntime, StageRuntime, StorageBindRuntime, StorageReleaseRuntime,
-    TopologyRuntime, UnexpectedRuntime, ValidateRuntime, VisitRuntime,
+    RejectRuntime, ResetRuntime, ShortconvRuntime, StageRuntime, StorageBindRuntime,
+    StorageReleaseRuntime, TopologyRuntime, UnexpectedRuntime, ValidateRuntime, VisitRuntime,
 };
 
 #[cfg(test)]

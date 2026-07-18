@@ -1,0 +1,11 @@
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_lfm2_detail_header_blob: af0e7d509a3854a847bdde2dad831c5ed60de379
+# source_lfm2_detail_implementation_blob: a6f215e74ed793ea8f606048c00faa80c37056be
+# benchmark_operand: same alternating completed LFM2.5-230M hybrid block indices 0 (shortconv) and 2 (attention); Rust public family BlockVisit vs C++ public generation lookup_block_view over the source-built LFM2 contract; full descriptor black-boxed and nonzero index checksum observed
+# benchmark_config: iterations=1000000 runs=11 warmup_iterations=100000 process_runs=5 sample_policy=median_paired_process_ratio scheduling=darwin-throughput-0-latency-0 max_ratio=2.0
+model/lfm2/block_visit/process run=1 cpp_ns_per_op=12.963 rust_ns_per_op=5 paired_ratio=0.385713
+model/lfm2/block_visit/process run=2 cpp_ns_per_op=12.981 rust_ns_per_op=5 paired_ratio=0.385178
+model/lfm2/block_visit/process run=3 cpp_ns_per_op=12.894 rust_ns_per_op=5 paired_ratio=0.387777
+model/lfm2/block_visit/process run=4 cpp_ns_per_op=12.869 rust_ns_per_op=5 paired_ratio=0.388531
+model/lfm2/block_visit/process run=5 cpp_ns_per_op=12.806 rust_ns_per_op=5 paired_ratio=0.390442
+model/lfm2/block_visit rust_median_ns_per_op=5 cpp_median_ns_per_op=12.894 paired_ratio_median=0.387777 outcome=found checksum=11000000

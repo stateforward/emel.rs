@@ -842,11 +842,15 @@ run_model_catalog_parity() {
       "$ROOT_DIR/scripts/model-generation-parity.sh"
     EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
       "$ROOT_DIR/scripts/model-llama-parity.sh"
+    EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      "$ROOT_DIR/scripts/model-lfm2-parity.sh"
   else
     EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
       "$ROOT_DIR/scripts/model-generation-parity.sh" "${mode[0]}"
     EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
       "$ROOT_DIR/scripts/model-llama-parity.sh" "${mode[0]}"
+    EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      "$ROOT_DIR/scripts/model-lfm2-parity.sh" "${mode[0]}"
   fi
 }
 

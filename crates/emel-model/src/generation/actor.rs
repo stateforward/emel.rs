@@ -35,6 +35,7 @@ const SLOT_FFN_GATE: usize = 11;
 const SLOT_FFN_DOWN: usize = 12;
 const SLOT_FFN_UP: usize = 13;
 const BLOCK_QUERY_COUNT: usize = 14;
+const REJECT_QUERY_COUNT: usize = 6;
 
 type CatalogQuery = Result<Option<TensorDescriptor>, catalog::event::Error>;
 type CapabilityQuery = Result<Outcome, capability::Error>;
@@ -70,6 +71,13 @@ pub(super) struct AttentionRuntime<'a> {
 pub(super) struct ShortconvRuntime<'a> {
     pub(super) event: event::ShortconvBlock,
     pub(super) queries: &'a RefCell<[CatalogQuery; BLOCK_QUERY_COUNT]>,
+    pub(super) result: &'a Cell<Result<(), Error>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct RejectRuntime<'a> {
+    pub(super) event: event::RejectBlockTensors,
+    pub(super) queries: &'a RefCell<[CatalogQuery; REJECT_QUERY_COUNT]>,
     pub(super) result: &'a Cell<Result<(), Error>>,
 }
 
@@ -330,6 +338,22 @@ impl Builder<Catalog, capability::Resolver> {
         };
         self.machine
             .process_event(GenerationBuilderEvents::Shortconv(runtime))
+            .map_err(|_| Error::Internal)?;
+        result.get()
+    }
+
+    pub(crate) fn reject_block_tensors(
+        &mut self,
+        event: event::RejectBlockTensors,
+    ) -> Result<(), Error> {
+        let queries = RefCell::new([Ok(None); REJECT_QUERY_COUNT]);
+        let result = Cell::new(Err(Error::UnexpectedEvent));
+        self.machine
+            .process_event(GenerationBuilderEvents::Reject(RejectRuntime {
+                event,
+                queries: &queries,
+                result: &result,
+            }))
             .map_err(|_| Error::Internal)?;
         result.get()
     }
@@ -885,6 +909,75 @@ impl GenerationBuilderStateMachineContext for Context {
         self.store_block_view(index, event.event.layer);
         self.bound_blocks += 1;
         event.result.set(Ok(()));
+        Ok(())
+    }
+
+    fn guard_reject_shortconv_valid(&self, event: &RejectRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.event.family == event::BlockFamily::Shortconv
+            && self.index_valid(event.event.index)
+            && self.block(event.event.index).bound
+            && self.block(event.event.index).uses_attention)
+    }
+    fn guard_reject_attention_valid(&self, event: &RejectRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.event.family == event::BlockFamily::Attention
+            && self.index_valid(event.event.index)
+            && self.block(event.event.index).bound
+            && !self.block(event.event.index).uses_attention)
+    }
+    fn guard_reject_invalid(&self, event: &RejectRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.guard_reject_shortconv_valid(event)?
+            && !self.guard_reject_attention_valid(event)?)
+    }
+    fn effect_query_reject_shortconv(&mut self, event: RejectRuntime<'_>) -> Result<(), ()> {
+        let mut queries = event.queries.borrow_mut();
+        let index = event.event.index;
+        query_reject_slot(self, &mut queries, 0, index, b"shortconv.conv.weight");
+        query_reject_slot(self, &mut queries, 1, index, b"shortconv.in_proj.weight");
+        query_reject_slot(self, &mut queries, 2, index, b"shortconv.out_proj.weight");
+        Ok(())
+    }
+    fn effect_query_reject_attention(&mut self, event: RejectRuntime<'_>) -> Result<(), ()> {
+        let mut queries = event.queries.borrow_mut();
+        let index = event.event.index;
+        query_reject_slot(self, &mut queries, 0, index, b"attn_q.weight");
+        query_reject_slot(self, &mut queries, 1, index, b"attn_k.weight");
+        query_reject_slot(self, &mut queries, 2, index, b"attn_v.weight");
+        query_reject_slot(self, &mut queries, 3, index, b"attn_q_norm.weight");
+        query_reject_slot(self, &mut queries, 4, index, b"attn_k_norm.weight");
+        query_reject_slot(self, &mut queries, 5, index, b"attn_output.weight");
+        Ok(())
+    }
+    fn guard_reject_queries_absent(&self, event: &RejectRuntime<'_>) -> Result<bool, ()> {
+        Ok(event
+            .queries
+            .borrow()
+            .iter()
+            .all(|query| matches!(query, Ok(None))))
+    }
+    fn guard_reject_queries_present(&self, event: &RejectRuntime<'_>) -> Result<bool, ()> {
+        Ok(event
+            .queries
+            .borrow()
+            .iter()
+            .any(|query| matches!(query, Ok(Some(_)))))
+    }
+    fn guard_reject_queries_dependency_error(&self, event: &RejectRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.queries.borrow().iter().any(Result::is_err))
+    }
+    fn effect_reject_ok(&mut self, event: RejectRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Ok(()));
+        Ok(())
+    }
+    fn effect_reject_present(&mut self, event: RejectRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::ModelInvalid));
+        Ok(())
+    }
+    fn effect_reject_dependency_error(&mut self, event: RejectRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::Dependency));
+        Ok(())
+    }
+    fn effect_invalid_reject(&mut self, event: RejectRuntime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
         Ok(())
     }
     fn effect_shortconv_dependency_error(&mut self, event: ShortconvRuntime<'_>) -> Result<(), ()> {
@@ -1668,6 +1761,15 @@ impl Context {
 fn query_slot(
     context: &mut Context,
     queries: &mut [CatalogQuery; BLOCK_QUERY_COUNT],
+    slot: usize,
+    index: i32,
+    suffix: &[u8],
+) {
+    queries[slot] = context.query_block(index, suffix);
+}
+fn query_reject_slot(
+    context: &mut Context,
+    queries: &mut [CatalogQuery; REJECT_QUERY_COUNT],
     slot: usize,
     index: i32,
     suffix: &[u8],

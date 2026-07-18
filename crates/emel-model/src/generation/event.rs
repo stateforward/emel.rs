@@ -210,6 +210,29 @@ pub struct ShortconvBlock {
     pub(super) index: i32,
     pub(super) layer: LayerExecution,
 }
+
+/// A source-selected block tensor family that must be absent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockFamily {
+    Attention,
+    Shortconv,
+}
+
+/// Rejects every tensor owned by one opposite block family.
+///
+/// The builder performs the fixed catalog queries synchronously and returns
+/// [`Error::ModelInvalid`] when any rejected tensor is present.
+#[derive(Clone, Copy, Debug)]
+pub struct RejectBlockTensors {
+    pub(super) index: i32,
+    pub(super) family: BlockFamily,
+}
+impl RejectBlockTensors {
+    #[must_use]
+    pub const fn new(index: i32, family: BlockFamily) -> Self {
+        Self { index, family }
+    }
+}
 impl ShortconvBlock {
     #[must_use]
     pub const fn new(index: i32, layer: LayerExecution) -> Self {
@@ -420,6 +443,7 @@ impl_event!(ContractBegin, Result<(), Error>, contract_begin);
 impl_event!(GlobalBindings<'_>, Result<(), Error>, global_bindings);
 impl_event!(AttentionBlock, Result<(), Error>, attention_block);
 impl_event!(ShortconvBlock, Result<(), Error>, shortconv_block);
+impl_event!(RejectBlockTensors, Result<(), Error>, reject_block_tensors);
 impl_event!(Topology, Result<(), Error>, topology);
 impl_event!(Plan, Result<(), Error>, plan);
 impl_event!(BlockValidation, Result<(), Error>, block_validation);

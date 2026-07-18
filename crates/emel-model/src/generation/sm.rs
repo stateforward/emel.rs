@@ -6,8 +6,8 @@ use sml::sml;
 
 use super::{
     AttentionRuntime, AuditRuntime, BeginRuntime, BlockVisitRuntime, GlobalRuntime, PlanRuntime,
-    ResetRuntime, ShortconvRuntime, StageRuntime, StorageBindRuntime, StorageReleaseRuntime,
-    TopologyRuntime, UnexpectedRuntime, ValidateRuntime, VisitRuntime,
+    RejectRuntime, ResetRuntime, ShortconvRuntime, StageRuntime, StorageBindRuntime,
+    StorageReleaseRuntime, TopologyRuntime, UnexpectedRuntime, ValidateRuntime, VisitRuntime,
 };
 
 sml! {
@@ -66,6 +66,17 @@ sml! {
         "state_building"_s <= "state_shortconv_decision"_s + completion<Shortconv>(ShortconvRuntime<'dispatch>) [guard_shortconv_queries_valid] / effect_bind_shortconv,
         "state_building"_s <= "state_shortconv_decision"_s + completion<Shortconv>(ShortconvRuntime<'dispatch>) [guard_shortconv_queries_missing] / effect_model_invalid_shortconv,
         "state_building"_s <= "state_shortconv_decision"_s + completion<Shortconv>(ShortconvRuntime<'dispatch>) [guard_shortconv_queries_dependency_error] / effect_shortconv_dependency_error,
+
+        // Source-selected opposite-family tensor rejection.
+        "state_reject_shortconv"_s <= "state_building"_s + Reject(RejectRuntime<'dispatch>) [guard_reject_shortconv_valid] / effect_query_reject_shortconv,
+        "state_reject_attention"_s <= "state_building"_s + Reject(RejectRuntime<'dispatch>) [guard_reject_attention_valid] / effect_query_reject_attention,
+        "state_building"_s <= "state_building"_s + Reject(RejectRuntime<'dispatch>) [guard_reject_invalid] / effect_invalid_reject,
+        "state_building"_s <= "state_reject_shortconv"_s + completion<Reject>(RejectRuntime<'dispatch>) [guard_reject_queries_absent] / effect_reject_ok,
+        "state_building"_s <= "state_reject_attention"_s + completion<Reject>(RejectRuntime<'dispatch>) [guard_reject_queries_absent] / effect_reject_ok,
+        "state_building"_s <= "state_reject_shortconv"_s + completion<Reject>(RejectRuntime<'dispatch>) [guard_reject_queries_present] / effect_reject_present,
+        "state_building"_s <= "state_reject_attention"_s + completion<Reject>(RejectRuntime<'dispatch>) [guard_reject_queries_present] / effect_reject_present,
+        "state_building"_s <= "state_reject_shortconv"_s + completion<Reject>(RejectRuntime<'dispatch>) [guard_reject_queries_dependency_error] / effect_reject_dependency_error,
+        "state_building"_s <= "state_reject_attention"_s + completion<Reject>(RejectRuntime<'dispatch>) [guard_reject_queries_dependency_error] / effect_reject_dependency_error,
 
         // Topology and plan.
         "state_building"_s <= "state_building"_s + Topology(TopologyRuntime<'dispatch>) [guard_topology_valid] / effect_topology,

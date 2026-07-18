@@ -14,6 +14,7 @@ IO_LOADER_REPORT="${EMEL_IO_LOADER_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/em
 MODEL_TENSOR_REPORT="${EMEL_MODEL_TENSOR_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-tensor.json}"
 MODEL_CATALOG_REPORT="${EMEL_MODEL_CATALOG_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-catalog.json}"
 MODEL_GENERATION_REPORT="${EMEL_MODEL_GENERATION_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-generation.json}"
+MODEL_LFM2_REPORT="${EMEL_MODEL_LFM2_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-lfm2.json}"
 MODEL_VOCABULARY_REPORT="${EMEL_MODEL_VOCABULARY_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-vocabulary.json}"
 TOKEN_PROFILE_REPORT="${EMEL_TOKEN_PROFILE_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-token-profile.json}"
 TENSOR_DTYPE_REPORT="${EMEL_TENSOR_DTYPE_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-tensor-dtype.json}"
@@ -26,6 +27,7 @@ IO_LOADER_COVERAGE_TARGET_DIR="${EMEL_IO_LOADER_COVERAGE_TARGET_DIR:-$ROOT_DIR/t
 MODEL_TENSOR_COVERAGE_TARGET_DIR="${EMEL_MODEL_TENSOR_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-tensor}"
 MODEL_CATALOG_COVERAGE_TARGET_DIR="${EMEL_MODEL_CATALOG_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-catalog}"
 MODEL_GENERATION_COVERAGE_TARGET_DIR="${EMEL_MODEL_GENERATION_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-generation}"
+MODEL_LFM2_COVERAGE_TARGET_DIR="${EMEL_MODEL_LFM2_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-lfm2}"
 MODEL_VOCABULARY_COVERAGE_TARGET_DIR="${EMEL_MODEL_VOCABULARY_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-vocabulary}"
 TOKEN_PROFILE_COVERAGE_TARGET_DIR="${EMEL_TOKEN_PROFILE_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-token-profile}"
 TENSOR_DTYPE_COVERAGE_TARGET_DIR="${EMEL_TENSOR_DTYPE_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-tensor-dtype}"
@@ -71,6 +73,7 @@ mkdir -p \
   "$(dirname "$MODEL_TENSOR_REPORT")" \
   "$(dirname "$MODEL_CATALOG_REPORT")" \
   "$(dirname "$MODEL_GENERATION_REPORT")" \
+  "$(dirname "$MODEL_LFM2_REPORT")" \
   "$(dirname "$MODEL_VOCABULARY_REPORT")" \
   "$(dirname "$TOKEN_PROFILE_REPORT")" \
   "$(dirname "$TENSOR_DTYPE_REPORT")" \
@@ -140,6 +143,11 @@ run_coverage "$MODEL_GENERATION_COVERAGE_TARGET_DIR" "$MODEL_GENERATION_REPORT" 
   '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-tensor/|crates/emel-kernels/|crates/emel-model/(src/(lib\.rs|architecture/|catalog/|data\.rs|gemma4/|generation/tests\.rs|generation_audit\.rs|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/|vocabulary/|whisper/)|tests/|examples/)|sm\.rs$)' \
   --package emel-model
 
+echo "Running maintained emel-model LFM2 family coverage"
+run_coverage "$MODEL_LFM2_COVERAGE_TARGET_DIR" "$MODEL_LFM2_REPORT" \
+  '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-tensor/|crates/emel-kernels/|crates/emel-model/(src/(lib\.rs|architecture/|catalog/|data\.rs|gemma4/|generation/|generation_audit\.rs|lfm2/tests\.rs|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/|vocabulary/|whisper/)|tests/|examples/)|sm\.rs$)' \
+  --package emel-model
+
 echo "Running maintained emel-model vocabulary and typed hyperparameter coverage"
 run_coverage "$MODEL_VOCABULARY_COVERAGE_TARGET_DIR" "$MODEL_VOCABULARY_REPORT" \
   '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-model/(src/(lib\.rs|architecture/|data\.rs|gemma4/|generation/|lfm2/|llama/|loader/(mod\.rs|test_gguf\.rs)|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/|vocabulary/tests\.rs|whisper/)|tests/|examples/)|sm\.rs$)' \
@@ -168,6 +176,7 @@ python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-model-tensor=$MODEL_TENSOR_REPORT" \
   "emel-model-catalog=$MODEL_CATALOG_REPORT" \
   "emel-model-generation=$MODEL_GENERATION_REPORT" \
+  "emel-model-lfm2=$MODEL_LFM2_REPORT" \
   "emel-model-vocabulary=$MODEL_VOCABULARY_REPORT" \
   "emel-token-profile=$TOKEN_PROFILE_REPORT" \
   "emel-tensor-dtype=$TENSOR_DTYPE_REPORT" \

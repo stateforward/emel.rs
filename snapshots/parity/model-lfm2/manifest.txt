@@ -1,0 +1,42 @@
+model-lfm2-parity-snapshot/v1
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_lfm2_detail_header_blob=af0e7d509a3854a847bdde2dad831c5ed60de379
+source_lfm2_detail_implementation_blob=a6f215e74ed793ea8f606048c00faa80c37056be
+lfm2_case=real_fixture_230m variant=230m block_count=14 tensor_count=133 workspace=544768 prefill=128000 decode=1 attention_blocks=6 shortconv_blocks=8 block0_attention=0 block2_attention=1
+stage=token_embedding type=unknown contract=approved_dense_f32_by_contract consistent=1
+stage=output_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=output type=unknown contract=native_quantized consistent=1
+stage=attention_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_q type=unknown contract=native_quantized consistent=1
+stage=attention_k type=unknown contract=native_quantized consistent=1
+stage=attention_v type=unknown contract=native_quantized consistent=1
+stage=attention_q_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_k_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_output type=unknown contract=native_quantized consistent=1
+stage=feed_forward_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=feed_forward_gate type=unknown contract=native_quantized consistent=1
+stage=feed_forward_down type=unknown contract=native_quantized consistent=1
+stage=feed_forward_up type=unknown contract=native_quantized consistent=1
+lfm2_case=real_fixture_1_2b variant=1.2b block_count=16 tensor_count=149 workspace=1220608 prefill=128000 decode=1 attention_blocks=6 shortconv_blocks=10 block0_attention=0 block2_attention=1
+stage=token_embedding type=q6_k contract=approved_dense_f32_by_contract consistent=1
+stage=output_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=output type=q6_k contract=native_quantized consistent=1
+stage=attention_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_q type=q4_k contract=native_quantized consistent=1
+stage=attention_k type=q4_k contract=native_quantized consistent=1
+stage=attention_v type=q4_k contract=native_quantized consistent=0
+stage=attention_q_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_k_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_output type=q4_k contract=native_quantized consistent=1
+stage=feed_forward_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=feed_forward_gate type=q4_k contract=native_quantized consistent=1
+stage=feed_forward_down type=q6_k contract=native_quantized consistent=0
+stage=feed_forward_up type=q4_k contract=native_quantized consistent=1
+lfm2_validation=non_strict builder=ok data=ok execution=model_invalid block_count=3
+fixture_lfm2_230m_sha256=855be85429300602eda72958547614703541b7d6dd965a8f8f6052b85a7aa935
+fixture_lfm2_1_2b_sha256=7223a2202405b02e8e1e6c5baa543c43dc98c1d9741a5c2a0ee1583212e1231b
+proof_token_sha256=e2bb61a251287563770bf63737f3a7af117f8d6d0ca997accf8caeae6496de26
+source_inventory_sha256=248d0b9f13566ba463bc69390704b86aceddd050d2e1eb1088c27e41574aa1f4
+source_owner_map_sha256=f77237495442e5e613d23f11c1ee5f6d698ff53e99feb68eab51eff52e126369
+canonical_ast_inventory_sha256=240554f572f10c2469807e2e8f09325494d7a878e1eb608a052ef297b3a81ecc
+reference_tool_sha256=f43f1e2fc8b9ac4249cefde0f0033100a95b47784631f5c89d9ac1dd205efe6d

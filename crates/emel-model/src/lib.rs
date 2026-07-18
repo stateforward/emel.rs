@@ -9,6 +9,7 @@ pub mod catalog;
 pub(crate) mod data;
 pub mod generation;
 pub mod generation_audit;
+pub mod lfm2;
 pub mod llama;
 pub(crate) mod loader;
 pub mod tensor;
