@@ -2,6 +2,21 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Some macOS hosts have Command Line Tools selected even though the complete
+# Xcode toolchain is installed. libfuzzer-sys needs the matching compiler and
+# SDK; bind both explicitly when the caller has not selected another C++
+# toolchain.
+if [[ "$(uname -s)" == "Darwin" && -z "${CXX:-}" ]]; then
+  XCODE_CXX=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++
+  if [[ -x "$XCODE_CXX" ]]; then
+    XCODE_SDK="$(DEVELOPER_DIR=/Applications/Xcode.app xcrun --sdk macosx --show-sdk-path)"
+    export CXX="$XCODE_CXX"
+    export SDKROOT="$XCODE_SDK"
+    export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-isysroot $XCODE_SDK"
+  fi
+fi
+
 FUZZ_DIR="$ROOT_DIR/fuzz"
 BUILD_DIR="${EMEL_FUZZ_BUILD_DIR:-$ROOT_DIR/target/fuzz}"
 GENERATED_FIXTURES="$BUILD_DIR/generated-fixtures"

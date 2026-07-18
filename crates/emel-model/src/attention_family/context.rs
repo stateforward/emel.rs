@@ -51,7 +51,7 @@ pub trait Policy {
 
 #[derive(Clone, Copy)]
 pub struct BeginRuntime<'a> {
-    pub event: ContractBegin<'a, Parameters>,
+    pub event: ContractBegin<'a, &'a Parameters>,
     pub begin_result: &'a Cell<ChildResult>,
     pub global_result: &'a Cell<ChildResult>,
     pub reset_result: &'a Cell<ChildResult>,
@@ -62,6 +62,10 @@ pub struct BeginRuntime<'a> {
 pub struct BlockRuntime<'a> {
     pub event: event::BlockBuild,
     pub child_result: &'a Cell<ChildResult>,
+    pub key_length: &'a Cell<i32>,
+    pub value_length: &'a Cell<i32>,
+    pub rope_dimension: &'a Cell<i32>,
+    pub rope_frequency: &'a Cell<f32>,
     pub result: &'a Cell<ChildResult>,
 }
 
@@ -186,6 +190,16 @@ impl<P: Policy> Context<P> {
         let workspace = u64::from(tensors).checked_mul(embedding)?.checked_mul(4)?;
         Some((tensors, workspace))
     }
+
+    /// Returns a copy of the family facts for a component-local specialization.
+    pub(crate) const fn facts(&self) -> Parameters {
+        self.parameters
+    }
+
+    /// Returns the family-owned child builder to a component-local action.
+    pub(crate) const fn builder_mut(&mut self) -> &mut generation::Builder {
+        &mut self.builder
+    }
 }
 
 const fn child_ok(result: &Cell<ChildResult>) -> bool {
@@ -243,7 +257,7 @@ impl<P: Policy> Context<P> {
         Ok(!child_ok(event.global_result))
     }
     pub fn effect_begin_complete(&mut self, event: BeginRuntime<'_>) -> Result<(), ()> {
-        self.parameters = event.event.parameters;
+        self.parameters = *event.event.parameters;
         event.result.set(Ok(()));
         Ok(())
     }
@@ -297,6 +311,7 @@ impl<P: Policy> Context<P> {
         );
         Ok(())
     }
+
     pub fn effect_block_invalid(&mut self, event: BlockRuntime<'_>) -> Result<(), ()> {
         event.result.set(Err(Error::InvalidRequest));
         Ok(())
@@ -334,6 +349,7 @@ impl<P: Policy> Context<P> {
             )));
         Ok(())
     }
+
     pub fn effect_topology_invalid(&mut self, event: TopologyRuntime<'_>) -> Result<(), ()> {
         event.result.set(Err(Error::InvalidRequest));
         Ok(())

@@ -14,6 +14,8 @@ use emel_model::generation::{
     AttentionQkNormRoute, AttentionVNormRoute, AttentionValueRoute, AttentionWindowRoute, Builder,
     LayerExecution, QuantizedStageFamily, ResidualRoute,
 };
+use emel_model::gemma4::event as gemma4_event;
+use emel_model::gemma4::{Gemma4, Parameters as Gemma4Parameters};
 use emel_model::llama::event as llama_event;
 use emel_model::llama::{Llama, Parameters as LlamaParameters};
 use emel_model::lfm2::event as lfm2_event;
@@ -439,6 +441,130 @@ fn fuzz_qwen3_protocol(input: &[u8]) {
     }
 }
 
+fn gemma4_actor(input: &[u8]) -> (Gemma4, ModelIdentity) {
+    let names = &ATTENTION_NAMES;
+    let name_bytes = names.iter().map(|name| name.len()).sum();
+    let mut storage =
+        CatalogStorage::with_capacity(names.len(), name_bytes, names.len()).expect("bounded");
+    for (index, name) in names.iter().enumerate() {
+        let selector = input.get(index).copied().unwrap_or(index as u8) as usize;
+        storage
+            .push_tensor(TensorInput::new(
+                name,
+                VALID_WIRE_TYPES[selector % VALID_WIRE_TYPES.len()],
+                1,
+                [32, 1, 1, 1],
+                u64::try_from(index).expect("bounded") * 64,
+                true,
+            ))
+            .expect("valid tensor");
+    }
+    let mut catalog = Catalog::try_new().expect("catalog");
+    catalog
+        .process_event(BindStorage::new(storage))
+        .expect("bind");
+    let model = catalog.process_event(SealModel::new()).expect("seal");
+    let actor = Gemma4::new(
+        catalog,
+        Resolver::new(),
+        gemma4_event::Storage::with_block_capacity(2).expect("storage"),
+    )
+    .expect("Gemma4 actor");
+    (actor, model)
+}
+
+fn gemma4_parameters(input: &[u8], selector: u8) -> Gemma4Parameters {
+    let mut parameters = Gemma4Parameters {
+        block_count: 1,
+        context_length: 128,
+        embedding_length: 64,
+        embedding_length_out: 64,
+        feed_forward_length: 256,
+        attention_head_count: 8,
+        attention_head_count_kv: 1,
+        attention_key_length: 32,
+        attention_value_length: 40,
+        vocab_size: 1024,
+        rope_dimension_count: 32,
+        rope_freq_base: 20_000.0,
+        attention_shared_kv_layers: i32::from(selector % 4) - 1,
+        attention_key_length_swa: i32::from(selector & 32),
+        attention_value_length_swa: i32::from(selector.rotate_left(1) & 32),
+        rope_dimension_count_swa: i32::from(selector.rotate_left(2) & 32),
+        rope_freq_base_swa: f32::from(selector.rotate_left(3) & 32) * 100.0,
+        tie_word_embeddings: selector & 1 == 0,
+        sliding_window_pattern_count: u32::from(selector % 3),
+        ..Gemma4Parameters::default()
+    };
+    parameters.sliding_window_pattern_flags[0] =
+        input.get(2).copied().unwrap_or(selector) & 1;
+    parameters
+}
+
+fn fuzz_gemma4_protocol(input: &[u8]) {
+    let (mut actor, model) = gemma4_actor(input);
+    for (step, byte) in input.iter().copied().enumerate().take(128) {
+        let parameter = input.get(step + 1).copied().unwrap_or_default();
+        let index = i32::from(parameter % 5) - 2;
+        match byte % 11 {
+            0 => {
+                let architecture = if parameter & 2 == 0 {
+                    b"gemma4".as_slice()
+                } else {
+                    b"other".as_slice()
+                };
+                let parameters = gemma4_parameters(input, parameter);
+                if parameter & 0x80 == 0 {
+                    let _ = actor.process_event(gemma4_event::ContractBegin::validation(
+                        architecture,
+                        model,
+                        &parameters,
+                        i32::from(parameter % 4) - 1,
+                    ));
+                } else {
+                    let _ = actor.process_event(gemma4_event::ContractBegin::new(
+                        architecture,
+                        model,
+                        &parameters,
+                    ));
+                }
+            }
+            1 => {
+                let _ = actor.process_event(gemma4_event::BlockBuild::new(index));
+            }
+            2 => {
+                let _ = actor.process_event(gemma4_event::TopologyBuild::new());
+            }
+            3 => {
+                let _ = actor.process_event(gemma4_event::PlanBuild::new());
+            }
+            4 => {
+                let _ = actor.process_event(gemma4_event::BlockValidation::new(index));
+            }
+            5 => {
+                let _ = actor.process_event(gemma4_event::BlockAudit::new(index));
+            }
+            6 => {
+                let family = QuantizedStageFamily::ALL
+                    [usize::from(parameter) % QuantizedStageFamily::ALL.len()];
+                let _ = actor.process_event(gemma4_event::StageAudit::new(family));
+            }
+            7 => {
+                let _ = actor.process_event(gemma4_event::ContractVisit::new());
+            }
+            8 => {
+                let _ = actor.process_event(gemma4_event::BlockVisit::new(index));
+            }
+            9 => {
+                let _ = actor.process_event(gemma4_event::ContractReset::new());
+            }
+            _ => {
+                let _ = actor.process_event(gemma4_event::StorageRelease::new());
+            }
+        }
+    }
+}
+
 fn layer(selector: u8, shortconv: bool) -> LayerExecution {
     LayerExecution::new(
         if shortconv {
@@ -614,4 +740,5 @@ fuzz_target!(|input: &[u8]| {
     fuzz_llama_protocol(input);
     fuzz_lfm2_protocol(input);
     fuzz_qwen3_protocol(input);
+    fuzz_gemma4_protocol(input);
 });

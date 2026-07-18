@@ -92,7 +92,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/emel-model-vocab-parity.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
 
 EMEL_CPP_SOURCE_DIR="$SOURCE_REPO" \
-  "$ROOT/scripts/paritychecker.sh" --suite=token-profile --no-update \
+  bash "$ROOT/scripts/paritychecker.sh" --suite=token-profile --no-update \
   >"$WORK/token-profile-parity.log"
 grep -qx 'Tokenizer profile independent C++/Rust live comparison passed' \
   "$WORK/token-profile-parity.log"

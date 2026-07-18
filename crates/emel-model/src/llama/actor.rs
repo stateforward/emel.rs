@@ -84,7 +84,7 @@ impl Llama {
                 event: crate::attention_family::event::ContractBegin::new(
                     event.architecture,
                     event.model,
-                    parameters,
+                    &parameters,
                 ),
                 begin_result: &begin_result,
                 global_result: &global_result,
@@ -97,11 +97,19 @@ impl Llama {
 
     pub(crate) fn block_build(&mut self, event: event::BlockBuild) -> Result<(), Error> {
         let child_result = Cell::new(Err(Error::Internal));
+        let key_length = Cell::new(0);
+        let value_length = Cell::new(0);
+        let rope_dimension = Cell::new(0);
+        let rope_frequency = Cell::new(0.0);
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
             .process_event(LlamaMachineEvents::Block(BlockRuntime {
                 event,
                 child_result: &child_result,
+                key_length: &key_length,
+                value_length: &value_length,
+                rope_dimension: &rope_dimension,
+                rope_frequency: &rope_frequency,
                 result: &result,
             }))
             .map_err(|_| Error::Internal)?;

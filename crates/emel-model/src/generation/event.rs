@@ -190,17 +190,34 @@ impl<'a> GlobalBindings<'a> {
 pub struct AttentionBlock {
     pub(super) index: i32,
     pub(super) layer: LayerExecution,
+    require_dedicated_value: bool,
 }
 impl AttentionBlock {
     #[must_use]
     pub const fn new(index: i32, layer: LayerExecution) -> Self {
-        Self { index, layer }
+        Self {
+            index,
+            layer,
+            require_dedicated_value: false,
+        }
+    }
+    /// Preserves a source validation requirement while retaining the selected shared-value route.
+    #[must_use]
+    pub(crate) const fn requiring_dedicated_value(index: i32, layer: LayerExecution) -> Self {
+        Self {
+            index,
+            layer,
+            require_dedicated_value: true,
+        }
     }
     pub(super) fn requires_qk_norm(self) -> bool {
         self.layer.qk_norm_route() != AttentionQkNormRoute::None
     }
     pub(super) fn uses_shared_value(self) -> bool {
         self.layer.value_route() == AttentionValueRoute::SharedKeyValue
+    }
+    pub(super) const fn requires_dedicated_value(self) -> bool {
+        self.require_dedicated_value
     }
 }
 

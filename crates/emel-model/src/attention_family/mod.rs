@@ -25,7 +25,14 @@ macro_rules! forward_effects {
 
 /// Implements only the generated callback adapter; transition rows remain local.
 macro_rules! impl_machine_context {
-    ($trait_name:ident, $policy:ty) => {
+    (
+        $trait_name:ident,
+        $policy:ty
+        $(;
+            guards { $($extra_guard:ident: $extra_guard_event:ty),+ $(,)? }
+            effects { $($extra_effect:ident: $extra_effect_event:ty),+ $(,)? }
+        )?
+    ) => {
         impl $trait_name for $crate::attention_family::context::Context<$policy> {
             $crate::attention_family::forward_guards!($crate::attention_family::context::Context<$policy>;
                 guard_begin_valid: $crate::attention_family::context::BeginRuntime<'_>,
@@ -65,6 +72,12 @@ macro_rules! impl_machine_context {
                 guard_release_child_error: $crate::attention_family::context::ReleaseRuntime<'_>,
                 guard_never: $crate::attention_family::context::UnexpectedRuntime,
             );
+            $(
+                $crate::attention_family::forward_guards!(
+                    $crate::attention_family::context::Context<$policy>;
+                    $($extra_guard: $extra_guard_event),+
+                );
+            )?
             $crate::attention_family::forward_effects!($crate::attention_family::context::Context<$policy>;
                 effect_begin_child: $crate::attention_family::context::BeginRuntime<'_>,
                 effect_global_child: $crate::attention_family::context::BeginRuntime<'_>,
@@ -111,6 +124,12 @@ macro_rules! impl_machine_context {
                 effect_release_error: $crate::attention_family::context::ReleaseRuntime<'_>,
                 effect_busy_release: $crate::attention_family::context::ReleaseRuntime<'_>,
             );
+            $(
+                $crate::attention_family::forward_effects!(
+                    $crate::attention_family::context::Context<$policy>;
+                    $($extra_effect: $extra_effect_event),+
+                );
+            )?
             fn effect_unexpected(&mut self) -> Result<(), ()> {
                 <$crate::attention_family::context::Context<$policy>>::effect_unexpected(self)
             }

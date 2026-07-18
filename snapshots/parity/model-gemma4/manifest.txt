@@ -1,0 +1,30 @@
+model-gemma4-parity-snapshot/v1
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_gemma4_detail_header_blob=5ee94dcc8554ef8e9de0a51007acae6bb58565c9
+source_gemma4_detail_implementation_blob=ac9cc9757a5d6e97ebfbd1ef905d01f4af34dee4
+scope=pinned_source_built_model_no_real_fixture
+contract blocks=35 tensors=333 nodes=333 workspace=2045952 prefill=131072 decode=1 tied=1
+block=0 window=1 value=0 v_norm=0 qk_norm=1 key=256 val=256 rope=256 freq=10000 shared_alias=0
+block=4 window=0 value=0 v_norm=0 qk_norm=1 key=512 val=512 rope=512 freq=1000000 shared_alias=0
+block=14 window=0 value=0 v_norm=0 qk_norm=1 key=512 val=512 rope=512 freq=1000000 shared_alias=0
+block=15 window=1 value=1 v_norm=1 qk_norm=1 key=256 val=256 rope=256 freq=10000 shared_alias=1
+stage=token_embedding type=q2_k contract=approved_dense_f32_by_contract consistent=1
+stage=output_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=output type=q2_k contract=native_quantized consistent=1
+stage=attention_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_q type=f32 contract=disallowed_fallback consistent=1
+stage=attention_k type=q6_k contract=native_quantized consistent=1
+stage=attention_v type=q6_k contract=native_quantized consistent=1
+stage=attention_q_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_k_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_output type=f32 contract=disallowed_fallback consistent=1
+stage=feed_forward_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=feed_forward_gate type=f32 contract=disallowed_fallback consistent=1
+stage=feed_forward_down type=f32 contract=disallowed_fallback consistent=1
+stage=feed_forward_up type=f32 contract=disallowed_fallback consistent=1
+proof_token_sha256=0b5a4e731f1dc3b26c1884318563ba3b260494991e6bd6e654a089576088717c
+source_inventory_sha256=e0da02de426d5330ef57eb22d3dee137ce1c7827861a1b862a1b51fb5bdfc9e1
+source_owner_map_sha256=78ea286a1b80a55d735963700c0c8c6437cfa955345a13990045724ea1aab2ab
+canonical_ast_inventory_sha256=240554f572f10c2469807e2e8f09325494d7a878e1eb608a052ef297b3a81ecc
+reference_tool_sha256=0b45c86bc9c2758197320b255e2c8ff0de959e48fb101ef21f08345049e16710
+reference_catalog_helper_sha256=7a647756db55e6279a3869e4a87ff2f582e8f59db02bb5f4666c35edd5a11aaf

@@ -8,6 +8,7 @@
 pub(crate) mod attention_family;
 pub mod catalog;
 pub(crate) mod data;
+pub mod gemma4;
 pub mod generation;
 pub mod generation_audit;
 pub mod lfm2;

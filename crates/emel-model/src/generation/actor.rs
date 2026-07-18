@@ -723,18 +723,40 @@ impl GenerationBuilderStateMachineContext for Context {
     fn guard_attention_shared(&self, event: &AttentionRuntime<'_>) -> Result<bool, ()> {
         Ok(self.attention_request_base(event)
             && !event.event.requires_qk_norm()
-            && event.event.uses_shared_value())
+            && event.event.uses_shared_value()
+            && !event.event.requires_dedicated_value())
     }
     fn guard_attention_qk_shared(&self, event: &AttentionRuntime<'_>) -> Result<bool, ()> {
         Ok(self.attention_request_base(event)
             && event.event.requires_qk_norm()
-            && event.event.uses_shared_value())
+            && event.event.uses_shared_value()
+            && !event.event.requires_dedicated_value())
+    }
+    fn guard_attention_shared_required_value(
+        &self,
+        event: &AttentionRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(self.attention_request_base(event)
+            && !event.event.requires_qk_norm()
+            && event.event.uses_shared_value()
+            && event.event.requires_dedicated_value())
+    }
+    fn guard_attention_qk_shared_required_value(
+        &self,
+        event: &AttentionRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(self.attention_request_base(event)
+            && event.event.requires_qk_norm()
+            && event.event.uses_shared_value()
+            && event.event.requires_dedicated_value())
     }
     fn guard_attention_invalid(&self, event: &AttentionRuntime<'_>) -> Result<bool, ()> {
         Ok(!self.guard_attention_plain(event)?
             && !self.guard_attention_qk(event)?
             && !self.guard_attention_shared(event)?
-            && !self.guard_attention_qk_shared(event)?)
+            && !self.guard_attention_qk_shared(event)?
+            && !self.guard_attention_shared_required_value(event)?
+            && !self.guard_attention_qk_shared_required_value(event)?)
     }
     fn effect_query_attention_plain(&mut self, event: AttentionRuntime<'_>) -> Result<(), ()> {
         self.query_attention_dedicated(event);
@@ -754,14 +776,29 @@ impl GenerationBuilderStateMachineContext for Context {
         self.query_attention_qk(event);
         Ok(())
     }
+    fn effect_query_attention_shared_required_value(
+        &mut self,
+        event: AttentionRuntime<'_>,
+    ) -> Result<(), ()> {
+        self.query_attention_dedicated(event);
+        Ok(())
+    }
+    fn effect_query_attention_qk_shared_required_value(
+        &mut self,
+        event: AttentionRuntime<'_>,
+    ) -> Result<(), ()> {
+        self.query_attention_dedicated(event);
+        self.query_attention_qk(event);
+        Ok(())
+    }
     fn guard_block_queries_valid(&self, event: &AttentionRuntime<'_>) -> Result<bool, ()> {
         let required = if event.event.requires_qk_norm() {
-            if event.event.uses_shared_value() {
+            if event.event.uses_shared_value() && !event.event.requires_dedicated_value() {
                 &ATTN_QK_SHARED[..]
             } else {
                 &ATTN_QK[..]
             }
-        } else if event.event.uses_shared_value() {
+        } else if event.event.uses_shared_value() && !event.event.requires_dedicated_value() {
             &ATTN_SHARED[..]
         } else {
             &ATTN_PLAIN[..]
@@ -770,12 +807,12 @@ impl GenerationBuilderStateMachineContext for Context {
     }
     fn guard_block_queries_missing(&self, event: &AttentionRuntime<'_>) -> Result<bool, ()> {
         let required = if event.event.requires_qk_norm() {
-            if event.event.uses_shared_value() {
+            if event.event.uses_shared_value() && !event.event.requires_dedicated_value() {
                 &ATTN_QK_SHARED[..]
             } else {
                 &ATTN_QK[..]
             }
-        } else if event.event.uses_shared_value() {
+        } else if event.event.uses_shared_value() && !event.event.requires_dedicated_value() {
             &ATTN_SHARED[..]
         } else {
             &ATTN_PLAIN[..]

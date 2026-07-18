@@ -827,6 +827,15 @@ run_model_catalog_parity() {
     mode=(--live)
   fi
   if [[ ${#mode[@]} -eq 0 ]]; then
+    env -u CXX -u SDKROOT \
+      EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      bash "$ROOT_DIR/scripts/model-gemma4-parity.sh"
+  else
+    env -u CXX -u SDKROOT \
+      EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      bash "$ROOT_DIR/scripts/model-gemma4-parity.sh" "${mode[0]}"
+  fi
+  if [[ ${#mode[@]} -eq 0 ]]; then
     EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
       EMEL_MODEL_CATALOG_PARITY_BUILD_DIR="$MODEL_CATALOG_BUILD_DIR" \
       EMEL_MODEL_CATALOG_PARITY_SNAPSHOT="$MODEL_CATALOG_SNAPSHOT" \
@@ -934,7 +943,7 @@ run_model_vocab_parity() {
   local candidate="$MODEL_VOCAB_BUILD_DIR/manifest.observed.txt"
   mkdir -p "$MODEL_VOCAB_BUILD_DIR"
   EMEL_CPP_SOURCE_REPO="$EMEL_CPP_SOURCE" \
-    "$ROOT_DIR/scripts/model-vocab-parity.sh" >"$candidate"
+    bash "$ROOT_DIR/scripts/model-vocab-parity.sh" >"$candidate"
   grep -qx 'result=match' "$candidate"
 
   if $RUN_UPDATE; then
