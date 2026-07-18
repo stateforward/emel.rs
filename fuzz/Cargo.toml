@@ -93,6 +93,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "emel_model_catalog"
+path = "fuzz_targets/emel_model_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "emel_tensor_dtype"
 path = "fuzz_targets/emel_tensor_dtype.rs"
 test = false

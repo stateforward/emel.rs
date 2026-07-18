@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs, dead_code)]
 
+pub mod catalog;
 pub(crate) mod data;
 pub mod generation_audit;
 pub(crate) mod loader;

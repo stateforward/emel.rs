@@ -68,6 +68,7 @@ version = "0.1.0"
 dependencies = [
  "emel-gguf",
  "emel-io",
+ "emel-tensor",
  "emel-token",
  "stateforward-sml",
 ]

@@ -4,6 +4,7 @@ use allocation_counter as _;
 use emel_gguf as _;
 use emel_io as _;
 use emel_model as _;
+use emel_tensor as _;
 use emel_token as _;
 use sml as _;
 use std::fs;

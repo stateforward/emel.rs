@@ -34,6 +34,9 @@ token_profile_warmup_iterations=1000000
 kernel_capability_iterations=1000
 kernel_capability_runs=5
 kernel_capability_warmup_iterations=100
+model_catalog_iterations=200000
+model_catalog_runs=7
+model_catalog_warmup_iterations=20000
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -51,7 +54,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-catalog, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -67,6 +70,7 @@ for argument in "$@"; do
       model_vocabulary_iterations="${argument#*=}"
       token_profile_iterations="${argument#*=}"
       kernel_capability_iterations="${argument#*=}"
+      model_catalog_iterations="${argument#*=}"
       ;;
     --runs=*)
       runner_args+=("$argument")
@@ -74,6 +78,7 @@ for argument in "$@"; do
       model_vocabulary_runs="${argument#*=}"
       token_profile_runs="${argument#*=}"
       kernel_capability_runs="${argument#*=}"
+      model_catalog_runs="${argument#*=}"
       ;;
     --warmup-iterations=*)
       runner_args+=("$argument")
@@ -81,6 +86,7 @@ for argument in "$@"; do
       model_vocabulary_warmup_iterations="${argument#*=}"
       token_profile_warmup_iterations="${argument#*=}"
       kernel_capability_warmup_iterations="${argument#*=}"
+      model_catalog_warmup_iterations="${argument#*=}"
       ;;
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
@@ -89,6 +95,7 @@ for argument in "$@"; do
     --suite=io-loader) SUITE=io-loader; runner_args[0]=io-loader ;;
     --suite=model-tensor) SUITE=model-tensor; runner_args[0]=model-tensor ;;
     --suite=model-data) SUITE=model-data ;;
+    --suite=model-catalog) SUITE=model-catalog ;;
     --suite=model-vocabulary) SUITE=model-vocabulary ;;
     --suite=token-profile) SUITE=token-profile ;;
     --suite=kernel-capability) SUITE=kernel-capability ;;
@@ -100,6 +107,21 @@ done
 if $UPDATE && ! $SNAPSHOT_MODE; then
   echo "error: --update requires --snapshot or --compare" >&2
   exit 2
+fi
+
+if [[ "$SUITE" == "model-catalog" ]]; then
+  catalog_args=(
+    "--iterations=$model_catalog_iterations"
+    "--runs=$model_catalog_runs"
+    "--warmup-iterations=$model_catalog_warmup_iterations"
+  )
+  if $SNAPSHOT_MODE; then
+    catalog_args+=(--snapshot)
+  fi
+  if $UPDATE; then
+    catalog_args+=(--update)
+  fi
+  exec "$ROOT_DIR/scripts/model-catalog-bench.sh" "${catalog_args[@]}"
 fi
 
 if [[ -n "${EMEL_BENCH_RUNNER:-}" ]]; then

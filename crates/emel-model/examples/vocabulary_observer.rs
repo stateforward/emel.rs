@@ -649,3 +649,4 @@ fn main() {
         );
     }
 }
+use emel_tensor as _;

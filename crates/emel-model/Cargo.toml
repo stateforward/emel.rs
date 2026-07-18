@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 emel-gguf = { workspace = true }
 emel-io = { workspace = true }
+emel-tensor = { workspace = true }
 emel-token = { workspace = true }
 sml = { workspace = true }
 

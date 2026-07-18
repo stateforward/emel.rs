@@ -1,0 +1,33 @@
+model-catalog-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_data_header_blob=78a25b987423d8cbef17965a8ca92596ffc0ecef
+source_data_implementation_blob=b33ace170b569d076844a36146c7ca86d4ffa7fc
+source_generation_header_blob=d521cf68e1bf52a2a193bbdb460741772199b318
+source_generation_implementation_blob=099058ccd441d1dc6bebbb0c4994070d2f533c47
+fixture_llama_sha256=8ed06dc5bd84bce3154a2b7e751c45a56562691933ee25b5823393f909329a67
+fixture_lfm_sha256=855be85429300602eda72958547614703541b7d6dd965a8f8f6052b85a7aa935
+operand_sha256=4c0c663efcac31d2c927c729d2f88aeb3fc52dc07a55d8f47c6fce9a42fda4b7
+fixture_config=seven_records,exact_arbitrary_bytes,first_duplicate,empty_name,binding_edges,safe_malformed_range_prevention,reference_raw_range
+source_case=first_duplicate present=1 bindable=1 type=0 dims=2 data_size=128 name_hex=73616d65
+source_case=arbitrary_nul present=1 bindable=1 type=0 dims=2 data_size=128 name_hex=ff0078
+source_case=empty present=1 bindable=1 type=0 dims=2 data_size=128 name_hex=
+source_case=unbound present=1 bindable=0 type=0 dims=1 data_size=1 name_hex=756e626f756e64
+source_case=zero_size present=1 bindable=0 type=0 dims=1 data_size=0 name_hex=7a65726f2d73697a65
+source_case=five_dims present=1 bindable=1 type=0 dims=5 data_size=1 name_hex=666976652d676f6f64
+source_case=missing present=0 bindable=0
+actor_case=malformed_range_prevented outcome=error error=capacity
+actor_case=describe outcome=done tensor_count=7
+actor_case=wrong_identity outcome=error error=wrong_model_identity
+actor_case=reset outcome=done stale_error=stale_model_identity
+actor_case=release outcome=done tensor_capacity=7 name_capacity=36
+actor_case=unknown_wire outcome=error error=model_invalid
+reference_case=malformed_range canonical_bytes=0
+reference_tool_sha256=9956adb21eb7cad86afbae9c58e88228fbf923682a98604b336360c2fa433541
+fixture_llama_lfs_blob=49aa0ba91b29a4015339757cc67544f614e0fa21
+fixture_llama_bytes=35877760
+fixture_lfm_lfs_blob=d85b80d116e1e76ea5153585d3d3ab80457f7ea9
+fixture_lfm_bytes=246598496
+operand_spec=model-catalog-v1|synthetic=same,same,ff0078,empty,unbound,zero-size,five-good|benchmark=tensor.000..tensor.255,target=tensor.255|digest=fnv1a64,name,type,n_dims,active_dims,data_size,binding_status
+fixture_case=llama tensor_count=21 digest=809fe2edc0ba9b6d required_name=output_norm.weight required_digest=46ae7ae9ba4763b8
+fixture_case=lfm tensor_count=132 digest=a4075ad28ef207bd required_name=token_embd.weight required_digest=4aad6e2e43e35f46

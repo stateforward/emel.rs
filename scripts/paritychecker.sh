@@ -24,6 +24,8 @@ MODEL_TENSOR_SNAPSHOT="${EMEL_MODEL_TENSOR_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/
 MODEL_TENSOR_BUILD_DIR="${EMEL_MODEL_TENSOR_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-tensor-parity}"
 MODEL_DATA_SNAPSHOT="${EMEL_MODEL_DATA_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-data/manifest.txt}"
 MODEL_DATA_BUILD_DIR="${EMEL_MODEL_DATA_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-data-parity}"
+MODEL_CATALOG_SNAPSHOT="${EMEL_MODEL_CATALOG_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-catalog/manifest.txt}"
+MODEL_CATALOG_BUILD_DIR="${EMEL_MODEL_CATALOG_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-catalog-parity}"
 TOKEN_PROFILE_SNAPSHOT="${EMEL_TOKEN_PROFILE_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/token-profile/manifest.txt}"
 TOKEN_PROFILE_BUILD_DIR="${EMEL_TOKEN_PROFILE_PARITY_BUILD_DIR:-$ROOT_DIR/target/token-profile-parity}"
 MODEL_VOCAB_SNAPSHOT="${EMEL_MODEL_VOCAB_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-vocabulary/manifest.txt}"
@@ -80,7 +82,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, token-profile, model-vocab, or kernel-capability (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, model-catalog, token-profile, model-vocab, or kernel-capability (default: all)
 
 Model paths are checked during the live phase. Without paths, both the
 deterministic fixture corpus and the pinned independently sourced model run.
@@ -118,6 +120,7 @@ for argument in "$@"; do
     --suite=io-loader) SUITE=io-loader ;;
     --suite=model-tensor) SUITE=model-tensor ;;
     --suite=model-data) SUITE=model-data ;;
+    --suite=model-catalog) SUITE=model-catalog ;;
     --suite=token-profile) SUITE=token-profile ;;
     --suite=model-vocab) SUITE=model-vocab ;;
     --suite=kernel-capability) SUITE=kernel-capability ;;
@@ -147,6 +150,7 @@ RUN_IO_STAGED_READ=false
 RUN_IO_LOADER=false
 RUN_MODEL_TENSOR=false
 RUN_MODEL_DATA=false
+RUN_MODEL_CATALOG=false
 RUN_TOKEN_PROFILE=false
 RUN_MODEL_VOCAB=false
 RUN_KERNEL_CAPABILITY=false
@@ -159,6 +163,7 @@ case "$SUITE" in
     RUN_IO_LOADER=true
     RUN_MODEL_TENSOR=true
     RUN_MODEL_DATA=true
+    RUN_MODEL_CATALOG=true
     RUN_TOKEN_PROFILE=true
     RUN_MODEL_VOCAB=true
     RUN_KERNEL_CAPABILITY=true
@@ -170,6 +175,7 @@ case "$SUITE" in
   io-loader) RUN_IO_LOADER=true ;;
   model-tensor) RUN_MODEL_TENSOR=true ;;
   model-data) RUN_MODEL_DATA=true ;;
+  model-catalog) RUN_MODEL_CATALOG=true ;;
   token-profile) RUN_TOKEN_PROFILE=true ;;
   model-vocab) RUN_MODEL_VOCAB=true ;;
   kernel-capability) RUN_KERNEL_CAPABILITY=true ;;
@@ -813,6 +819,26 @@ run_model_data_parity() {
   echo "Model data parity passed with exact source identity (emel.cpp $EMEL_CPP_COMMIT)"
 }
 
+run_model_catalog_parity() {
+  local mode=()
+  if $RUN_UPDATE; then
+    mode=(--update)
+  elif $RUN_LIVE && ! $RUN_SNAPSHOT; then
+    mode=(--live)
+  fi
+  if [[ ${#mode[@]} -eq 0 ]]; then
+    EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      EMEL_MODEL_CATALOG_PARITY_BUILD_DIR="$MODEL_CATALOG_BUILD_DIR" \
+      EMEL_MODEL_CATALOG_PARITY_SNAPSHOT="$MODEL_CATALOG_SNAPSHOT" \
+      "$ROOT_DIR/scripts/model-catalog-parity.sh"
+  else
+    EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      EMEL_MODEL_CATALOG_PARITY_BUILD_DIR="$MODEL_CATALOG_BUILD_DIR" \
+      EMEL_MODEL_CATALOG_PARITY_SNAPSHOT="$MODEL_CATALOG_SNAPSHOT" \
+      "$ROOT_DIR/scripts/model-catalog-parity.sh" "${mode[0]}"
+  fi
+}
+
 run_token_profile_parity() {
   local model_blob pre_blob model_sha256 pre_sha256 candidate dependency_tree
   local materialized_source reference_build reference_output reference_runner
@@ -1007,6 +1033,9 @@ if $RUN_MODEL_TENSOR; then
 fi
 if $RUN_MODEL_DATA; then
   run_model_data_parity
+fi
+if $RUN_MODEL_CATALOG; then
+  run_model_catalog_parity
 fi
 if $RUN_TOKEN_PROFILE; then
   run_token_profile_parity

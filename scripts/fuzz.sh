@@ -10,7 +10,7 @@ VOCAB_CORPUS_DIR="$BUILD_DIR/model-vocabulary-corpus"
 DURATION_SECONDS="${EMEL_FUZZ_SECONDS:-10}"
 MAX_LEN="${EMEL_FUZZ_MAX_LEN:-65536}"
 MODE="run"
-TARGETS=(gguf_loader gguf_load gguf_lifecycle gguf_metadata emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor emel_token_profile emel_model_vocabulary emel_tensor_dtype)
+TARGETS=(gguf_loader gguf_load gguf_lifecycle gguf_metadata emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor emel_model_catalog emel_token_profile emel_model_vocabulary emel_tensor_dtype)
 
 usage() {
   cat <<'USAGE'
@@ -115,7 +115,7 @@ seed_vocabulary_corpus() {
 
 needs_gguf_corpus=false
 for target in "${TARGETS[@]}"; do
-  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" && "$target" != "emel_io_loader" && "$target" != "emel_model_tensor" && "$target" != "emel_token_profile" && "$target" != "emel_model_vocabulary" && "$target" != "emel_tensor_dtype" ]]; then
+  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" && "$target" != "emel_io_loader" && "$target" != "emel_model_tensor" && "$target" != "emel_model_catalog" && "$target" != "emel_token_profile" && "$target" != "emel_model_vocabulary" && "$target" != "emel_tensor_dtype" ]]; then
     needs_gguf_corpus=true
   fi
 done
@@ -147,7 +147,7 @@ for target in "${TARGETS[@]}"; do
     if [[ "$target" == "emel_model_vocabulary" ]]; then
       (cd "$FUZZ_DIR" && cargo fuzz run "$target" "$VOCAB_CORPUS_DIR" -- \
         -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
-    elif [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" || "$target" == "emel_io_loader" || "$target" == "emel_model_tensor" || "$target" == "emel_token_profile" || "$target" == "emel_tensor_dtype" ]]; then
+    elif [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" || "$target" == "emel_io_loader" || "$target" == "emel_model_tensor" || "$target" == "emel_model_catalog" || "$target" == "emel_token_profile" || "$target" == "emel_tensor_dtype" ]]; then
       (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
         -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
     else
