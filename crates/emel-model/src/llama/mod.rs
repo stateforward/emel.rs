@@ -1,31 +1,35 @@
-//! llama family bindings from `emel.cpp/src/emel/model/llama/`.
+//! Llama-family generation actor.
+//!
+//! This module ports the family-owned behavior in pinned
+//! `emel.cpp/src/emel/model/llama/any.hpp`, `detail.hpp`, and `detail.cpp`.
+//! Tensor lookup and capability resolution remain owned by the public common
+//! generation builder; this actor selects only the source-fixed Llama route.
 
-/// Family detail helpers (C++ `emel::model::llama::detail`).
-#[derive(Debug, Default)]
-pub struct Detail;
+mod actor;
+pub mod event;
+mod hparams;
+mod sm;
 
-impl Detail {
-    /// Bind family weight map / layers (TODO).
-    pub fn bind_layers() {
-        // TODO: convert from emel.cpp/src/emel/model/llama/detail.cpp and detail.hpp
-        todo!("TODO: port llama::detail::bind_layers from emel.cpp/src/emel/model/llama/detail.cpp")
-    }
+pub use actor::Llama;
+pub use event::Parameters;
+pub use hparams::load_hparams;
 
-    /// Load family-specific hparams (TODO).
-    pub fn load_hparams() {
-        // TODO: convert from emel.cpp/src/emel/model/llama/detail.cpp and detail.hpp
-        todo!("TODO: port llama::detail::load_hparams from emel.cpp/src/emel/model/llama/detail.hpp")
-    }
-}
+pub use crate::generation::{
+    AttentionQkNormRoute, AttentionVNormRoute, AttentionValueRoute, AttentionWindowRoute,
+    ContractDescriptor, LayerExecution, QuantizedContractKind, QuantizedStageFamily, ResidualRoute,
+    StageAudit, StepKind, StepPlan, TopologyDescriptor, tensor_type_name,
+};
 
-/// Family façade (C++ `emel::model::llama` any surface).
-#[derive(Debug, Default)]
-pub struct Any;
+/// Pinned global tensor count used by Llama topology construction.
+pub const GLOBAL_TENSOR_COUNT: u32 = 3;
+/// Pinned per-block topology tensor count.
+pub const BLOCK_TENSOR_COUNT: u32 = 8;
+/// Source-fixed token embedding tensor name.
+pub const TOKEN_EMBEDDING_NAME: &[u8] = b"token_embd.weight";
+/// Source-fixed output normalization tensor name.
+pub const OUTPUT_NORM_NAME: &[u8] = b"output_norm.weight";
+/// Source architecture name accepted by the family actor.
+pub const ARCHITECTURE_NAME: &[u8] = b"llama";
 
-impl Any {
-    /// Construct family binding (TODO).
-    pub fn bind() -> Self {
-        // TODO: convert from emel.cpp/src/emel/model/llama/any.hpp
-        todo!("TODO: port llama::Any from emel.cpp/src/emel/model/llama/any.hpp")
-    }
-}
+#[cfg(test)]
+mod tests;

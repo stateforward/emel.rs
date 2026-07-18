@@ -1,0 +1,12 @@
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_llama_any_blob: 430ba6a8897854b5f58660d3f4d51d006727559e
+# source_llama_detail_header_blob: 91f96245d29a22aa83c570cb4fe8bc8cf9e1d081
+# source_llama_detail_implementation_blob: c78e3656d41772dcc4dba5c46623d9f2fec784ed
+# benchmark_operand: same alternating completed plain-attention Llama block indices 0 and 1; Rust public family BlockVisit vs C++ public family lookup_block_view; full descriptor black-boxed and nonzero index checksum observed
+# benchmark_config: iterations=1000000 runs=11 warmup_iterations=100000 process_runs=5 sample_policy=median_paired_process_ratio scheduling=darwin-throughput-0-latency-0 max_ratio=2.0
+model/llama/block_visit/process run=1 cpp_ns_per_op=15.416 rust_ns_per_op=5 paired_ratio=0.324338
+model/llama/block_visit/process run=2 cpp_ns_per_op=15.069 rust_ns_per_op=5 paired_ratio=0.331807
+model/llama/block_visit/process run=3 cpp_ns_per_op=15.066 rust_ns_per_op=5 paired_ratio=0.331873
+model/llama/block_visit/process run=4 cpp_ns_per_op=15.446 rust_ns_per_op=5 paired_ratio=0.323708
+model/llama/block_visit/process run=5 cpp_ns_per_op=15.236 rust_ns_per_op=5 paired_ratio=0.328170
+model/llama/block_visit rust_median_ns_per_op=5 cpp_median_ns_per_op=15.236 paired_ratio_median=0.328170 outcome=found checksum=5500000

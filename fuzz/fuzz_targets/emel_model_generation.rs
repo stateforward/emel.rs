@@ -14,6 +14,8 @@ use emel_model::generation::{
     AttentionQkNormRoute, AttentionVNormRoute, AttentionValueRoute, AttentionWindowRoute, Builder,
     LayerExecution, QuantizedStageFamily, ResidualRoute,
 };
+use emel_model::llama::event as llama_event;
+use emel_model::llama::{Llama, Parameters as LlamaParameters};
 use libfuzzer_sys::fuzz_target;
 
 const ATTENTION_NAMES: [&[u8]; 14] = [
@@ -78,6 +80,117 @@ fn actor(input: &[u8], shortconv: bool) -> (Builder, ModelIdentity) {
         .expect("bind");
     let model = catalog.process_event(SealModel::new()).expect("seal");
     (Builder::new(catalog, Resolver::new()), model)
+}
+
+fn llama_actor(input: &[u8]) -> (Llama, ModelIdentity) {
+    let names = &ATTENTION_NAMES;
+    let name_bytes = names.iter().map(|name| name.len()).sum();
+    let mut storage =
+        CatalogStorage::with_capacity(names.len(), name_bytes, names.len()).expect("bounded");
+    for (index, name) in names.iter().enumerate() {
+        let selector = input.get(index).copied().unwrap_or(index as u8) as usize;
+        storage
+            .push_tensor(TensorInput::new(
+                name,
+                VALID_WIRE_TYPES[selector % VALID_WIRE_TYPES.len()],
+                1,
+                [32, 1, 1, 1],
+                u64::try_from(index).expect("bounded") * 64,
+                true,
+            ))
+            .expect("valid tensor");
+    }
+    let mut catalog = Catalog::try_new().expect("catalog");
+    catalog
+        .process_event(BindStorage::new(storage))
+        .expect("bind");
+    let model = catalog.process_event(SealModel::new()).expect("seal");
+    let actor = Llama::new(
+        catalog,
+        Resolver::new(),
+        llama_event::Storage::with_block_capacity(2).expect("storage"),
+    )
+    .expect("Llama actor");
+    (actor, model)
+}
+
+fn llama_parameters(selector: u8) -> LlamaParameters {
+    LlamaParameters {
+        context_length: i32::from(selector).wrapping_sub(64),
+        embedding_length: i32::from(selector).wrapping_sub(32),
+        embedding_length_out: i32::from(selector),
+        feed_forward_length: i32::from(selector.rotate_left(1)),
+        attention_head_count: i32::from(selector & 31),
+        attention_head_count_kv: i32::from(selector & 15),
+        rope_dimension_count: i32::from(selector.rotate_left(2)),
+        block_count: i32::from(selector % 5) - 1,
+        vocab_size: i32::from(selector) * 128,
+        attention_layer_norm_epsilon: f32::from(selector),
+        attention_layer_norm_rms_epsilon: f32::from(selector.rotate_left(1)),
+        attention_clamp_kqv: f32::from(selector.rotate_left(2)),
+        attn_logit_softcapping: f32::from(selector.rotate_left(3)),
+        final_logit_softcapping: f32::from(selector.rotate_left(4)),
+        residual_scale: f32::from(selector.rotate_left(5)),
+        embedding_scale: f32::from(selector.rotate_left(6)),
+        rope_freq_base: f32::from(selector) * 100.0,
+        rope_freq_base_swa: f32::from(selector) * 1000.0,
+        attention_key_length: i32::from(selector.rotate_left(1)),
+        attention_value_length: i32::from(selector.rotate_right(1)),
+    }
+}
+
+fn fuzz_llama_protocol(input: &[u8]) {
+    let (mut actor, model) = llama_actor(input);
+    for (step, byte) in input.iter().copied().enumerate().take(128) {
+        let parameter = input.get(step + 1).copied().unwrap_or_default();
+        let index = i32::from(parameter % 5) - 2;
+        match byte % 11 {
+            0 => {
+                let architecture = if parameter & 1 == 0 {
+                    b"llama".as_slice()
+                } else {
+                    b"other".as_slice()
+                };
+                let _ = actor.process_event(llama_event::ContractBegin::new(
+                    architecture,
+                    model,
+                    llama_parameters(parameter),
+                ));
+            }
+            1 => {
+                let _ = actor.process_event(llama_event::BlockBuild::new(index));
+            }
+            2 => {
+                let _ = actor.process_event(llama_event::TopologyBuild::new());
+            }
+            3 => {
+                let _ = actor.process_event(llama_event::PlanBuild::new());
+            }
+            4 => {
+                let _ = actor.process_event(llama_event::BlockValidation::new(index));
+            }
+            5 => {
+                let _ = actor.process_event(llama_event::BlockAudit::new(index));
+            }
+            6 => {
+                let family = QuantizedStageFamily::ALL
+                    [usize::from(parameter) % QuantizedStageFamily::ALL.len()];
+                let _ = actor.process_event(llama_event::StageAudit::new(family));
+            }
+            7 => {
+                let _ = actor.process_event(llama_event::ContractVisit::new());
+            }
+            8 => {
+                let _ = actor.process_event(llama_event::BlockVisit::new(index));
+            }
+            9 => {
+                let _ = actor.process_event(llama_event::ContractReset::new());
+            }
+            _ => {
+                let _ = actor.process_event(llama_event::StorageRelease::new());
+            }
+        }
+    }
 }
 
 fn layer(selector: u8, shortconv: bool) -> LayerExecution {
@@ -247,4 +360,5 @@ fuzz_target!(|input: &[u8]| {
     let shortconv = input.first().is_some_and(|byte| byte & 1 != 0);
     complete_selected(input, shortconv);
     fuzz_protocol(input, shortconv);
+    fuzz_llama_protocol(input);
 });

@@ -25,6 +25,9 @@ name = "tensor_parity"
 name = "generation_observer"
 
 [[example]]
+name = "llama_observer"
+
+[[example]]
 name = "vocabulary_observer"
 
 [lints]
