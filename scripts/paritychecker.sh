@@ -6,6 +6,7 @@ BUILD_DIR="${EMEL_GGUF_PARITY_BUILD_DIR:-$ROOT_DIR/target/gguf-parity}"
 FIXTURE_DIR="$BUILD_DIR/fixtures"
 REFERENCE_BUILD_DIR="$BUILD_DIR/llama-reference"
 SNAPSHOT="${EMEL_GGUF_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/gguf/manifest.txt}"
+LIVE_MODEL_SNAPSHOT="${EMEL_GGUF_LIVE_MODEL_SNAPSHOT:-$ROOT_DIR/snapshots/parity/gguf/live-model.txt}"
 IO_READ_SNAPSHOT="${EMEL_IO_READ_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-read/manifest.txt}"
 IO_READ_BUILD_DIR="${EMEL_IO_READ_PARITY_BUILD_DIR:-$ROOT_DIR/target/io-read-parity}"
 IO_MMAP_SNAPSHOT="${EMEL_IO_MMAP_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/io-mmap/manifest.txt}"
@@ -27,6 +28,10 @@ EMEL_CPP_MODEL_DATA_HEADER_BLOB=78a25b987423d8cbef17965a8ca92596ffc0ecef
 EMEL_CPP_MODEL_DATA_IMPLEMENTATION_BLOB=b33ace170b569d076844a36146c7ca86d4ffa7fc
 EMEL_CPP_MODEL_DATA_HEADER_SHA256=4b604d57fef1c22c8a9ebee36779a0c9cd4e7fe811856455d5cafd645498a151
 EMEL_CPP_MODEL_DATA_IMPLEMENTATION_SHA256=c8231f4feb2bc395a642bf3d66e74f5ee6ad243d706f277245b2b28c620c8816
+GGUF_LIVE_MODEL_RELATIVE=tests/models/Llama-68M-Chat-v1-Q2_K.gguf
+GGUF_LIVE_MODEL_LFS_BLOB=49aa0ba91b29a4015339757cc67544f614e0fa21
+GGUF_LIVE_MODEL_SHA256=8ed06dc5bd84bce3154a2b7e751c45a56562691933ee25b5823393f909329a67
+GGUF_LIVE_MODEL_BYTES=35877760
 EXPECTED_REF="$(tr -d '[:space:]' <"$ROOT_DIR/tools/llama-gguf-reference/reference_ref.txt")"
 RUN_SNAPSHOT=true
 RUN_LIVE=true
@@ -35,6 +40,7 @@ REFERENCE_SOURCE="${LLAMA_CPP_SOURCE_DIR:-}"
 REFERENCE_CONFIGURED=false
 SUITE=all
 models=()
+PINNED_LIVE_MODEL=
 
 usage() {
   cat <<'USAGE'
@@ -54,8 +60,8 @@ then checked-in snapshot verification.
   --update-only    run only snapshot refresh and its parity validation
   --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, or model-data (default: all)
 
-Model paths are checked during the live phase. Without paths, the deterministic
-fixture corpus is used.
+Model paths are checked during the live phase. Without paths, both the
+deterministic fixture corpus and the pinned independently sourced model run.
 USAGE
 }
 
@@ -135,8 +141,30 @@ case "$SUITE" in
   model-data) RUN_MODEL_DATA=true ;;
 esac
 
+if $RUN_GGUF || $RUN_IO_READ || $RUN_IO_MMAP || $RUN_IO_STAGED_READ || \
+  $RUN_IO_LOADER || $RUN_MODEL_TENSOR; then
+  if ! command -v cmake >/dev/null 2>&1; then
+    echo "error: cmake is required for the selected parity suite" >&2
+    exit 2
+  fi
+fi
+
 fixture_models=()
 if $RUN_GGUF; then
+  if ! command -v rg >/dev/null 2>&1; then
+    echo "error: rg is required for GGUF dependency-boundary checks" >&2
+    exit 2
+  fi
+  if rg -n 'WithMetadataDescriptor|MetadataDescriptor|MetadataKind' \
+      "$ROOT_DIR/crates/emel-model" >/dev/null; then
+    echo "error: emel-model must not consume the GGUF metadata descriptor event" >&2
+    exit 2
+  fi
+  if rg -n 'emel_gguf::loader|emel_gguf::[^;]*(KvEntry|TensorInfo)' \
+      "$ROOT_DIR/crates/emel-model" >/dev/null; then
+    echo "error: emel-model must not consume private or raw GGUF loader records" >&2
+    exit 2
+  fi
   cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p emel-gguf-parity
   RUST_RUNNER="$ROOT_DIR/target/debug/emel-gguf-parity"
   "$RUST_RUNNER" --write-fixtures "$FIXTURE_DIR"
@@ -155,6 +183,44 @@ sha256_file() {
     sha256sum "$1" | awk '{print $1}'
   else
     shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+prepare_pinned_live_model() {
+  local pointer expected_pointer digest bytes
+  if ! git -C "$EMEL_CPP_SOURCE" cat-file -e \
+      "$EMEL_CPP_COMMIT:$GGUF_LIVE_MODEL_RELATIVE" 2>/dev/null; then
+    echo "error: pinned emel.cpp GGUF source identity is unavailable" >&2
+    exit 1
+  fi
+  pointer="$(git -C "$EMEL_CPP_SOURCE" show \
+    "$EMEL_CPP_COMMIT:$GGUF_LIVE_MODEL_RELATIVE")"
+  expected_pointer="$(printf '%s\n%s\n%s' \
+    'version https://git-lfs.github.com/spec/v1' \
+    "oid sha256:$GGUF_LIVE_MODEL_SHA256" \
+    "size $GGUF_LIVE_MODEL_BYTES")"
+  if [[ "$pointer" != "$expected_pointer" ]]; then
+    echo "error: pinned real-model Git LFS identity drifted" >&2
+    exit 1
+  fi
+  if [[ "$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+      "$EMEL_CPP_COMMIT:$GGUF_LIVE_MODEL_RELATIVE")" != \
+      "$GGUF_LIVE_MODEL_LFS_BLOB" ]]; then
+    echo "error: pinned real-model source blob drifted" >&2
+    exit 1
+  fi
+
+  PINNED_LIVE_MODEL="$EMEL_CPP_SOURCE/$GGUF_LIVE_MODEL_RELATIVE"
+  if [[ ! -f "$PINNED_LIVE_MODEL" ]]; then
+    echo "error: pinned real GGUF is not materialized; fetch the emel.cpp LFS object" >&2
+    exit 1
+  fi
+  digest="$(sha256_file "$PINNED_LIVE_MODEL")"
+  bytes="$(wc -c <"$PINNED_LIVE_MODEL" | tr -d '[:space:]')"
+  if [[ "$digest" != "$GGUF_LIVE_MODEL_SHA256" || \
+        "$bytes" != "$GGUF_LIVE_MODEL_BYTES" ]]; then
+    echo "error: materialized pinned real GGUF identity drifted" >&2
+    exit 1
   fi
 }
 
@@ -209,6 +275,65 @@ run_reference() {
   fi
 }
 
+compare_live_model() {
+  local model="$1"
+  local label="$2"
+  local rust_output="$BUILD_DIR/rust.out"
+  local reference_output="$BUILD_DIR/reference.out"
+  configure_reference
+  "$RUST_RUNNER" "$model" >"$rust_output"
+  run_reference "$model" "$reference_output"
+  if ! diff -u "$reference_output" "$rust_output"; then
+    echo "GGUF live parity failed: $label" >&2
+    exit 1
+  fi
+  echo "GGUF live parity passed: $label"
+}
+
+write_live_model_evidence() {
+  local destination="$1"
+  {
+    echo "gguf-live-model-parity/v1"
+    echo "source_repository=https://github.com/stateforward/emel.cpp"
+    echo "source_commit=$EMEL_CPP_COMMIT"
+    echo "model=$GGUF_LIVE_MODEL_RELATIVE"
+    echo "model_lfs_blob=$GGUF_LIVE_MODEL_LFS_BLOB"
+    echo "model_sha256=$GGUF_LIVE_MODEL_SHA256"
+    echo "model_bytes=$GGUF_LIVE_MODEL_BYTES"
+    echo "reference_ref=$EXPECTED_REF"
+    echo "emel_lane=workspace-emel-gguf-public-loader-events"
+    echo "reference_lane=out-of-process-llama-gguf-reference"
+    echo "comparison=canonical-gguf-parity-v1-byte-exact"
+    echo "scope=all-metadata-descriptors-typed-values-and-tensor-descriptor-payload-digests"
+    echo "command=scripts/paritychecker.sh --suite=gguf"
+    echo "default_phases=update,live,snapshot"
+    echo "result=pass"
+  } >"$destination"
+}
+
+update_live_model_snapshot() {
+  local candidate="$BUILD_DIR/live-model.reference.txt"
+  prepare_pinned_live_model
+  compare_live_model "$PINNED_LIVE_MODEL" "$GGUF_LIVE_MODEL_RELATIVE"
+  write_live_model_evidence "$candidate"
+  mkdir -p "$(dirname "$LIVE_MODEL_SNAPSHOT")"
+  install -m 0644 "$candidate" "$LIVE_MODEL_SNAPSHOT"
+  echo "Updated pinned real-model parity evidence"
+}
+
+check_live_model_snapshot() {
+  local candidate="$BUILD_DIR/live-model.actual.txt"
+  if [[ ! -f "$LIVE_MODEL_SNAPSHOT" ]]; then
+    echo "error: missing live-model parity evidence: $LIVE_MODEL_SNAPSHOT" >&2
+    exit 1
+  fi
+  prepare_pinned_live_model
+  compare_live_model "$PINNED_LIVE_MODEL" "$GGUF_LIVE_MODEL_RELATIVE"
+  write_live_model_evidence "$candidate"
+  diff -u "$LIVE_MODEL_SNAPSHOT" "$candidate"
+  echo "GGUF pinned real-model snapshot passed"
+}
+
 write_manifest() {
   local runner="$1"
   local destination="$2"
@@ -243,25 +368,25 @@ check_snapshot() {
   write_manifest rust "$actual"
   diff -u "$SNAPSHOT" "$actual"
   echo "GGUF parity snapshot passed (${#fixture_models[@]} fixtures, llama.cpp $EXPECTED_REF)"
+  check_live_model_snapshot
 }
 
 live_parity() {
   configure_reference
   local selected=()
   if [[ ${#models[@]} -eq 0 ]]; then
-    selected=("${fixture_models[@]}")
+    prepare_pinned_live_model
+    selected=("${fixture_models[@]}" "$PINNED_LIVE_MODEL")
   else
     selected=("${models[@]}")
   fi
-  local model rust_output="$BUILD_DIR/rust.out" reference_output="$BUILD_DIR/reference.out"
+  local model label
   for model in "${selected[@]}"; do
-    "$RUST_RUNNER" "$model" >"$rust_output"
-    run_reference "$model" "$reference_output"
-    if ! diff -u "$reference_output" "$rust_output"; then
-      echo "GGUF live parity failed: $model" >&2
-      exit 1
+    label="$model"
+    if [[ "$model" == "$PINNED_LIVE_MODEL" ]]; then
+      label="$GGUF_LIVE_MODEL_RELATIVE"
     fi
-    echo "GGUF live parity passed: $model"
+    compare_live_model "$model" "$label"
   done
 }
 
@@ -278,6 +403,7 @@ update_snapshot() {
   mkdir -p "$(dirname "$SNAPSHOT")"
   install -m 0644 "$candidate" "$SNAPSHOT"
   echo "Updated GGUF parity snapshot from llama.cpp $EXPECTED_REF"
+  update_live_model_snapshot
 }
 
 run_io_read_parity() {

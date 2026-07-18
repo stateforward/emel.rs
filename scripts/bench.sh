@@ -369,7 +369,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" ]]; then
+if [[ "$SUITE" == "gguf" || "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -453,6 +453,69 @@ validate_io_read_artifact() {
     }
   ' "$artifact"; then
     echo "error: $label has an invalid or configuration-incoherent io/read/copy_1mib result" >&2
+    exit 1
+  fi
+}
+
+validate_gguf_artifact() {
+  local artifact="$1"
+  local label="$2"
+  local expected_iterations="$3"
+  local expected_runs="$4"
+  local expected
+  for expected in \
+    '# source_repository: ggml-org/llama.cpp' \
+    '# source_commit: ecbcb7ea9d3303097519723b264a8b5f1e977028' \
+    '# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index' \
+    '# benchmark_validation: public_typed_outcomes every_timed_observation exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125' \
+    '# benchmark_allocation: probe times Arc capability clone; load includes caller preallocation; parse reuses bound storage; string query times allocation-free RTC dispatch over a preloaded actor'; do
+    if [[ "$(grep -Fxc "$expected" "$artifact")" -ne 1 ]]; then
+      echo "error: $label must contain exactly one GGUF benchmark field: $expected" >&2
+      exit 1
+    fi
+  done
+  if ! awk -v expected_iterations="$expected_iterations" -v expected_runs="$expected_runs" '
+    /^#/ { next }
+    $1 == "gguf/probe/metadata_64" || $1 == "gguf/load/metadata_64" ||
+    $1 == "gguf/probe/tensors_64" || $1 == "gguf/parse/tensors_64" ||
+    $1 == "gguf/load/tensors_64" || $1 == "gguf/query/string_array_4096" {
+      cases[$1] += 1
+      case_name = $1
+      for (i = 2; i <= NF; ++i) {
+        if (split($i, part, "=") != 2) {
+          invalid = 1
+          continue
+        }
+        key = part[1]
+        if (key != "ns_per_op" && key != "iter" && key != "runs") {
+          invalid = 1
+          continue
+        }
+        compound = case_name SUBSEP key
+        if (seen[compound]++) {
+          invalid = 1
+          continue
+        }
+        values[compound] = part[2]
+      }
+      valid = seen[case_name SUBSEP "ns_per_op"] == 1 &&
+        values[case_name SUBSEP "ns_per_op"] + 0 > 0
+      valid = valid && seen[case_name SUBSEP "iter"] == 1 &&
+        ("value:" values[case_name SUBSEP "iter"]) == ("value:" expected_iterations)
+      valid = valid && seen[case_name SUBSEP "runs"] == 1 &&
+        ("value:" values[case_name SUBSEP "runs"]) == ("value:" expected_runs)
+      if (!valid) invalid = 1
+      next
+    }
+    NF { invalid = 1 }
+    END {
+      exit invalid || length(cases) != 6 ||
+        cases["gguf/probe/metadata_64"] != 1 || cases["gguf/load/metadata_64"] != 1 ||
+        cases["gguf/probe/tensors_64"] != 1 || cases["gguf/parse/tensors_64"] != 1 ||
+        cases["gguf/load/tensors_64"] != 1 || cases["gguf/query/string_array_4096"] != 1
+    }
+  ' "$artifact"; then
+    echo "error: $label has invalid or configuration-incoherent GGUF benchmark cases" >&2
     exit 1
   fi
 }
@@ -574,7 +637,13 @@ validate_model_data_artifact() {
   fi
 }
 
-if [[ "$SUITE" == "io-read" ]]; then
+if [[ "$SUITE" == "gguf" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  current_iterations="${current_config_values%% *}"
+  current_runs="${current_config_values#* }"
+  validate_gguf_artifact \
+    "$CURRENT" "current benchmark artifact" "$current_iterations" "$current_runs"
+elif [[ "$SUITE" == "io-read" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   current_iterations="${current_config_values%% *}"
   current_runs="${current_config_values#* }"
@@ -629,7 +698,23 @@ if [[ -z "$baseline_config" || "$baseline_config" != "$current_config" ]]; then
   exit 1
 fi
 
-if [[ "$SUITE" == "io-read" ]]; then
+if [[ "$SUITE" == "gguf" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  baseline_config_values="$(validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width")"
+  baseline_iterations="${baseline_config_values%% *}"
+  baseline_runs="${baseline_config_values#* }"
+  validate_gguf_artifact \
+    "$BASELINE" "benchmark baseline" "$baseline_iterations" "$baseline_runs"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: GGUF benchmark baseline architecture differs from current" >&2
+    exit 1
+  fi
+  for field in source_repository source_commit benchmark_fixture benchmark_validation benchmark_allocation; do
+    [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
+      echo "error: GGUF benchmark $field differs from baseline" >&2; exit 1; }
+  done
+elif [[ "$SUITE" == "io-read" ]]; then
   baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
   if [[ "$baseline_arch" != "$host_arch" ]]; then
     echo "error: benchmark baseline architecture differs from the current artifact" >&2

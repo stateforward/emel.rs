@@ -11,5 +11,8 @@ publish = false
 [dependencies]
 emel-gguf.workspace = true
 
+[dev-dependencies]
+allocation-counter = "=0.8.1"
+
 [lints]
 workspace = true

@@ -9,7 +9,7 @@ CORPUS_DIR="$BUILD_DIR/gguf-corpus"
 DURATION_SECONDS="${EMEL_FUZZ_SECONDS:-10}"
 MAX_LEN="${EMEL_FUZZ_MAX_LEN:-65536}"
 MODE="run"
-TARGETS=(gguf_loader gguf_load gguf_lifecycle emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor)
+TARGETS=(gguf_loader gguf_load gguf_lifecycle gguf_metadata emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor)
 
 usage() {
   cat <<'USAGE'

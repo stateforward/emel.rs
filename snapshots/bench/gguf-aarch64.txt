@@ -1,7 +1,14 @@
 # bench_host_arch: aarch64
+# bench_pointer_width: 64
 # benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
-gguf/probe/metadata_64 ns_per_op=4647.000 iter=1000 runs=5
-gguf/load/metadata_64 ns_per_op=9054.250 iter=1000 runs=5
-gguf/probe/tensors_64 ns_per_op=4586.791 iter=1000 runs=5
-gguf/parse/tensors_64 ns_per_op=4472.167 iter=1000 runs=5
-gguf/load/tensors_64 ns_per_op=8860.208 iter=1000 runs=5
+# source_repository: ggml-org/llama.cpp
+# source_commit: ecbcb7ea9d3303097519723b264a8b5f1e977028
+# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index
+# benchmark_validation: public_typed_outcomes every_timed_observation exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125
+# benchmark_allocation: probe times Arc capability clone; load includes caller preallocation; parse reuses bound storage; string query times allocation-free RTC dispatch over a preloaded actor
+gguf/probe/metadata_64 ns_per_op=248.708 iter=1000 runs=5
+gguf/load/metadata_64 ns_per_op=4887.792 iter=1000 runs=5
+gguf/probe/tensors_64 ns_per_op=414.916 iter=1000 runs=5
+gguf/parse/tensors_64 ns_per_op=4124.916 iter=1000 runs=5
+gguf/load/tensors_64 ns_per_op=4641.000 iter=1000 runs=5
+gguf/query/string_array_4096 ns_per_op=128257.833 iter=1000 runs=5

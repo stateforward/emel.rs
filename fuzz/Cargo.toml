@@ -35,6 +35,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gguf_metadata"
+path = "fuzz_targets/gguf_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "emel_io_read"
 path = "fuzz_targets/emel_io_read.rs"
 test = false

@@ -175,6 +175,7 @@ dependencies = [
 name = "emel-gguf"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "stateforward-sml",
 ]
 
@@ -182,6 +183,7 @@ dependencies = [
 name = "emel-gguf-parity"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
  "emel-gguf",
 ]
 

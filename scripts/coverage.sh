@@ -67,25 +67,20 @@ run_coverage() {
   local ignore_filename_regex="$3"
   shift 3
 
-  # Keep each campaign in its own freshly cleaned target directory. Running the
-  # report separately avoids cargo-llvm-cov expanding every unselected workspace
-  # package into a repeated absolute-path regex. That generated regex can exhaust
-  # the pinned LLVM regex engine as the workspace grows; it is redundant because
-  # the isolated target directory contains only the selected campaign's objects.
+  # Keep execution and reporting in one scoped cargo-llvm-cov command. A separate
+  # `llvm-cov report` invocation loses Cargo's package selection and can fold
+  # duplicate cfg(test) instantiations from the target directory into the line
+  # denominator even though the executed campaign was package-scoped.
   CARGO_LLVM_COV_TARGET_DIR="$target_dir" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
     --manifest-path "$ROOT_DIR/Cargo.toml" \
     --all-features \
     --locked \
     --branch \
-    --no-report \
-    "$@"
-  CARGO_LLVM_COV_TARGET_DIR="$target_dir" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov report \
-    --manifest-path "$ROOT_DIR/Cargo.toml" \
-    --locked \
     --ignore-filename-regex "$ignore_filename_regex" \
     --summary-only \
     --json \
-    --output-path "$report"
+    --output-path "$report" \
+    "$@"
 }
 
 echo "Running emel-gguf coverage"
