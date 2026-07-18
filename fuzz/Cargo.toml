@@ -84,6 +84,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "emel_model_vocabulary"
+path = "fuzz_targets/emel_model_vocabulary.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
 resolver = "3"

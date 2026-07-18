@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -d /opt/homebrew/bin ]]; then
+  export PATH="/opt/homebrew/bin:$PATH"
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${EMEL_GGUF_PARITY_BUILD_DIR:-$ROOT_DIR/target/gguf-parity}"
 FIXTURE_DIR="$BUILD_DIR/fixtures"
@@ -21,6 +25,8 @@ MODEL_DATA_SNAPSHOT="${EMEL_MODEL_DATA_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/pari
 MODEL_DATA_BUILD_DIR="${EMEL_MODEL_DATA_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-data-parity}"
 TOKEN_PROFILE_SNAPSHOT="${EMEL_TOKEN_PROFILE_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/token-profile/manifest.txt}"
 TOKEN_PROFILE_BUILD_DIR="${EMEL_TOKEN_PROFILE_PARITY_BUILD_DIR:-$ROOT_DIR/target/token-profile-parity}"
+MODEL_VOCAB_SNAPSHOT="${EMEL_MODEL_VOCAB_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-vocabulary/manifest.txt}"
+MODEL_VOCAB_BUILD_DIR="${EMEL_MODEL_VOCAB_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-vocabulary-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
@@ -64,7 +70,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, or token-profile (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, token-profile, or model-vocab (default: all)
 
 Model paths are checked during the live phase. Without paths, both the
 deterministic fixture corpus and the pinned independently sourced model run.
@@ -103,6 +109,7 @@ for argument in "$@"; do
     --suite=model-tensor) SUITE=model-tensor ;;
     --suite=model-data) SUITE=model-data ;;
     --suite=token-profile) SUITE=token-profile ;;
+    --suite=model-vocab) SUITE=model-vocab ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -130,6 +137,7 @@ RUN_IO_LOADER=false
 RUN_MODEL_TENSOR=false
 RUN_MODEL_DATA=false
 RUN_TOKEN_PROFILE=false
+RUN_MODEL_VOCAB=false
 case "$SUITE" in
   all)
     RUN_GGUF=true
@@ -140,6 +148,7 @@ case "$SUITE" in
     RUN_MODEL_TENSOR=true
     RUN_MODEL_DATA=true
     RUN_TOKEN_PROFILE=true
+    RUN_MODEL_VOCAB=true
     ;;
   gguf) RUN_GGUF=true ;;
   io-read) RUN_IO_READ=true ;;
@@ -149,10 +158,12 @@ case "$SUITE" in
   model-tensor) RUN_MODEL_TENSOR=true ;;
   model-data) RUN_MODEL_DATA=true ;;
   token-profile) RUN_TOKEN_PROFILE=true ;;
+  model-vocab) RUN_MODEL_VOCAB=true ;;
 esac
 
 if $RUN_GGUF || $RUN_IO_READ || $RUN_IO_MMAP || $RUN_IO_STAGED_READ || \
-  $RUN_IO_LOADER || $RUN_MODEL_TENSOR || $RUN_TOKEN_PROFILE; then
+  $RUN_IO_LOADER || $RUN_MODEL_TENSOR || $RUN_TOKEN_PROFILE || \
+  $RUN_MODEL_VOCAB; then
   if ! command -v cmake >/dev/null 2>&1; then
     echo "error: cmake is required for the selected parity suite" >&2
     exit 2
@@ -815,6 +826,31 @@ run_token_profile_parity() {
   echo "Tokenizer profile parity passed (10 model inputs including aliases/unknown, 61 pre inputs, unknown success)"
 }
 
+run_model_vocab_parity() {
+  local candidate="$MODEL_VOCAB_BUILD_DIR/manifest.observed.txt"
+  mkdir -p "$MODEL_VOCAB_BUILD_DIR"
+  EMEL_CPP_SOURCE_REPO="$EMEL_CPP_SOURCE" \
+    "$ROOT_DIR/scripts/model-vocab-parity.sh" >"$candidate"
+  grep -qx 'result=match' "$candidate"
+
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$MODEL_VOCAB_SNAPSHOT")"
+    install -m 0644 "$candidate" "$MODEL_VOCAB_SNAPSHOT"
+    echo "Updated model vocabulary parity snapshot from emel.cpp $EMEL_CPP_COMMIT"
+  fi
+  if $RUN_LIVE; then
+    echo "Model vocabulary independent C++/Rust live comparison passed"
+  fi
+  if $RUN_SNAPSHOT; then
+    if [[ ! -f "$MODEL_VOCAB_SNAPSHOT" ]]; then
+      echo "error: missing model vocabulary parity snapshot: $MODEL_VOCAB_SNAPSHOT" >&2
+      exit 1
+    fi
+    diff -u "$MODEL_VOCAB_SNAPSHOT" "$candidate"
+    echo "Model vocabulary checked snapshot passed"
+  fi
+}
+
 if $RUN_GGUF; then
   if $RUN_UPDATE; then
     update_snapshot
@@ -847,4 +883,7 @@ if $RUN_MODEL_DATA; then
 fi
 if $RUN_TOKEN_PROFILE; then
   run_token_profile_parity
+fi
+if $RUN_MODEL_VOCAB; then
+  run_model_vocab_parity
 fi

@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+emel-gguf = { workspace = true }
 emel-io = { workspace = true }
+emel-token = { workspace = true }
 sml = { workspace = true }
 
 [dev-dependencies]
@@ -16,6 +18,9 @@ allocation-counter = "=0.8.1"
 
 [[example]]
 name = "tensor_parity"
+
+[[example]]
+name = "vocabulary_observer"
 
 [lints]
 workspace = true

@@ -64,7 +64,9 @@ dependencies = [
 name = "emel-model"
 version = "0.1.0"
 dependencies = [
+ "emel-gguf",
  "emel-io",
+ "emel-token",
  "stateforward-sml",
 ]
 

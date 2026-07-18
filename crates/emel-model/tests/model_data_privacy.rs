@@ -56,3 +56,5 @@ fn model_data_schema_and_storage_are_not_public_api() {
     assert!(stderr.contains("private"), "{stderr}");
     assert!(stderr.contains("data"), "{stderr}");
 }
+use emel_gguf as _;
+use emel_token as _;

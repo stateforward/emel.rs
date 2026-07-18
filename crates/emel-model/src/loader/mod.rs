@@ -1,3 +1,7 @@
-//! Model loader SM scaffold (`emel.cpp/src/emel/model/loader/`).
+//! Model loader components.
 
+pub mod hparams;
 pub mod sm;
+
+#[cfg(test)]
+pub mod test_gguf;

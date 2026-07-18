@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ -d /opt/homebrew/bin ]]; then
+  export PATH="/opt/homebrew/bin:$PATH"
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${EMEL_BENCH_BUILD_DIR:-$ROOT_DIR/target/bench}"
 BASELINE_DIR="${EMEL_BENCH_BASELINE_DIR:-$ROOT_DIR/snapshots/bench}"
@@ -8,6 +12,10 @@ EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
 EMEL_CPP_MODEL_TENSOR_TREE=06306d4ffad3455fcf5df71dc692df52514b9865
+EMEL_CPP_MODEL_VOCAB_TREE=d2fd66887fbdef6e0894de9391155099839e625c
+EMEL_CPP_MODEL_VOCAB_DETAIL_BLOB=7c964f7449640fd7fe9eef21f4c14f3a65bf7b6a
+EMEL_MODEL_VOCAB_SML_COMMIT=49207123cd3f39767764bae774932cb48623f92f
+EMEL_MODEL_VOCAB_SML_SOURCE="${EMEL_STATEFORWARD_SML_SOURCE:-$EMEL_CPP_SOURCE/build/zig/_deps/stateforward_sml-src}"
 SNAPSHOT_MODE=false
 UPDATE=false
 SUITE=gguf
@@ -15,9 +23,20 @@ runner_args=(gguf)
 model_data_iterations=5
 model_data_runs=5
 model_data_warmup_iterations=1
+model_vocabulary_iterations=5
+model_vocabulary_runs=5
+model_vocabulary_warmup_iterations=1
 token_profile_iterations=10000000
 token_profile_runs=7
 token_profile_warmup_iterations=1000000
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
 
 usage() {
   cat <<'USAGE'
@@ -27,7 +46,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=token-profile
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-vocabulary, --suite=token-profile
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -40,16 +59,19 @@ for argument in "$@"; do
     --iterations=*)
       runner_args+=("$argument")
       model_data_iterations="${argument#*=}"
+      model_vocabulary_iterations="${argument#*=}"
       token_profile_iterations="${argument#*=}"
       ;;
     --runs=*)
       runner_args+=("$argument")
       model_data_runs="${argument#*=}"
+      model_vocabulary_runs="${argument#*=}"
       token_profile_runs="${argument#*=}"
       ;;
     --warmup-iterations=*)
       runner_args+=("$argument")
       model_data_warmup_iterations="${argument#*=}"
+      model_vocabulary_warmup_iterations="${argument#*=}"
       token_profile_warmup_iterations="${argument#*=}"
       ;;
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
@@ -59,6 +81,7 @@ for argument in "$@"; do
     --suite=io-loader) SUITE=io-loader; runner_args[0]=io-loader ;;
     --suite=model-tensor) SUITE=model-tensor; runner_args[0]=model-tensor ;;
     --suite=model-data) SUITE=model-data ;;
+    --suite=model-vocabulary) SUITE=model-vocabulary ;;
     --suite=token-profile) SUITE=token-profile ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
@@ -100,6 +123,136 @@ elif [[ "$SUITE" == "model-data" ]]; then
       -p emel-model --lib data::tests::benchmark_model_data_foundation -- \
       --ignored --exact --nocapture >"$raw_output"
   grep -E '^(# bench_|# benchmark_|# source_|model/data/)' "$raw_output" >"$CURRENT"
+elif [[ "$SUITE" == "model-vocabulary" ]]; then
+  real_fixture="${EMEL_MODEL_VOCAB_BENCH_FIXTURE:-$EMEL_CPP_SOURCE/tests/models/distilgpt2.Q2_K.gguf}"
+  [[ -f "$real_fixture" ]] || {
+    echo "error: required model vocabulary benchmark fixture is missing: $real_fixture" >&2
+    exit 2
+  }
+  [[ "$(sha256_file "$real_fixture")" == "b046ac09ba24a848e2140676fba58c1dcf2f19617e45b03524043eabdb556a31" ]] || {
+    echo "error: model vocabulary real benchmark fixture identity drifted" >&2
+    exit 2
+  }
+  [[ "$(git -C "$EMEL_CPP_SOURCE" rev-parse "$EMEL_CPP_COMMIT^{tree}")" == "$EMEL_CPP_MODEL_VOCAB_TREE" ]] || {
+    echo "error: emel.cpp model vocabulary source tree identity drifted" >&2
+    exit 2
+  }
+  [[ "$(git -C "$EMEL_CPP_SOURCE" rev-parse "$EMEL_CPP_COMMIT:src/emel/model/detail.cpp")" == "$EMEL_CPP_MODEL_VOCAB_DETAIL_BLOB" ]] || {
+    echo "error: emel.cpp model vocabulary detail identity drifted" >&2
+    exit 2
+  }
+  [[ "$(git -C "$EMEL_MODEL_VOCAB_SML_SOURCE" rev-parse HEAD)" == "$EMEL_MODEL_VOCAB_SML_COMMIT" ]] || {
+    echo "error: model vocabulary stateforward-sml identity drifted" >&2
+    exit 2
+  }
+
+  vocabulary_work="$(mktemp -d "${TMPDIR:-/tmp}/emel-model-vocabulary-bench.XXXXXX")"
+  mkdir -p "$vocabulary_work/source" "$vocabulary_work/fixtures"
+  cargo run --quiet --locked --release --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-model --example vocabulary_observer -- \
+    --write-benchmark-fixtures "$vocabulary_work/fixtures"
+  small_fixture="$vocabulary_work/fixtures/small.gguf"
+  boundary_fixture="$vocabulary_work/fixtures/gemma4-400001.gguf"
+  small_fixture_sha256="$(sha256_file "$small_fixture")"
+  boundary_fixture_sha256="$(sha256_file "$boundary_fixture")"
+
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" CMakeLists.txt cmake include src \
+    | tar -x -C "$vocabulary_work/source"
+  cmake -S "$vocabulary_work/source" -B "$vocabulary_work/build" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DEMEL_ENABLE_TESTS=OFF \
+    -DFETCHCONTENT_SOURCE_DIR_STATEFORWARD_SML="$EMEL_MODEL_VOCAB_SML_SOURCE" >/dev/null
+  cmake --build "$vocabulary_work/build" --target emel >/dev/null
+  "${CXX:-c++}" -std=c++20 -O2 \
+    -I"$vocabulary_work/source/include" \
+    -I"$vocabulary_work/source/src" \
+    -I"$EMEL_MODEL_VOCAB_SML_SOURCE/include" \
+    "$ROOT_DIR/tools/emel-model-vocab-reference/main.cpp" \
+    "$vocabulary_work/build/libemel.a" \
+    -o "$vocabulary_work/cpp-observer"
+
+  "$vocabulary_work/cpp-observer" --benchmark \
+    "$model_vocabulary_iterations" "$model_vocabulary_runs" \
+    "$model_vocabulary_warmup_iterations" \
+    "$small_fixture" "$real_fixture" "$boundary_fixture" \
+    >"$vocabulary_work/cpp.out"
+  cargo run --quiet --locked --release --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-model --example vocabulary_observer -- --benchmark \
+    "$model_vocabulary_iterations" "$model_vocabulary_runs" \
+    "$model_vocabulary_warmup_iterations" \
+    "$small_fixture" "$real_fixture" "$boundary_fixture" \
+    >"$vocabulary_work/rust.out"
+
+  {
+    printf '# bench_host_arch: %s\n' \
+      "$(rustc --print cfg | awk -F'"' '/^target_arch=/{print $2; exit}')"
+    printf '# bench_pointer_width: %s\n' "$(( $(getconf LONG_BIT) ))"
+    printf '# benchmark_config: iterations=%s runs=%s sample_policy=median warmup_iterations=%s\n' \
+      "$model_vocabulary_iterations" "$model_vocabulary_runs" \
+      "$model_vocabulary_warmup_iterations"
+    printf '# source_repository: stateforward/emel.cpp\n'
+    printf '# source_commit: %s\n' "$EMEL_CPP_COMMIT"
+    printf '# source_tree: %s\n' "$EMEL_CPP_MODEL_VOCAB_TREE"
+    printf '# source_detail_blob: %s\n' "$EMEL_CPP_MODEL_VOCAB_DETAIL_BLOB"
+    printf '# source_sml_commit: %s\n' "$EMEL_MODEL_VOCAB_SML_COMMIT"
+    printf '# reference_tool_sha256: %s\n' \
+      "$(sha256_file "$ROOT_DIR/tools/emel-model-vocab-reference/main.cpp")"
+    printf '# rust_tool_sha256: %s\n' \
+      "$(sha256_file "$ROOT_DIR/crates/emel-model/examples/vocabulary_observer.rs")"
+    printf '# fixture_small_sha256: %s\n' "$small_fixture_sha256"
+    printf '# fixture_real_sha256: %s\n' \
+      b046ac09ba24a848e2140676fba58c1dcf2f19617e45b03524043eabdb556a31
+    printf '# fixture_boundary_sha256: %s\n' "$boundary_fixture_sha256"
+    printf '# benchmark_fixture: identical GGUF bytes in both lanes; small=standard_2_tokens_1_merge real=distilgpt2.Q2_K.gguf boundary=gemma4_2_tokens_400001_merges\n'
+    printf '# benchmark_timing: fixture IO, GGUF parse, archive/build, actor construction, and bounded storage allocation excluded; repeated vocabulary materialization only\n'
+    printf '# benchmark_validation: full semantic digest and typed counts match across public C++ model facade and public Rust Load actor lanes; Rust dispatch allocations=0\n'
+    awk -v iterations="$model_vocabulary_iterations" \
+      -v runs="$model_vocabulary_runs" '
+      function field(name,    field_index, part) {
+        for (field_index = 1; field_index <= NF; ++field_index) {
+          split($field_index, part, "=")
+          if (part[1] == name) return part[2]
+        }
+        return ""
+      }
+      FNR == NR {
+        name = field("case")
+        cpp[name] = field("cpp_ns_per_op")
+        cpp_digest[name] = field("digest")
+        cpp_tokens[name] = field("token_count")
+        cpp_merges[name] = field("merge_count")
+        next
+      }
+      {
+        name = field("case")
+        rust = field("rust_ns_per_op")
+        digest = field("digest")
+        tokens = field("token_count")
+        merges = field("merge_count")
+        allocations = field("dispatch_allocations")
+        if (!(name in cpp) || cpp[name] + 0 <= 0 || rust + 0 <= 0 ||
+            digest != cpp_digest[name] || tokens != cpp_tokens[name] ||
+            merges != cpp_merges[name] || allocations != "0") {
+          print "invalid model vocabulary benchmark evidence for " name > "/dev/stderr"
+          failed = 1
+          next
+        }
+        ratio = rust / cpp[name]
+        if (ratio > 2.0) {
+          printf "model vocabulary source ratio %.6fx exceeds 2.0x for %s\n", ratio, name > "/dev/stderr"
+          failed = 1
+        }
+        printf "model/vocabulary/materialize_%s rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f digest=%s token_count=%s merge_count=%s dispatch_allocations=0 iter=%s runs=%s\n", \
+          name, rust, cpp[name], ratio, digest, tokens, merges, iterations, runs
+        seen[name] = 1
+      }
+      END {
+        if (length(cpp) != 3 || length(seen) != 3) failed = 1
+        exit failed
+      }
+    ' "$vocabulary_work/cpp.out" "$vocabulary_work/rust.out"
+  } >"$CURRENT"
+  cmake -E remove_directory "$vocabulary_work"
 elif [[ "$SUITE" == "io-mmap" ]]; then
   fixture="$BUILD_DIR/io-mmap-fixture.bin"
   EMEL_IO_MMAP_BENCH_FIXTURE="$fixture" \
@@ -385,7 +538,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "gguf" || "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" || "$SUITE" == "token-profile" ]]; then
+if [[ "$SUITE" == "gguf" || "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" || "$SUITE" == "model-vocabulary" || "$SUITE" == "token-profile" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -653,6 +806,73 @@ validate_model_data_artifact() {
   fi
 }
 
+validate_model_vocabulary_artifact() {
+  local artifact="$1"
+  local label="$2"
+  local expected
+  for expected in \
+    '# source_repository: stateforward/emel.cpp' \
+    '# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6' \
+    '# source_tree: d2fd66887fbdef6e0894de9391155099839e625c' \
+    '# source_detail_blob: 7c964f7449640fd7fe9eef21f4c14f3a65bf7b6a' \
+    '# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f' \
+    '# fixture_real_sha256: b046ac09ba24a848e2140676fba58c1dcf2f19617e45b03524043eabdb556a31' \
+    '# benchmark_fixture: identical GGUF bytes in both lanes; small=standard_2_tokens_1_merge real=distilgpt2.Q2_K.gguf boundary=gemma4_2_tokens_400001_merges' \
+    '# benchmark_timing: fixture IO, GGUF parse, archive/build, actor construction, and bounded storage allocation excluded; repeated vocabulary materialization only' \
+    '# benchmark_validation: full semantic digest and typed counts match across public C++ model facade and public Rust Load actor lanes; Rust dispatch allocations=0'; do
+    if [[ "$(grep -Fxc "$expected" "$artifact")" -ne 1 ]]; then
+      echo "error: $label must contain exactly one model-vocabulary field: $expected" >&2
+      exit 1
+    fi
+  done
+  if ! awk '
+    function value(name,    field_index, part) {
+      for (field_index = 2; field_index <= NF; ++field_index) {
+        split($field_index, part, "=")
+        if (part[1] == name) return part[2]
+      }
+      return ""
+    }
+    /^# benchmark_config: / {
+      expected_iterations = value("iterations")
+      expected_runs = value("runs")
+      next
+    }
+    /^# (reference_tool_sha256|rust_tool_sha256|fixture_small_sha256|fixture_boundary_sha256): / {
+      hashes += 1
+      if (length($3) != 64 || $3 !~ /^[0-9a-f]+$/) invalid = 1
+      next
+    }
+    /^#/ { next }
+    $1 == "model/vocabulary/materialize_small" ||
+    $1 == "model/vocabulary/materialize_real_distilgpt2" ||
+    $1 == "model/vocabulary/materialize_gemma4_400001" {
+      cases[$1] += 1
+      rust = value("rust_ns_per_op")
+      cpp = value("cpp_ns_per_op")
+      ratio = value("rust_vs_cpp_ratio")
+      digest = value("digest")
+      valid = rust + 0 > 0 && cpp + 0 > 0 && ratio + 0 > 0 && ratio + 0 <= 2.0
+      valid = valid && ((rust / cpp) - ratio < 0.00001) && (ratio - (rust / cpp) < 0.00001)
+      valid = valid && length(digest) == 16 && digest ~ /^[0-9a-f]+$/
+      valid = valid && value("dispatch_allocations") == "0"
+      valid = valid && value("token_count") ~ /^[0-9]+$/ && value("merge_count") ~ /^[0-9]+$/
+      valid = valid && value("iter") == expected_iterations && value("runs") == expected_runs
+      if (!valid) invalid = 1
+      next
+    }
+    NF { invalid = 1 }
+    END {
+      exit invalid || hashes != 4 || cases["model/vocabulary/materialize_small"] != 1 ||
+        cases["model/vocabulary/materialize_real_distilgpt2"] != 1 ||
+        cases["model/vocabulary/materialize_gemma4_400001"] != 1
+    }
+  ' "$artifact"; then
+    echo "error: $label has invalid model-vocabulary benchmark cases" >&2
+    exit 1
+  fi
+}
+
 validate_token_profile_artifact() {
   local artifact="$1"
   local label="$2"
@@ -724,6 +944,9 @@ elif [[ "$SUITE" == "model-tensor" ]]; then
 elif [[ "$SUITE" == "model-data" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   validate_model_data_artifact "$CURRENT" "current benchmark artifact"
+elif [[ "$SUITE" == "model-vocabulary" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  validate_model_vocabulary_artifact "$CURRENT" "current benchmark artifact"
 elif [[ "$SUITE" == "token-profile" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   validate_token_profile_artifact "$CURRENT" "current benchmark artifact"
@@ -879,6 +1102,21 @@ elif [[ "$SUITE" == "model-data" ]]; then
       exit 1
     }
   done
+elif [[ "$SUITE" == "model-vocabulary" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width" >/dev/null
+  validate_model_vocabulary_artifact "$BASELINE" "benchmark baseline"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: model vocabulary benchmark architecture differs from baseline" >&2
+    exit 1
+  fi
+  for field in source_repository source_commit source_tree source_detail_blob source_sml_commit reference_tool_sha256 rust_tool_sha256 fixture_small_sha256 fixture_real_sha256 fixture_boundary_sha256 benchmark_fixture benchmark_timing benchmark_validation; do
+    [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
+      echo "error: model vocabulary benchmark $field differs from baseline" >&2
+      exit 1
+    }
+  done
 elif [[ "$SUITE" == "token-profile" ]]; then
   baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
   baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
@@ -897,7 +1135,7 @@ elif [[ "$SUITE" == "token-profile" ]]; then
 fi
 
 max_ratio="${EMEL_BENCH_MAX_REGRESSION_RATIO:-2.0}"
-if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" ]]; then
+if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-vocabulary" ]]; then
   awk -v max_ratio="$max_ratio" -v suite="$SUITE" '
     function value(name,    field_index, part) {
       for (field_index = 2; field_index <= NF; ++field_index) {

@@ -6,10 +6,11 @@ FUZZ_DIR="$ROOT_DIR/fuzz"
 BUILD_DIR="${EMEL_FUZZ_BUILD_DIR:-$ROOT_DIR/target/fuzz}"
 GENERATED_FIXTURES="$BUILD_DIR/generated-fixtures"
 CORPUS_DIR="$BUILD_DIR/gguf-corpus"
+VOCAB_CORPUS_DIR="$BUILD_DIR/model-vocabulary-corpus"
 DURATION_SECONDS="${EMEL_FUZZ_SECONDS:-10}"
 MAX_LEN="${EMEL_FUZZ_MAX_LEN:-65536}"
 MODE="run"
-TARGETS=(gguf_loader gguf_load gguf_lifecycle gguf_metadata emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor emel_token_profile)
+TARGETS=(gguf_loader gguf_load gguf_lifecycle gguf_metadata emel_io_read emel_io_mmap emel_io_staged_read emel_io_loader emel_model_tensor emel_token_profile emel_model_vocabulary)
 
 usage() {
   cat <<'USAGE'
@@ -94,15 +95,36 @@ seed_corpus() {
   echo "Prepared GGUF fuzz corpus with $seed_count parity seeds and $corpus_count total inputs"
 }
 
+seed_vocabulary_corpus() {
+  mkdir -p "$VOCAB_CORPUS_DIR"
+  local index model pre wire scenario octal_model octal_pre octal_wire octal_scenario
+  for index in $(seq 0 60); do
+    model=$((index % 10))
+    pre=$index
+    wire=$((index % 13))
+    scenario=$((index % 4))
+    printf -v octal_model '%03o' "$model"
+    printf -v octal_pre '%03o' "$pre"
+    printf -v octal_wire '%03o' "$wire"
+    printf -v octal_scenario '%03o' "$scenario"
+    printf '%b' "\\$octal_model\\$octal_pre\\$octal_wire\\$octal_scenario" \
+      >"$VOCAB_CORPUS_DIR/alias-$index"
+  done
+  echo "Prepared model vocabulary fuzz corpus with 61 alias/wire/scenario seeds"
+}
+
 needs_gguf_corpus=false
 for target in "${TARGETS[@]}"; do
-  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" && "$target" != "emel_io_loader" && "$target" != "emel_model_tensor" && "$target" != "emel_token_profile" ]]; then
+  if [[ "$target" != "emel_io_read" && "$target" != "emel_io_mmap" && "$target" != "emel_io_staged_read" && "$target" != "emel_io_loader" && "$target" != "emel_model_tensor" && "$target" != "emel_token_profile" && "$target" != "emel_model_vocabulary" ]]; then
     needs_gguf_corpus=true
   fi
 done
 
 if [[ "$MODE" != "build" ]] && $needs_gguf_corpus; then
   seed_corpus
+fi
+if [[ "$MODE" != "build" ]] && [[ " ${TARGETS[*]} " == *" emel_model_vocabulary "* ]]; then
+  seed_vocabulary_corpus
 fi
 if [[ "$MODE" == "seed" ]]; then
   exit 0
@@ -122,7 +144,10 @@ for target in "${TARGETS[@]}"; do
     (cd "$FUZZ_DIR" && cargo fuzz build "$target")
   else
     echo "Fuzzing $target for ${DURATION_SECONDS}s with max_len=$MAX_LEN"
-    if [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" || "$target" == "emel_io_loader" || "$target" == "emel_model_tensor" || "$target" == "emel_token_profile" ]]; then
+    if [[ "$target" == "emel_model_vocabulary" ]]; then
+      (cd "$FUZZ_DIR" && cargo fuzz run "$target" "$VOCAB_CORPUS_DIR" -- \
+        -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
+    elif [[ "$target" == "emel_io_read" || "$target" == "emel_io_mmap" || "$target" == "emel_io_staged_read" || "$target" == "emel_io_loader" || "$target" == "emel_model_tensor" || "$target" == "emel_token_profile" ]]; then
       (cd "$FUZZ_DIR" && cargo fuzz run "$target" -- \
         -seed=1 -max_total_time="$DURATION_SECONDS" -max_len="$MAX_LEN")
     else

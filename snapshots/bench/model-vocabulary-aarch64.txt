@@ -1,0 +1,19 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=5 runs=5 sample_policy=median warmup_iterations=1
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_tree: d2fd66887fbdef6e0894de9391155099839e625c
+# source_detail_blob: 7c964f7449640fd7fe9eef21f4c14f3a65bf7b6a
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# reference_tool_sha256: f0f1b3e8b680b57100b879147b494284cc93039ac8ed26f3823064bef0c78516
+# rust_tool_sha256: 33274756112c63bcc8594fe7e01cadc89b68e9813c4f9b405dbaa342913cbc1e
+# fixture_small_sha256: 7d96b93b8cbe9f3fef587118ed207eb19ee4b0dbaf927ea48cc0367ebddac7b9
+# fixture_real_sha256: b046ac09ba24a848e2140676fba58c1dcf2f19617e45b03524043eabdb556a31
+# fixture_boundary_sha256: 2c5dc6f15c3e6366f4666cb50816b060b70cb348ea04e97dc697fbf2eda98936
+# benchmark_fixture: identical GGUF bytes in both lanes; small=standard_2_tokens_1_merge real=distilgpt2.Q2_K.gguf boundary=gemma4_2_tokens_400001_merges
+# benchmark_timing: fixture IO, GGUF parse, archive/build, actor construction, and bounded storage allocation excluded; repeated vocabulary materialization only
+# benchmark_validation: full semantic digest and typed counts match across public C++ model facade and public Rust Load actor lanes; Rust dispatch allocations=0
+model/vocabulary/materialize_small rust_ns_per_op=126758.400 cpp_ns_per_op=506008.400 rust_vs_cpp_ratio=0.250507 digest=c5699ca22cf29745 token_count=2 merge_count=1 dispatch_allocations=0 iter=5 runs=5
+model/vocabulary/materialize_real_distilgpt2 rust_ns_per_op=983316.800 cpp_ns_per_op=1409766.800 rust_vs_cpp_ratio=0.697503 digest=388e71c8595af546 token_count=50257 merge_count=50000 dispatch_allocations=0 iter=5 runs=5
+model/vocabulary/materialize_gemma4_400001 rust_ns_per_op=1047141.600 cpp_ns_per_op=818083.400 rust_vs_cpp_ratio=1.279994 digest=e2cc62735218d31c token_count=2 merge_count=400001 dispatch_allocations=0 iter=5 runs=5

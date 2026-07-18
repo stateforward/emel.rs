@@ -305,6 +305,18 @@ impl<'a> Resolve<'a> {
     pub const fn new(model: &'a str, pre: &'a str) -> Self {
         Self { model, pre }
     }
+
+    /// Returns the complete model spelling supplied by the caller.
+    #[must_use]
+    pub const fn model(self) -> &'a str {
+        self.model
+    }
+
+    /// Returns the complete pre-tokenizer spelling supplied by the caller.
+    #[must_use]
+    pub const fn pre(self) -> &'a str {
+        self.pre
+    }
 }
 
 impl sealed::Sealed for Resolve<'_> {}

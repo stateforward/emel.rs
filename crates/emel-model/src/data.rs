@@ -10,6 +10,8 @@
 use std::collections::TryReserveError;
 use std::ops::{Deref, DerefMut};
 
+use emel_token::profile::event::{Model as TokenizerProfileModel, PreId};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fixed<T, const N: usize>([T; N]);
 
@@ -594,8 +596,8 @@ pub struct Vocab {
     pub(crate) precompiled_charsmap: Box<[u8]>,
     pub(crate) lstrip_flags: Box<[u8]>,
     pub(crate) rstrip_flags: Box<[u8]>,
-    pub(crate) tokenizer_model_id: TokenizerModel,
-    pub(crate) tokenizer_pre_id: TokenizerPre,
+    pub(crate) tokenizer_model_id: TokenizerProfileModel,
+    pub(crate) tokenizer_pre_id: Option<PreId>,
     pub(crate) bos_id: i32,
     pub(crate) eos_id: i32,
     pub(crate) eot_id: i32,
@@ -625,7 +627,7 @@ pub struct Vocab {
 }
 
 impl Vocab {
-    fn try_new() -> Result<Self, TryReserveError> {
+    pub(crate) fn try_new() -> Result<Self, TryReserveError> {
         Ok(Self {
             n_tokens: 0,
             n_token_types: 0,
@@ -643,8 +645,8 @@ impl Vocab {
             precompiled_charsmap: try_boxed_slice(MAX_PRECOMPILED_CHARMAP_BYTES)?,
             lstrip_flags: try_boxed_slice(ATTR_FLAG_BYTES)?,
             rstrip_flags: try_boxed_slice(ATTR_FLAG_BYTES)?,
-            tokenizer_model_id: TokenizerModel::Unknown,
-            tokenizer_pre_id: TokenizerPre::Default,
+            tokenizer_model_id: TokenizerProfileModel::Unknown,
+            tokenizer_pre_id: None,
             bos_id: -1,
             eos_id: -1,
             eot_id: -1,
@@ -674,7 +676,7 @@ impl Vocab {
         })
     }
 
-    fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         self.n_tokens = 0;
         self.n_token_types = 0;
         self.token_bytes_used = 0;
@@ -691,8 +693,8 @@ impl Vocab {
         self.precompiled_charsmap.fill(0);
         self.lstrip_flags.fill(0);
         self.rstrip_flags.fill(0);
-        self.tokenizer_model_id = TokenizerModel::Unknown;
-        self.tokenizer_pre_id = TokenizerPre::Default;
+        self.tokenizer_model_id = TokenizerProfileModel::Unknown;
+        self.tokenizer_pre_id = None;
         self.bos_id = -1;
         self.eos_id = -1;
         self.eot_id = -1;
@@ -1374,8 +1376,11 @@ mod tests {
         assert_eq!(data.params.rope_pair_x0_stride, 2);
         assert_eq!(data.params.rope_pair_x1_stride, 2);
         assert_eq!(data.params.rope_pair_x1_offset, 1);
-        assert_eq!(data.vocab_data.tokenizer_model_id, TokenizerModel::Unknown);
-        assert_eq!(data.vocab_data.tokenizer_pre_id, TokenizerPre::Default);
+        assert_eq!(
+            data.vocab_data.tokenizer_model_id,
+            TokenizerProfileModel::Unknown
+        );
+        assert_eq!(data.vocab_data.tokenizer_pre_id, None);
         let vocab_sentinel_ids = [
             data.vocab_data.bos_id,
             data.vocab_data.eos_id,

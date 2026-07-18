@@ -12,6 +12,7 @@ IO_MMAP_REPORT="${EMEL_IO_MMAP_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-i
 IO_STAGED_READ_REPORT="${EMEL_IO_STAGED_READ_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-staged-read.json}"
 IO_LOADER_REPORT="${EMEL_IO_LOADER_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-loader.json}"
 MODEL_TENSOR_REPORT="${EMEL_MODEL_TENSOR_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-tensor.json}"
+MODEL_VOCABULARY_REPORT="${EMEL_MODEL_VOCABULARY_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-vocabulary.json}"
 TOKEN_PROFILE_REPORT="${EMEL_TOKEN_PROFILE_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-token-profile.json}"
 GGUF_COVERAGE_TARGET_DIR="${EMEL_GGUF_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-gguf}"
 IO_COVERAGE_TARGET_DIR="${EMEL_IO_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io}"
@@ -19,6 +20,7 @@ IO_MMAP_COVERAGE_TARGET_DIR="${EMEL_IO_MMAP_COVERAGE_TARGET_DIR:-$ROOT_DIR/targe
 IO_STAGED_READ_COVERAGE_TARGET_DIR="${EMEL_IO_STAGED_READ_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-staged-read}"
 IO_LOADER_COVERAGE_TARGET_DIR="${EMEL_IO_LOADER_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-loader}"
 MODEL_TENSOR_COVERAGE_TARGET_DIR="${EMEL_MODEL_TENSOR_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-tensor}"
+MODEL_VOCABULARY_COVERAGE_TARGET_DIR="${EMEL_MODEL_VOCABULARY_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-vocabulary}"
 TOKEN_PROFILE_COVERAGE_TARGET_DIR="${EMEL_TOKEN_PROFILE_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-token-profile}"
 
 if [[ $# -ne 0 ]]; then
@@ -59,9 +61,10 @@ mkdir -p \
   "$(dirname "$IO_STAGED_READ_REPORT")" \
   "$(dirname "$IO_LOADER_REPORT")" \
   "$(dirname "$MODEL_TENSOR_REPORT")" \
+  "$(dirname "$MODEL_VOCABULARY_REPORT")" \
   "$(dirname "$TOKEN_PROFILE_REPORT")"
-echo "Coverage scope: emel-gguf, maintained emel-io, maintained emel-model data/tensor, and emel-token profile sources"
-echo "Generated GGUF sm.rs is excluded; maintained emel-io, model data/tensor, and token profile sources are enforced"
+echo "Coverage scope: emel-gguf, maintained emel-io, maintained emel-model data/tensor/vocabulary, and emel-token profile sources"
+echo "Generated sm.rs files are excluded; maintained emel-io, model, and token profile sources are enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
 run_coverage() {
@@ -112,8 +115,13 @@ run_coverage "$IO_LOADER_COVERAGE_TARGET_DIR" "$IO_LOADER_REPORT" \
 
 echo "Running maintained emel-model data/tensor coverage with caller-owned mapped capability proof"
 run_coverage "$MODEL_TENSOR_COVERAGE_TARGET_DIR" "$MODEL_TENSOR_REPORT" \
-  '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/))' \
+  '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|vocabulary/|whisper/)|tests/|examples/))' \
   --package emel-model --package emel-bench
+
+echo "Running maintained emel-model vocabulary and typed hyperparameter coverage"
+run_coverage "$MODEL_VOCABULARY_COVERAGE_TARGET_DIR" "$MODEL_VOCABULARY_REPORT" \
+  '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-model/(src/(lib\.rs|architecture/|data\.rs|gemma4/|generation/|lfm2/|llama/|loader/(mod\.rs|test_gguf\.rs)|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/|vocabulary/tests\.rs|whisper/)|tests/|examples/)|sm\.rs$)' \
+  --package emel-model
 
 echo "Running maintained emel-token profile coverage"
 run_coverage "$TOKEN_PROFILE_COVERAGE_TARGET_DIR" "$TOKEN_PROFILE_REPORT" \
@@ -126,6 +134,7 @@ python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-io-staged-read=$IO_STAGED_READ_REPORT" \
   "emel-io-loader=$IO_LOADER_REPORT" \
   "emel-model-tensor=$MODEL_TENSOR_REPORT" \
+  "emel-model-vocabulary=$MODEL_VOCABULARY_REPORT" \
   "emel-token-profile=$TOKEN_PROFILE_REPORT" <<'PY'
 import json
 import math

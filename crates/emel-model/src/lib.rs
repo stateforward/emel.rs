@@ -8,6 +8,7 @@
 pub(crate) mod data;
 pub(crate) mod loader;
 pub mod tensor;
+pub mod vocabulary;
 
 /// An immutable model identifier supplied by model metadata.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
