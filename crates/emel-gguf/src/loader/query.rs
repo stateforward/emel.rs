@@ -13,8 +13,9 @@ use super::detail::{
 use crate::event::{
     ElementKind, QueryError, ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32,
     ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement,
-    ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, Storage, StringArrayMetrics,
-    VisitStringArray, WithByteArray, WithString, WithStringArrayElement,
+    ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, ReadUnsignedArrayMetrics,
+    Storage, StringArrayMetrics, UnsignedArrayMetrics, VisitF32Array, VisitStringArray,
+    VisitUnsignedArray, WithByteArray, WithString, WithStringArrayElement,
 };
 
 mod sm;
@@ -770,6 +771,56 @@ fn array_element_bytes(array: Array<'_>, index: u64, size: usize) -> &[u8] {
     &array.payload[offset..offset + size]
 }
 
+fn for_each_array_value<T>(
+    array: Array<'_>,
+    size: usize,
+    mut decode: impl FnMut(&[u8]) -> T,
+    mut consume: impl FnMut(u32, T),
+) {
+    for index in 0..array.count {
+        consume(
+            u32::try_from(index).expect("GGUF array count fits u32"),
+            decode(array_element_bytes(array, index, size)),
+        );
+    }
+}
+
+fn unsigned_metrics(
+    array: Array<'_>,
+    size: usize,
+    decode: impl FnMut(&[u8]) -> u64,
+) -> UnsignedArrayMetrics {
+    let mut maximum = 0_u64;
+    for_each_array_value(array, size, decode, |_, value| maximum = maximum.max(value));
+    UnsignedArrayMetrics::new(array.count, maximum)
+}
+
+fn decode_u8(bytes: &[u8]) -> u64 {
+    u64::from(bytes[0])
+}
+fn decode_i8_raw(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(i64::from(i8::from_le_bytes([bytes[0]])).to_le_bytes())
+}
+fn decode_u16_raw(bytes: &[u8]) -> u64 {
+    u64::from(read_u16(bytes))
+}
+fn decode_u32_raw(bytes: &[u8]) -> u64 {
+    u64::from(read_u32(bytes))
+}
+fn decode_u64_raw(bytes: &[u8]) -> u64 {
+    read_u64(bytes)
+}
+fn decode_f32(bytes: &[u8]) -> f32 {
+    f32::from_bits(read_u32(bytes))
+}
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "GGUF float64 arrays expose f32 coercion"
+)]
+fn decode_f64_as_f32(bytes: &[u8]) -> f32 {
+    f64::from_bits(read_u64(bytes)) as f32
+}
+
 macro_rules! result_methods {
     ($value:ty) => {
         fn missing(&mut self) {
@@ -1073,6 +1124,131 @@ impl Operation for ReadUnsignedArrayElement<'_> {
     }
     fn apply_array_int64(&mut self, value: Array<'_>) {
         self.result = Ok(Some(read_u64(array_element_bytes(value, self.index, 8))));
+    }
+}
+
+impl Operation for ReadUnsignedArrayMetrics<'_> {
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        array(entry).map_or(Decision::TypeMismatch, |value| integer_decision(value.kind))
+    }
+    result_methods!(UnsignedArrayMetrics);
+    fn apply_array_uint8(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 1, decode_u8)));
+    }
+    fn apply_array_int8(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 1, decode_i8_raw)));
+    }
+    fn apply_array_uint16(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 2, decode_u16_raw)));
+    }
+    fn apply_array_int16(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 2, decode_u16_raw)));
+    }
+    fn apply_array_uint32(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 4, decode_u32_raw)));
+    }
+    fn apply_array_int32(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 4, decode_u32_raw)));
+    }
+    fn apply_array_uint64(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 8, decode_u64_raw)));
+    }
+    fn apply_array_int64(&mut self, v: Array<'_>) {
+        self.result = Ok(Some(unsigned_metrics(v, 8, decode_u64_raw)));
+    }
+}
+
+fn publish_unsigned_visit<F>(
+    array: Array<'_>,
+    size: usize,
+    decode: impl FnMut(&[u8]) -> u64,
+    visitor: &mut F,
+) where
+    F: FnMut(u32, u64),
+{
+    for_each_array_value(array, size, decode, visitor);
+}
+
+impl<F> Operation for VisitUnsignedArray<'_, F>
+where
+    F: FnMut(u32, u64),
+{
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        array(entry).map_or(Decision::TypeMismatch, |value| integer_decision(value.kind))
+    }
+    fn missing(&mut self) {
+        self.result = Ok(None);
+    }
+    fn error(&mut self, error: QueryError) {
+        self.result = Err(error);
+    }
+    fn apply_array_uint8(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 1, decode_u8, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_int8(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 1, decode_i8_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_uint16(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 2, decode_u16_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_int16(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 2, decode_u16_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_uint32(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 4, decode_u32_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_int32(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 4, decode_u32_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_uint64(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 8, decode_u64_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_int64(&mut self, v: Array<'_>) {
+        publish_unsigned_visit(v, 8, decode_u64_raw, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+}
+
+impl<F> Operation for VisitF32Array<'_, F>
+where
+    F: FnMut(u32, f32),
+{
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        if array(entry).is_some_and(|value| matches!(value.kind, TYPE_FLOAT32 | TYPE_FLOAT64)) {
+            Decision::Accept
+        } else {
+            Decision::TypeMismatch
+        }
+    }
+    fn missing(&mut self) {
+        self.result = Ok(None);
+    }
+    fn error(&mut self, error: QueryError) {
+        self.result = Err(error);
+    }
+    fn apply_array_float32(&mut self, v: Array<'_>) {
+        for_each_array_value(v, 4, decode_f32, &mut self.visitor);
+        self.result = Ok(Some(v.count));
+    }
+    fn apply_array_float64(&mut self, v: Array<'_>) {
+        for_each_array_value(v, 8, decode_f64_as_f32, &mut self.visitor);
+        self.result = Ok(Some(v.count));
     }
 }
 

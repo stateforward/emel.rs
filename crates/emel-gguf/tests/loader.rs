@@ -6,8 +6,9 @@ use emel_gguf::event::{
     Bind, ElementKind, Error, MetadataDescriptor, MetadataKind, Parse, Probe, QueryError,
     ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64,
     ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned,
-    ReadUnsignedArrayElement, Storage, TensorDescriptor, VisitStringArray, WithByteArray,
-    WithMetadataDescriptor, WithString, WithStringArrayElement, WithTensor,
+    ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage, TensorDescriptor, VisitF32Array,
+    VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor, WithString,
+    WithStringArrayElement, WithTensor,
 };
 use sml as _;
 use std::sync::Arc;
@@ -212,6 +213,35 @@ fn large_string_array_fixture() -> Vec<u8> {
     for index in 0..ELEMENT_COUNT {
         append_string(&mut bytes, &u32::try_from(index).unwrap().to_le_bytes());
     }
+    bytes
+}
+
+fn large_numeric_array_fixture() -> Vec<u8> {
+    const ELEMENT_COUNT: u32 = 4096;
+    let mut floats = Vec::with_capacity(4096 * 4);
+    let mut integers = Vec::with_capacity(4096 * 4);
+    for index in 0..ELEMENT_COUNT {
+        let value = f32::from(u16::try_from(index).unwrap());
+        floats.extend_from_slice(&value.to_bits().to_le_bytes());
+        integers.extend_from_slice(&index.to_le_bytes());
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&MAGIC);
+    append_u32(&mut bytes, VERSION);
+    append_u64(&mut bytes, 0);
+    append_u64(&mut bytes, 2);
+    append_kv(
+        &mut bytes,
+        b"large.f32",
+        TYPE_ARRAY,
+        &array_payload(TYPE_FLOAT32, u64::from(ELEMENT_COUNT), &floats),
+    );
+    append_kv(
+        &mut bytes,
+        b"large.u32",
+        TYPE_ARRAY,
+        &array_payload(TYPE_UINT32, u64::from(ELEMENT_COUNT), &integers),
+    );
     bytes
 }
 
@@ -635,6 +665,127 @@ fn string_array_metrics_are_exact_constant_work_and_allocation_free() {
         typed_loader.process_event(ReadStringArrayMetrics::new(b"a.u16")),
         Err(QueryError::TypeMismatch)
     );
+}
+
+#[test]
+fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
+    let file = typed_metadata_fixture();
+    let mut loader = load(&file).unwrap();
+    let mut floats = [0.0_f32; 2];
+    let mut result = None;
+
+    assert_eq!(
+        measure(|| {
+            result = Some(loader.process_event(VisitF32Array::new(
+                b"a.f64",
+                |index: u32, value: f32| {
+                    floats[index as usize] = value;
+                },
+            )));
+        })
+        .count_total,
+        0
+    );
+    assert_eq!(result.unwrap(), Ok(Some(1)));
+    assert_eq!(floats[0].to_bits(), 2.0_f32.to_bits());
+
+    for (key, expected, count) in [
+        (b"a.u8".as_slice(), [1, 2], 2),
+        (b"a.i8".as_slice(), [u64::MAX, 2], 2),
+        (b"a.u16".as_slice(), [1, 2], 2),
+        (b"a.i16".as_slice(), [u64::from(u16::MAX), 2], 2),
+        (b"a.u32".as_slice(), [1, 2], 2),
+        (b"a.i32".as_slice(), [u64::from(u32::MAX), 2], 2),
+        (b"a.u64".as_slice(), [u64::MAX, 0], 1),
+        (b"a.i64".as_slice(), [u64::MAX - 6, 0], 1),
+    ] {
+        let mut integers = [0_u64; 2];
+        assert_eq!(
+            loader.process_event(VisitUnsignedArray::new(key, |index: u32, value: u64| {
+                integers[index as usize] = value;
+            },)),
+            Ok(Some(count))
+        );
+        assert_eq!(integers, expected);
+        let metrics = loader
+            .process_event(ReadUnsignedArrayMetrics::new(key))
+            .unwrap()
+            .unwrap();
+        assert_eq!(metrics.element_count(), count);
+        assert_eq!(
+            metrics.maximum(),
+            *expected[..usize::try_from(count).unwrap()]
+                .iter()
+                .max()
+                .unwrap()
+        );
+    }
+
+    let mut f32_bits = 0_u32;
+    assert_eq!(
+        loader.process_event(VisitF32Array::new(b"a.f32", |_, value: f32| {
+            f32_bits = value.to_bits();
+        })),
+        Ok(Some(1))
+    );
+    assert_eq!(f32_bits, 1.25_f32.to_bits());
+    assert_eq!(
+        loader.process_event(ReadUnsignedArrayMetrics::new(b"a.f32")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadUnsignedArrayMetrics::new(b"missing")),
+        Ok(None)
+    );
+    assert_eq!(
+        loader.process_event(VisitUnsignedArray::new(b"a.f32", |_, _| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitUnsignedArray::new(b"missing", |_, _| {})),
+        Ok(None)
+    );
+    assert_eq!(
+        loader.process_event(VisitF32Array::new(b"a.u32", |_, _| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitF32Array::new(b"missing", |_, _| {})),
+        Ok(None)
+    );
+}
+
+#[test]
+fn large_numeric_arrays_use_one_allocation_free_bulk_dispatch() {
+    const ELEMENT_COUNT: u32 = 4096;
+    let mut loader = load(&large_numeric_array_fixture()).unwrap();
+    let mut next = 0_u32;
+    let mut result = None;
+    assert_eq!(
+        measure(|| {
+            result = Some(loader.process_event(VisitF32Array::new(
+                b"large.f32",
+                |index: u32, value: f32| {
+                    assert_eq!(index, next);
+                    assert_eq!(
+                        value.to_bits(),
+                        f32::from(u16::try_from(index).unwrap()).to_bits()
+                    );
+                    next += 1;
+                },
+            )));
+        })
+        .count_total,
+        0
+    );
+    assert_eq!(result.unwrap(), Ok(Some(u64::from(ELEMENT_COUNT))));
+    assert_eq!(next, ELEMENT_COUNT);
+    let metrics = loader
+        .process_event(ReadUnsignedArrayMetrics::new(b"large.u32"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(metrics.element_count(), u64::from(ELEMENT_COUNT));
+    assert_eq!(metrics.maximum(), u64::from(ELEMENT_COUNT - 1));
 }
 
 #[test]

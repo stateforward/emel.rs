@@ -799,6 +799,59 @@ impl Event for ReadStringArrayMetrics<'_> {
     }
 }
 
+/// Exact aggregate metrics for an integer array decoded with raw unsigned rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnsignedArrayMetrics {
+    element_count: u64,
+    maximum: u64,
+}
+
+impl UnsignedArrayMetrics {
+    pub(crate) const fn new(element_count: u64, maximum: u64) -> Self {
+        Self {
+            element_count,
+            maximum,
+        }
+    }
+    /// Returns the number of elements.
+    #[must_use]
+    pub const fn element_count(self) -> u64 {
+        self.element_count
+    }
+    /// Returns the maximum raw-unsigned decoded value, or zero for an empty array.
+    #[must_use]
+    pub const fn maximum(self) -> u64 {
+        self.maximum
+    }
+}
+
+/// Measure an integer array using raw unsigned decoding semantics.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadUnsignedArrayMetrics<'a> {
+    pub(crate) key: &'a [u8],
+    pub(crate) result: Result<Option<UnsignedArrayMetrics>, QueryError>,
+}
+
+impl<'a> ReadUnsignedArrayMetrics<'a> {
+    /// Creates an integer-array aggregate query.
+    #[must_use]
+    pub const fn new(key: &'a [u8]) -> Self {
+        Self {
+            key,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl sealed::Sealed for ReadUnsignedArrayMetrics<'_> {}
+impl Event for ReadUnsignedArrayMetrics<'_> {
+    type Output = Result<Option<UnsignedArrayMetrics>, QueryError>;
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
+}
+
 macro_rules! array_element_query {
     ($name:ident, $value:ty) => {
         #[doc = concat!("Read one optional array element as `", stringify!($value), "`.")]
@@ -931,6 +984,90 @@ where
 {
     type Output = Result<Option<u64>, QueryError>;
 
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
+}
+
+/// Visit every float-array element as `f32`, including exact `f64` coercion.
+///
+/// The visitor runs synchronously, must not allocate or retain data, and must
+/// not re-enter the loader actor.
+pub struct VisitF32Array<'a, F> {
+    pub(crate) key: &'a [u8],
+    pub(crate) visitor: F,
+    pub(crate) result: Result<Option<u64>, QueryError>,
+}
+
+impl<'a, F> VisitF32Array<'a, F> {
+    /// Creates a bulk float-array visitor.
+    #[must_use]
+    pub const fn new(key: &'a [u8], visitor: F) -> Self {
+        Self {
+            key,
+            visitor,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl<F> fmt::Debug for VisitF32Array<'_, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VisitF32Array")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+impl<F> sealed::Sealed for VisitF32Array<'_, F> where F: FnMut(u32, f32) {}
+impl<F> Event for VisitF32Array<'_, F>
+where
+    F: FnMut(u32, f32),
+{
+    type Output = Result<Option<u64>, QueryError>;
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
+}
+
+/// Visit every integer-array element with raw unsigned decoding semantics.
+///
+/// The visitor runs synchronously, must not allocate or retain data, and must
+/// not re-enter the loader actor.
+pub struct VisitUnsignedArray<'a, F> {
+    pub(crate) key: &'a [u8],
+    pub(crate) visitor: F,
+    pub(crate) result: Result<Option<u64>, QueryError>,
+}
+
+impl<'a, F> VisitUnsignedArray<'a, F> {
+    /// Creates a bulk integer-array visitor.
+    #[must_use]
+    pub const fn new(key: &'a [u8], visitor: F) -> Self {
+        Self {
+            key,
+            visitor,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl<F> fmt::Debug for VisitUnsignedArray<'_, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VisitUnsignedArray")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+impl<F> sealed::Sealed for VisitUnsignedArray<'_, F> where F: FnMut(u32, u64) {}
+impl<F> Event for VisitUnsignedArray<'_, F>
+where
+    F: FnMut(u32, u64),
+{
+    type Output = Result<Option<u64>, QueryError>;
     fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
         actor.query(&mut self);
         self.result

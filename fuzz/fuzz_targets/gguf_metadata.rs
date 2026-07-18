@@ -6,8 +6,9 @@ use emel_gguf::Loader;
 use emel_gguf::event::{
     Bind, ElementKind, MetadataDescriptor, Parse, Probe, QueryError, ReadArrayLength, ReadBool,
     ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned,
-    ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, Storage,
-    VisitStringArray, WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
+    ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement,
+    ReadUnsignedArrayMetrics, Storage, VisitF32Array, VisitStringArray, VisitUnsignedArray,
+    WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
 };
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -103,6 +104,14 @@ fn exercise_queries(loader: &mut Loader, key: &[u8], index: u64) -> u64 {
     );
     hash_result(
         &mut hash,
+        loader.process_event(ReadUnsignedArrayMetrics::new(key)),
+        |hash, value| {
+            hash_bytes(hash, &value.element_count().to_le_bytes());
+            hash_bytes(hash, &value.maximum().to_le_bytes());
+        },
+    );
+    hash_result(
+        &mut hash,
         loader.process_event(ReadUnsignedArrayElement::new(key, index)),
         |hash, value| hash_bytes(hash, &value.to_le_bytes()),
     );
@@ -143,6 +152,20 @@ fn exercise_queries(loader: &mut Loader, key: &[u8], index: u64) -> u64 {
         hash_bytes(hash, &value.to_le_bytes());
     });
     hash_bytes(&mut hash, &visitor_hash.to_le_bytes());
+    let mut float_hash = FNV_OFFSET;
+    let visit = loader.process_event(VisitF32Array::new(key, |visited_index: u32, value: f32| {
+        hash_bytes(&mut float_hash, &visited_index.to_le_bytes());
+        hash_bytes(&mut float_hash, &value.to_bits().to_le_bytes());
+    }));
+    hash_result(&mut hash, visit, |hash, value| hash_bytes(hash, &value.to_le_bytes()));
+    hash_bytes(&mut hash, &float_hash.to_le_bytes());
+    let mut unsigned_hash = FNV_OFFSET;
+    let visit = loader.process_event(VisitUnsignedArray::new(key, |visited_index: u32, value: u64| {
+        hash_bytes(&mut unsigned_hash, &visited_index.to_le_bytes());
+        hash_bytes(&mut unsigned_hash, &value.to_le_bytes());
+    }));
+    hash_result(&mut hash, visit, |hash, value| hash_bytes(hash, &value.to_le_bytes()));
+    hash_bytes(&mut hash, &unsigned_hash.to_le_bytes());
     hash_result(
         &mut hash,
         loader.process_event(WithByteArray::new(key, slice_digest)),
