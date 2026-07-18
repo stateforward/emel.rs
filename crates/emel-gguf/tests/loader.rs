@@ -6,9 +6,9 @@ use emel_gguf::event::{
     Bind, ElementKind, Error, MetadataDescriptor, MetadataKind, Parse, Probe, QueryError,
     ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64,
     ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned,
-    ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage, TensorDescriptor, VisitF32Array,
-    VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor, WithString,
-    WithStringArrayElement, WithTensor,
+    ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage, TensorDescriptor, VisitBoolArray,
+    VisitF32Array, VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor,
+    WithString, WithStringArrayElement, WithTensor,
 };
 use sml as _;
 use std::sync::Arc;
@@ -751,6 +751,40 @@ fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
     );
     assert_eq!(
         loader.process_event(VisitF32Array::new(b"missing", |_, _| {})),
+        Ok(None)
+    );
+}
+
+#[test]
+fn bool_array_bulk_visit_is_typed_complete_and_allocation_free() {
+    let file = typed_metadata_fixture();
+    let mut loader = load(&file).unwrap();
+    let mut values = [true, false];
+    let mut next = 0_u32;
+    let mut result = None;
+    assert_eq!(
+        measure(|| {
+            result = Some(loader.process_event(VisitBoolArray::new(
+                b"a.bool",
+                |index: u32, value: bool| {
+                    assert_eq!(index, next);
+                    values[index as usize] = value;
+                    next += 1;
+                },
+            )));
+        })
+        .count_total,
+        0
+    );
+    assert_eq!(result.unwrap(), Ok(Some(2)));
+    assert_eq!(next, 2);
+    assert_eq!(values, [false, true]);
+    assert_eq!(
+        loader.process_event(VisitBoolArray::new(b"a.u8", |_, _| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitBoolArray::new(b"missing", |_, _| {})),
         Ok(None)
     );
 }

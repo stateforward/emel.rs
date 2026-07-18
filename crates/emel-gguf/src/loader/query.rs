@@ -14,8 +14,8 @@ use crate::event::{
     ElementKind, QueryError, ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32,
     ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement,
     ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, ReadUnsignedArrayMetrics,
-    Storage, StringArrayMetrics, UnsignedArrayMetrics, VisitF32Array, VisitStringArray,
-    VisitUnsignedArray, WithByteArray, WithString, WithStringArrayElement,
+    Storage, StringArrayMetrics, UnsignedArrayMetrics, VisitBoolArray, VisitF32Array,
+    VisitStringArray, VisitUnsignedArray, WithByteArray, WithString, WithStringArrayElement,
 };
 
 mod sm;
@@ -1219,6 +1219,32 @@ where
     fn apply_array_int64(&mut self, v: Array<'_>) {
         publish_unsigned_visit(v, 8, decode_u64_raw, &mut self.visitor);
         self.result = Ok(Some(v.count));
+    }
+}
+
+impl<F> Operation for VisitBoolArray<'_, F>
+where
+    F: FnMut(u32, bool),
+{
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        if array(entry).is_some_and(|value| value.kind == TYPE_BOOL) {
+            Decision::Accept
+        } else {
+            Decision::TypeMismatch
+        }
+    }
+    fn missing(&mut self) {
+        self.result = Ok(None);
+    }
+    fn error(&mut self, error: QueryError) {
+        self.result = Err(error);
+    }
+    fn apply_array_bool(&mut self, value: Array<'_>) {
+        for_each_array_value(value, 1, |bytes| bytes[0] != 0, &mut self.visitor);
+        self.result = Ok(Some(value.count));
     }
 }
 

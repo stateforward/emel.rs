@@ -7,8 +7,8 @@ use emel_gguf::event::{
     Bind, ElementKind, MetadataDescriptor, Parse, Probe, QueryError, ReadArrayLength, ReadBool,
     ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned,
     ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement,
-    ReadUnsignedArrayMetrics, Storage, VisitF32Array, VisitStringArray, VisitUnsignedArray,
-    WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
+    ReadUnsignedArrayMetrics, Storage, VisitBoolArray, VisitF32Array, VisitStringArray,
+    VisitUnsignedArray, WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
 };
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -166,6 +166,18 @@ fn exercise_queries(loader: &mut Loader, key: &[u8], index: u64) -> u64 {
     }));
     hash_result(&mut hash, visit, |hash, value| hash_bytes(hash, &value.to_le_bytes()));
     hash_bytes(&mut hash, &unsigned_hash.to_le_bytes());
+    let mut bool_hash = FNV_OFFSET;
+    let visit = loader.process_event(VisitBoolArray::new(
+        key,
+        |visited_index: u32, value: bool| {
+            hash_bytes(&mut bool_hash, &visited_index.to_le_bytes());
+            hash_bytes(&mut bool_hash, &[u8::from(value)]);
+        },
+    ));
+    hash_result(&mut hash, visit, |hash, value| {
+        hash_bytes(hash, &value.to_le_bytes());
+    });
+    hash_bytes(&mut hash, &bool_hash.to_le_bytes());
     hash_result(
         &mut hash,
         loader.process_event(WithByteArray::new(key, slice_digest)),

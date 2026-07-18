@@ -1074,6 +1074,48 @@ where
     }
 }
 
+/// Visit every boolean-array element.
+///
+/// The visitor runs synchronously, must not allocate or retain data, and must
+/// not re-enter the loader actor.
+pub struct VisitBoolArray<'a, F> {
+    pub(crate) key: &'a [u8],
+    pub(crate) visitor: F,
+    pub(crate) result: Result<Option<u64>, QueryError>,
+}
+
+impl<'a, F> VisitBoolArray<'a, F> {
+    /// Creates a bulk boolean-array visitor.
+    #[must_use]
+    pub const fn new(key: &'a [u8], visitor: F) -> Self {
+        Self {
+            key,
+            visitor,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl<F> fmt::Debug for VisitBoolArray<'_, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VisitBoolArray")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+impl<F> sealed::Sealed for VisitBoolArray<'_, F> where F: FnMut(u32, bool) {}
+impl<F> Event for VisitBoolArray<'_, F>
+where
+    F: FnMut(u32, bool),
+{
+    type Output = Result<Option<u64>, QueryError>;
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
+}
+
 /// Invoke a callback with an optional packed `u8`/`i8` array payload.
 ///
 /// The callback runs synchronously inside the loader's run-to-completion
