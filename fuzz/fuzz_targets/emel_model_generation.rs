@@ -18,6 +18,8 @@ use emel_model::llama::event as llama_event;
 use emel_model::llama::{Llama, Parameters as LlamaParameters};
 use emel_model::lfm2::event as lfm2_event;
 use emel_model::lfm2::{Lfm2, Parameters as Lfm2Parameters};
+use emel_model::qwen3::event as qwen3_event;
+use emel_model::qwen3::{Parameters as Qwen3Parameters, Qwen3};
 use libfuzzer_sys::fuzz_target;
 
 const ATTENTION_NAMES: [&[u8]; 14] = [
@@ -329,6 +331,114 @@ fn fuzz_lfm2_protocol(input: &[u8]) {
     }
 }
 
+fn qwen3_actor(input: &[u8]) -> (Qwen3, ModelIdentity) {
+    let names = &ATTENTION_NAMES;
+    let name_bytes = names.iter().map(|name| name.len()).sum();
+    let mut storage =
+        CatalogStorage::with_capacity(names.len(), name_bytes, names.len()).expect("bounded");
+    for (index, name) in names.iter().enumerate() {
+        let selector = input.get(index).copied().unwrap_or(index as u8) as usize;
+        storage
+            .push_tensor(TensorInput::new(
+                name,
+                VALID_WIRE_TYPES[selector % VALID_WIRE_TYPES.len()],
+                1,
+                [32, 1, 1, 1],
+                u64::try_from(index).expect("bounded") * 64,
+                true,
+            ))
+            .expect("valid tensor");
+    }
+    let mut catalog = Catalog::try_new().expect("catalog");
+    catalog
+        .process_event(BindStorage::new(storage))
+        .expect("bind");
+    let model = catalog.process_event(SealModel::new()).expect("seal");
+    let actor = Qwen3::new(
+        catalog,
+        Resolver::new(),
+        qwen3_event::Storage::with_block_capacity(2).expect("storage"),
+    )
+    .expect("Qwen3 actor");
+    (actor, model)
+}
+
+fn qwen3_parameters(selector: u8) -> Qwen3Parameters {
+    Qwen3Parameters {
+        context_length: i32::from(selector).wrapping_sub(64),
+        embedding_length: i32::from(selector).wrapping_sub(32),
+        embedding_length_out: i32::from(selector),
+        feed_forward_length: i32::from(selector.rotate_left(1)),
+        attention_head_count: i32::from(selector & 31),
+        attention_head_count_kv: i32::from(selector & 15),
+        attention_key_length: i32::from(selector.rotate_left(1)),
+        attention_value_length: i32::from(selector.rotate_right(1)),
+        rope_dimension_count: i32::from(selector.rotate_left(2)),
+        block_count: i32::from(selector % 5) - 1,
+        attention_layer_norm_rms_epsilon: f32::from(selector.rotate_left(1)),
+        rope_freq_base: f32::from(selector) * 100.0,
+        tie_word_embeddings: selector & 1 == 0,
+        rope_pair_x0_stride: i32::from(selector & 3),
+        rope_pair_x1_stride: i32::from(selector.rotate_left(1) & 3),
+        rope_pair_x1_offset: i32::from(selector.rotate_left(2) & 3),
+        rope_pair_x1_half_rot_offset: i32::from(selector.rotate_left(3) & 3),
+    }
+}
+
+fn fuzz_qwen3_protocol(input: &[u8]) {
+    let (mut actor, model) = qwen3_actor(input);
+    for (step, byte) in input.iter().copied().enumerate().take(128) {
+        let parameter = input.get(step + 1).copied().unwrap_or_default();
+        let index = i32::from(parameter % 5) - 2;
+        match byte % 11 {
+            0 => {
+                let architecture = if parameter & 1 == 0 {
+                    b"qwen3".as_slice()
+                } else {
+                    b"other".as_slice()
+                };
+                let _ = actor.process_event(qwen3_event::ContractBegin::new(
+                    architecture,
+                    model,
+                    qwen3_parameters(parameter),
+                ));
+            }
+            1 => {
+                let _ = actor.process_event(qwen3_event::BlockBuild::new(index));
+            }
+            2 => {
+                let _ = actor.process_event(qwen3_event::TopologyBuild::new());
+            }
+            3 => {
+                let _ = actor.process_event(qwen3_event::PlanBuild::new());
+            }
+            4 => {
+                let _ = actor.process_event(qwen3_event::BlockValidation::new(index));
+            }
+            5 => {
+                let _ = actor.process_event(qwen3_event::BlockAudit::new(index));
+            }
+            6 => {
+                let family = QuantizedStageFamily::ALL
+                    [usize::from(parameter) % QuantizedStageFamily::ALL.len()];
+                let _ = actor.process_event(qwen3_event::StageAudit::new(family));
+            }
+            7 => {
+                let _ = actor.process_event(qwen3_event::ContractVisit::new());
+            }
+            8 => {
+                let _ = actor.process_event(qwen3_event::BlockVisit::new(index));
+            }
+            9 => {
+                let _ = actor.process_event(qwen3_event::ContractReset::new());
+            }
+            _ => {
+                let _ = actor.process_event(qwen3_event::StorageRelease::new());
+            }
+        }
+    }
+}
+
 fn layer(selector: u8, shortconv: bool) -> LayerExecution {
     LayerExecution::new(
         if shortconv {
@@ -503,4 +613,5 @@ fuzz_target!(|input: &[u8]| {
     fuzz_protocol(input, shortconv);
     fuzz_llama_protocol(input);
     fuzz_lfm2_protocol(input);
+    fuzz_qwen3_protocol(input);
 });

@@ -1,4 +1,4 @@
-//! Public Llama actor and local generated-machine dispatch wrapper.
+//! Public Qwen3 actor and local generated-machine dispatch wrapper.
 
 use core::cell::{Cell, RefCell};
 use core::fmt;
@@ -15,7 +15,7 @@ pub(super) use crate::attention_family::context::{
 };
 
 use super::event;
-use super::sm::{LlamaMachineEvents, LlamaMachineStateMachine, LlamaMachineStateMachineContext};
+use super::sm::{Qwen3MachineEvents, Qwen3MachineStateMachine, Qwen3MachineStateMachineContext};
 use super::{
     ARCHITECTURE_NAME, BLOCK_TENSOR_COUNT, GLOBAL_TENSOR_COUNT, OUTPUT_NORM_NAME,
     TOKEN_EMBEDDING_NAME,
@@ -24,26 +24,26 @@ use super::{
 type Error = generation::event::Error;
 type ChildResult = Result<(), Error>;
 
-pub(super) struct LlamaPolicy;
-impl Policy for LlamaPolicy {
+pub(super) struct Qwen3Policy;
+impl Policy for Qwen3Policy {
     const ARCHITECTURE_NAME: &'static [u8] = ARCHITECTURE_NAME;
     const TOKEN_EMBEDDING_NAME: &'static [u8] = TOKEN_EMBEDDING_NAME;
     const OUTPUT_NORM_NAME: &'static [u8] = OUTPUT_NORM_NAME;
     const GLOBAL_TENSOR_COUNT: u32 = GLOBAL_TENSOR_COUNT;
     const BLOCK_TENSOR_COUNT: u32 = BLOCK_TENSOR_COUNT;
-    const QK_NORM_ROUTE: AttentionQkNormRoute = AttentionQkNormRoute::None;
-    const TIED_OUTPUT: bool = false;
+    const QK_NORM_ROUTE: AttentionQkNormRoute = AttentionQkNormRoute::HeadwiseRms;
+    const TIED_OUTPUT: bool = true;
 }
 
-crate::attention_family::impl_machine_context!(LlamaMachineStateMachineContext, LlamaPolicy);
+crate::attention_family::impl_machine_context!(Qwen3MachineStateMachineContext, Qwen3Policy);
 
-/// Single-writer, run-to-completion Llama family actor.
-pub struct Llama {
-    machine: LlamaMachineStateMachine<Context<LlamaPolicy>>,
+/// Single-writer, run-to-completion Qwen3 family actor.
+pub struct Qwen3 {
+    machine: Qwen3MachineStateMachine<Context<Qwen3Policy>>,
 }
 
-impl Llama {
-    /// Constructs a Llama actor from public child actors and caller-preallocated storage.
+impl Qwen3 {
+    /// Constructs a Qwen3 actor from public child actors and caller-preallocated storage.
     ///
     /// # Errors
     ///
@@ -55,7 +55,7 @@ impl Llama {
         storage: event::Storage,
     ) -> Result<Self, event::StorageBindError> {
         Ok(Self {
-            machine: LlamaMachineStateMachine::new(Context::new(catalog, capability, storage)?),
+            machine: Qwen3MachineStateMachine::new(Context::new(catalog, capability, storage)?),
         })
     }
 
@@ -80,7 +80,7 @@ impl Llama {
             rope_freq_base: event.parameters.rope_freq_base,
         };
         self.machine
-            .process_event(LlamaMachineEvents::Begin(BeginRuntime {
+            .process_event(Qwen3MachineEvents::Begin(BeginRuntime {
                 event: crate::attention_family::event::ContractBegin::new(
                     event.architecture,
                     event.model,
@@ -99,7 +99,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Block(BlockRuntime {
+            .process_event(Qwen3MachineEvents::Block(BlockRuntime {
                 event,
                 child_result: &child_result,
                 result: &result,
@@ -112,7 +112,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Topology(TopologyRuntime {
+            .process_event(Qwen3MachineEvents::Topology(TopologyRuntime {
                 child_result: &child_result,
                 result: &result,
             }))
@@ -124,7 +124,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Plan(PlanRuntime {
+            .process_event(Qwen3MachineEvents::Plan(PlanRuntime {
                 child_result: &child_result,
                 result: &result,
             }))
@@ -137,7 +137,7 @@ impl Llama {
         let descriptor = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Validate(ValidateRuntime {
+            .process_event(Qwen3MachineEvents::Validate(ValidateRuntime {
                 event,
                 child_result: &child_result,
                 descriptor: &descriptor,
@@ -151,7 +151,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Audit(AuditRuntime {
+            .process_event(Qwen3MachineEvents::Audit(AuditRuntime {
                 event,
                 child_result: &child_result,
                 result: &result,
@@ -164,7 +164,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Stage(StageRuntime {
+            .process_event(Qwen3MachineEvents::Stage(StageRuntime {
                 event,
                 child_result: &child_result,
                 result: &result,
@@ -180,7 +180,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Visit(VisitRuntime {
+            .process_event(Qwen3MachineEvents::Visit(VisitRuntime {
                 child_result: &child_result,
                 result: &result,
             }))
@@ -195,7 +195,7 @@ impl Llama {
     ) -> Result<generation::event::BlockDescriptor, Error> {
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::BlockVisit(BlockVisitRuntime {
+            .process_event(Qwen3MachineEvents::BlockVisit(BlockVisitRuntime {
                 event,
                 result: &result,
             }))
@@ -207,7 +207,7 @@ impl Llama {
         let child_result = Cell::new(Err(Error::Internal));
         let result = Cell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Reset(ResetRuntime {
+            .process_event(Qwen3MachineEvents::Reset(ResetRuntime {
                 child_result: &child_result,
                 result: &result,
             }))
@@ -222,7 +222,7 @@ impl Llama {
         let child_result = RefCell::new(Err(Error::Internal));
         let result = RefCell::new(Err(Error::UnexpectedEvent));
         self.machine
-            .process_event(LlamaMachineEvents::Release(ReleaseRuntime {
+            .process_event(Qwen3MachineEvents::Release(ReleaseRuntime {
                 child_result: &child_result,
                 result: &result,
             }))
@@ -231,8 +231,8 @@ impl Llama {
     }
 }
 
-impl fmt::Debug for Llama {
+impl fmt::Debug for Qwen3 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Llama").finish_non_exhaustive()
+        formatter.debug_struct("Qwen3").finish_non_exhaustive()
     }
 }
