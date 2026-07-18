@@ -3,6 +3,11 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs, dead_code)]
 
+#[cfg(test)]
+use allocation_counter as _;
+
+pub mod capability;
+
 /// Returns the default kernel dispatch name for this build target.
 #[must_use]
 pub const fn dispatch_name() -> &'static str {

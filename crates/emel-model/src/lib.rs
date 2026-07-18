@@ -6,6 +6,7 @@
 #![allow(missing_docs, dead_code)]
 
 pub(crate) mod data;
+pub mod generation_audit;
 pub(crate) mod loader;
 pub mod tensor;
 pub mod vocabulary;

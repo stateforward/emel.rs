@@ -28,6 +28,8 @@ TOKEN_PROFILE_SNAPSHOT="${EMEL_TOKEN_PROFILE_PARITY_SNAPSHOT:-$ROOT_DIR/snapshot
 TOKEN_PROFILE_BUILD_DIR="${EMEL_TOKEN_PROFILE_PARITY_BUILD_DIR:-$ROOT_DIR/target/token-profile-parity}"
 MODEL_VOCAB_SNAPSHOT="${EMEL_MODEL_VOCAB_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/model-vocabulary/manifest.txt}"
 MODEL_VOCAB_BUILD_DIR="${EMEL_MODEL_VOCAB_PARITY_BUILD_DIR:-$ROOT_DIR/target/model-vocabulary-parity}"
+KERNEL_CAPABILITY_SNAPSHOT="${EMEL_KERNEL_CAPABILITY_PARITY_SNAPSHOT:-$ROOT_DIR/snapshots/parity/kernel-capability/manifest.txt}"
+KERNEL_CAPABILITY_BUILD_DIR="${EMEL_KERNEL_CAPABILITY_PARITY_BUILD_DIR:-$ROOT_DIR/target/kernel-capability-parity}"
 EMEL_CPP_SOURCE="${EMEL_CPP_SOURCE_DIR:-$ROOT_DIR/../emel.cpp}"
 EMEL_CPP_COMMIT=843a117386ef17dc5a50549bbfc821074c2141d6
 EMEL_CPP_IO_TREE=ff00a9978b00b4ea1e5268d2ecd483d4855b6eaa
@@ -41,6 +43,12 @@ EMEL_CPP_TOKEN_MODEL_BLOB=ef7ff8da51f1f281082901bf4919a4b9a63f2671
 EMEL_CPP_TOKEN_PRE_BLOB=16b2982ca16dfdfbee016d50d0eb924a7cdc18c4
 EMEL_CPP_TOKEN_MODEL_SHA256=60e10d81dda5c2c3a47a4d22c1b93b20c5d2077a4869f5a815b9c1e6881829b0
 EMEL_CPP_TOKEN_PRE_SHA256=b9c8cf6a0680802f94c3b8b2247af0306c5233adaada0b00fe14df178e5a9721
+EMEL_CPP_KERNEL_EVENTS_BLOB=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+EMEL_CPP_KERNEL_DETAIL_BLOB=c8a82643eabfe8f2d7883e655955f455794511b0
+EMEL_CPP_GENERATION_HEADER_BLOB=d521cf68e1bf52a2a193bbdb460741772199b318
+EMEL_CPP_GENERATION_BLOB=099058ccd441d1dc6bebbb0c4994070d2f533c47
+EMEL_KERNEL_CAPABILITY_SML_COMMIT=49207123cd3f39767764bae774932cb48623f92f
+EMEL_KERNEL_CAPABILITY_SML_SOURCE="${EMEL_STATEFORWARD_SML_SOURCE:-$EMEL_CPP_SOURCE/build/zig/_deps/stateforward_sml-src}"
 GGUF_LIVE_MODEL_RELATIVE=tests/models/Llama-68M-Chat-v1-Q2_K.gguf
 GGUF_LIVE_MODEL_LFS_BLOB=49aa0ba91b29a4015339757cc67544f614e0fa21
 GGUF_LIVE_MODEL_SHA256=8ed06dc5bd84bce3154a2b7e751c45a56562691933ee25b5823393f909329a67
@@ -72,7 +80,7 @@ then checked-in snapshot verification.
   --snapshot-only  run only checked-in snapshot gates and required reference comparisons
   --live-only      run only direct pinned llama.cpp parity
   --update-only    run only snapshot refresh and its parity validation
-  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, token-profile, or model-vocab (default: all)
+  --suite=NAME     run all, gguf, io-read, io-mmap, io-staged-read, io-loader, model-tensor, model-data, token-profile, model-vocab, or kernel-capability (default: all)
 
 Model paths are checked during the live phase. Without paths, both the
 deterministic fixture corpus and the pinned independently sourced model run.
@@ -112,6 +120,7 @@ for argument in "$@"; do
     --suite=model-data) SUITE=model-data ;;
     --suite=token-profile) SUITE=token-profile ;;
     --suite=model-vocab) SUITE=model-vocab ;;
+    --suite=kernel-capability) SUITE=kernel-capability ;;
     --help|-h) usage; exit 0 ;;
     --*) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
     *) models+=("$argument") ;;
@@ -140,6 +149,7 @@ RUN_MODEL_TENSOR=false
 RUN_MODEL_DATA=false
 RUN_TOKEN_PROFILE=false
 RUN_MODEL_VOCAB=false
+RUN_KERNEL_CAPABILITY=false
 case "$SUITE" in
   all)
     RUN_GGUF=true
@@ -151,6 +161,7 @@ case "$SUITE" in
     RUN_MODEL_DATA=true
     RUN_TOKEN_PROFILE=true
     RUN_MODEL_VOCAB=true
+    RUN_KERNEL_CAPABILITY=true
     ;;
   gguf) RUN_GGUF=true ;;
   io-read) RUN_IO_READ=true ;;
@@ -161,11 +172,12 @@ case "$SUITE" in
   model-data) RUN_MODEL_DATA=true ;;
   token-profile) RUN_TOKEN_PROFILE=true ;;
   model-vocab) RUN_MODEL_VOCAB=true ;;
+  kernel-capability) RUN_KERNEL_CAPABILITY=true ;;
 esac
 
 if $RUN_GGUF || $RUN_IO_READ || $RUN_IO_MMAP || $RUN_IO_STAGED_READ || \
   $RUN_IO_LOADER || $RUN_MODEL_TENSOR || $RUN_TOKEN_PROFILE || \
-  $RUN_MODEL_VOCAB; then
+  $RUN_MODEL_VOCAB || $RUN_KERNEL_CAPABILITY; then
   if ! command -v cmake >/dev/null 2>&1; then
     echo "error: cmake is required for the selected parity suite" >&2
     exit 2
@@ -898,6 +910,74 @@ run_model_vocab_parity() {
   fi
 }
 
+run_kernel_capability_parity() {
+  local events_blob detail_blob generation_header_blob generation_blob
+  local materialized_source reference_build
+  local reference_output rust_output reference_runner
+  events_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/kernel/events.hpp")"
+  detail_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/kernel/detail.hpp")"
+  generation_header_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/model/generation/any.hpp")"
+  generation_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/model/generation/any.cpp")"
+  if [[ "$events_blob" != "$EMEL_CPP_KERNEL_EVENTS_BLOB" || \
+        "$detail_blob" != "$EMEL_CPP_KERNEL_DETAIL_BLOB" || \
+        "$generation_header_blob" != "$EMEL_CPP_GENERATION_HEADER_BLOB" || \
+        "$generation_blob" != "$EMEL_CPP_GENERATION_BLOB" ]]; then
+    echo "error: emel.cpp kernel capability source identity drifted" >&2
+    exit 1
+  fi
+
+  materialized_source="$KERNEL_CAPABILITY_BUILD_DIR/emel-cpp-source"
+  reference_build="$KERNEL_CAPABILITY_BUILD_DIR/reference-build"
+  reference_output="$KERNEL_CAPABILITY_BUILD_DIR/manifest.cpp.txt"
+  rust_output="$KERNEL_CAPABILITY_BUILD_DIR/manifest.rust.txt"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E remove_directory "$reference_build"
+  cmake -E make_directory "$materialized_source"
+  if [[ "$(git -C "$EMEL_KERNEL_CAPABILITY_SML_SOURCE" rev-parse HEAD)" != \
+        "$EMEL_KERNEL_CAPABILITY_SML_COMMIT" ]]; then
+    echo "error: stateforward-sml source is not pinned at $EMEL_KERNEL_CAPABILITY_SML_COMMIT" >&2
+    exit 1
+  fi
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" \
+    CMakeLists.txt cmake include src | \
+    tar -x -C "$materialized_source"
+  cmake -S "$ROOT_DIR/tools/emel-kernel-capability-reference" \
+    -B "$reference_build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    "-DFETCHCONTENT_SOURCE_DIR_STATEFORWARD_SML=$EMEL_KERNEL_CAPABILITY_SML_SOURCE" \
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  cmake --build "$reference_build" --parallel \
+    --target emel-kernel-capability-reference
+  reference_runner="$reference_build/emel-kernel-capability-reference"
+  "$reference_runner" --parity >"$reference_output"
+  cargo run --quiet --locked --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-kernel-capability-parity -- --parity >"$rust_output"
+
+  diff -u "$reference_output" "$rust_output"
+  if [[ "$(grep -c '^scope=' "$rust_output")" -ne 68 || \
+        "$(grep -c '^label=' "$rust_output")" -ne 7 ]]; then
+    echo "error: kernel capability parity must contain 68 scope rows and 7 labels" >&2
+    exit 1
+  fi
+  if $RUN_UPDATE; then
+    mkdir -p "$(dirname "$KERNEL_CAPABILITY_SNAPSHOT")"
+    install -m 0644 "$rust_output" "$KERNEL_CAPABILITY_SNAPSHOT"
+    echo "Updated kernel capability parity snapshot from emel.cpp $EMEL_CPP_COMMIT"
+  fi
+  if $RUN_LIVE; then
+    echo "Kernel capability independent C++/Rust live comparison passed"
+  fi
+  if $RUN_SNAPSHOT; then
+    diff -u "$KERNEL_CAPABILITY_SNAPSHOT" "$rust_output"
+    echo "Kernel capability checked snapshot passed"
+  fi
+  echo "Kernel capability parity passed (34 serialized types x 2 contract scopes, 7 labels)"
+}
+
 if $RUN_GGUF; then
   if $RUN_UPDATE; then
     update_snapshot
@@ -933,4 +1013,7 @@ if $RUN_TOKEN_PROFILE; then
 fi
 if $RUN_MODEL_VOCAB; then
   run_model_vocab_parity
+fi
+if $RUN_KERNEL_CAPABILITY; then
+  run_kernel_capability_parity
 fi

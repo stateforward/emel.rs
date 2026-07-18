@@ -16,6 +16,8 @@ EMEL_CPP_MODEL_VOCAB_TREE=d2fd66887fbdef6e0894de9391155099839e625c
 EMEL_CPP_MODEL_VOCAB_DETAIL_BLOB=7c964f7449640fd7fe9eef21f4c14f3a65bf7b6a
 EMEL_MODEL_VOCAB_SML_COMMIT=49207123cd3f39767764bae774932cb48623f92f
 EMEL_MODEL_VOCAB_SML_SOURCE="${EMEL_STATEFORWARD_SML_SOURCE:-$EMEL_CPP_SOURCE/build/zig/_deps/stateforward_sml-src}"
+EMEL_KERNEL_CAPABILITY_SML_COMMIT=49207123cd3f39767764bae774932cb48623f92f
+EMEL_KERNEL_CAPABILITY_SML_SOURCE="${EMEL_STATEFORWARD_SML_SOURCE:-$EMEL_CPP_SOURCE/build/zig/_deps/stateforward_sml-src}"
 SNAPSHOT_MODE=false
 UPDATE=false
 SUITE=gguf
@@ -29,6 +31,9 @@ model_vocabulary_warmup_iterations=1
 token_profile_iterations=10000000
 token_profile_runs=7
 token_profile_warmup_iterations=1000000
+kernel_capability_iterations=1000
+kernel_capability_runs=5
+kernel_capability_warmup_iterations=100
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -46,7 +51,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-vocabulary, --suite=token-profile
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -61,18 +66,21 @@ for argument in "$@"; do
       model_data_iterations="${argument#*=}"
       model_vocabulary_iterations="${argument#*=}"
       token_profile_iterations="${argument#*=}"
+      kernel_capability_iterations="${argument#*=}"
       ;;
     --runs=*)
       runner_args+=("$argument")
       model_data_runs="${argument#*=}"
       model_vocabulary_runs="${argument#*=}"
       token_profile_runs="${argument#*=}"
+      kernel_capability_runs="${argument#*=}"
       ;;
     --warmup-iterations=*)
       runner_args+=("$argument")
       model_data_warmup_iterations="${argument#*=}"
       model_vocabulary_warmup_iterations="${argument#*=}"
       token_profile_warmup_iterations="${argument#*=}"
+      kernel_capability_warmup_iterations="${argument#*=}"
       ;;
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
@@ -83,6 +91,7 @@ for argument in "$@"; do
     --suite=model-data) SUITE=model-data ;;
     --suite=model-vocabulary) SUITE=model-vocabulary ;;
     --suite=token-profile) SUITE=token-profile ;;
+    --suite=kernel-capability) SUITE=kernel-capability ;;
     --help|-h) usage; exit 0 ;;
     *) echo "error: unknown argument: $argument" >&2; usage >&2; exit 2 ;;
   esac
@@ -105,7 +114,97 @@ else
 fi
 mkdir -p "$BUILD_DIR"
 CURRENT="$BUILD_DIR/$SUITE-current.txt"
-if [[ "$SUITE" == "token-profile" ]]; then
+if [[ "$SUITE" == "kernel-capability" ]]; then
+  events_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/kernel/events.hpp")"
+  detail_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/kernel/detail.hpp")"
+  generation_header_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/model/generation/any.hpp")"
+  generation_blob="$(git -C "$EMEL_CPP_SOURCE" rev-parse \
+    "$EMEL_CPP_COMMIT:src/emel/model/generation/any.cpp")"
+  if [[ "$events_blob" != "4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9" || \
+        "$detail_blob" != "c8a82643eabfe8f2d7883e655955f455794511b0" || \
+        "$generation_header_blob" != "d521cf68e1bf52a2a193bbdb460741772199b318" || \
+        "$generation_blob" != "099058ccd441d1dc6bebbb0c4994070d2f533c47" ]]; then
+    echo "error: emel.cpp kernel capability source identity drifted" >&2
+    exit 1
+  fi
+  capability_work="$BUILD_DIR/kernel-capability-reference"
+  materialized_source="$capability_work/emel-cpp-source"
+  reference_build="$capability_work/build"
+  cmake -E remove_directory "$materialized_source"
+  cmake -E remove_directory "$reference_build"
+  cmake -E make_directory "$materialized_source"
+  if [[ "$(git -C "$EMEL_KERNEL_CAPABILITY_SML_SOURCE" rev-parse HEAD)" != \
+        "$EMEL_KERNEL_CAPABILITY_SML_COMMIT" ]]; then
+    echo "error: stateforward-sml source is not pinned at $EMEL_KERNEL_CAPABILITY_SML_COMMIT" >&2
+    exit 1
+  fi
+  git -C "$EMEL_CPP_SOURCE" archive "$EMEL_CPP_COMMIT" \
+    CMakeLists.txt cmake include src | \
+    tar -x -C "$materialized_source"
+  cmake -S "$ROOT_DIR/tools/emel-kernel-capability-reference" \
+    -B "$reference_build" -DCMAKE_BUILD_TYPE=Release \
+    "-DFETCHCONTENT_SOURCE_DIR_STATEFORWARD_SML=$EMEL_KERNEL_CAPABILITY_SML_SOURCE" \
+    "-DEMEL_CPP_SOURCE_DIR=$materialized_source"
+  cmake --build "$reference_build" --parallel \
+    --target emel-kernel-capability-reference
+  "$reference_build/emel-kernel-capability-reference" --benchmark \
+    "$kernel_capability_iterations" "$kernel_capability_runs" \
+    "$kernel_capability_warmup_iterations" >"$capability_work/cpp.out"
+  cargo run --quiet --locked --release --manifest-path "$ROOT_DIR/Cargo.toml" \
+    -p emel-kernel-capability-parity -- --benchmark \
+    "$kernel_capability_iterations" "$kernel_capability_runs" \
+    "$kernel_capability_warmup_iterations" >"$capability_work/rust.out"
+  {
+    printf '# bench_host_arch: %s\n' \
+      "$(rustc --print cfg | awk -F'"' '/^target_arch=/{print $2; exit}')"
+    printf '# bench_pointer_width: %s\n' "$(( $(getconf LONG_BIT) ))"
+    printf '# benchmark_config: iterations=%s runs=%s sample_policy=median warmup_iterations=%s\n' \
+      "$kernel_capability_iterations" "$kernel_capability_runs" \
+      "$kernel_capability_warmup_iterations"
+    printf '# source_repository: stateforward/emel.cpp\n'
+    printf '# source_commit: %s\n' "$EMEL_CPP_COMMIT"
+    printf '# source_kernel_events_blob: %s\n' "$events_blob"
+    printf '# source_kernel_detail_blob: %s\n' "$detail_blob"
+    printf '# source_generation_header_blob: %s\n' "$generation_header_blob"
+    printf '# source_generation_blob: %s\n' "$generation_blob"
+    printf '# benchmark_fixture: same MatrixWeightContract tensor_type=Q4_K expected=NativeQuantized in both public owner APIs\n'
+    printf '# benchmark_timing: Rust public Resolver dispatch versus pinned C++ public 14-stage generation audit; 100 warmups then median 5x1000 by default\n'
+    printf '# benchmark_validation: every observation is native_quantized; Rust dispatch allocation separately proven zero\n'
+    printf '# benchmark_interpretation: conservative source-owner comparison; C++ timing includes construction and traversal of its complete audit result\n'
+    awk '
+      function value(name,    i, part) {
+        for (i = 1; i <= NF; ++i) {
+          split($i, part, "=")
+          if (part[1] == name) return part[2]
+        }
+        return ""
+      }
+      FNR == NR {
+        cpp = value("cpp_ns_per_op")
+        cpp_outcome = value("outcome")
+        cpp_iter = value("iter")
+        cpp_runs = value("runs")
+        next
+      }
+      {
+        rust = value("rust_ns_per_op")
+        rust_outcome = value("outcome")
+        rust_iter = value("iter")
+        rust_runs = value("runs")
+      }
+      END {
+        ratio = rust / cpp
+        if (cpp <= 0 || rust <= 0 || cpp_outcome != "native_quantized" ||
+            rust_outcome != cpp_outcome || rust_iter != cpp_iter ||
+            rust_runs != cpp_runs || ratio > 2.0) exit 1
+        printf "kernel/capability/resolve_matrix_q4_k rust_ns_per_op=%.3f cpp_ns_per_op=%.3f rust_vs_cpp_ratio=%.6f outcome=native_quantized dispatch_allocations=0 iter=%s runs=%s\n", rust, cpp, ratio, rust_iter, rust_runs
+      }
+    ' "$capability_work/cpp.out" "$capability_work/rust.out"
+  } >"$CURRENT"
+elif [[ "$SUITE" == "token-profile" ]]; then
   raw_output="$CURRENT.raw"
   EMEL_TOKEN_PROFILE_BENCH_ITERATIONS="$token_profile_iterations" \
     EMEL_TOKEN_PROFILE_BENCH_RUNS="$token_profile_runs" \
@@ -538,7 +637,7 @@ validate_io_read_pointer_width() {
   fi
 }
 
-if [[ "$SUITE" == "gguf" || "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" || "$SUITE" == "model-vocabulary" || "$SUITE" == "token-profile" ]]; then
+if [[ "$SUITE" == "gguf" || "$SUITE" == "io-read" || "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-data" || "$SUITE" == "model-vocabulary" || "$SUITE" == "token-profile" || "$SUITE" == "kernel-capability" ]]; then
   host_arch="$(validate_io_read_arch "$CURRENT" "current benchmark artifact")"
   pointer_width="$(validate_io_read_pointer_width "$CURRENT" "current benchmark artifact")"
 else
@@ -914,6 +1013,61 @@ validate_token_profile_artifact() {
   fi
 }
 
+validate_kernel_capability_artifact() {
+  local artifact="$1"
+  local label="$2"
+  local expected
+  for expected in \
+    '# source_repository: stateforward/emel.cpp' \
+    '# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6' \
+    '# source_kernel_events_blob: 4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9' \
+    '# source_kernel_detail_blob: c8a82643eabfe8f2d7883e655955f455794511b0' \
+    '# source_generation_header_blob: d521cf68e1bf52a2a193bbdb460741772199b318' \
+    '# source_generation_blob: 099058ccd441d1dc6bebbb0c4994070d2f533c47' \
+    '# benchmark_fixture: same MatrixWeightContract tensor_type=Q4_K expected=NativeQuantized in both public owner APIs' \
+    '# benchmark_timing: Rust public Resolver dispatch versus pinned C++ public 14-stage generation audit; 100 warmups then median 5x1000 by default' \
+    '# benchmark_validation: every observation is native_quantized; Rust dispatch allocation separately proven zero' \
+    '# benchmark_interpretation: conservative source-owner comparison; C++ timing includes construction and traversal of its complete audit result'; do
+    if [[ "$(grep -Fxc "$expected" "$artifact")" -ne 1 ]]; then
+      echo "error: $label must contain exactly one kernel-capability field: $expected" >&2
+      exit 1
+    fi
+  done
+  if ! awk '
+    function value(name,    i, part) {
+      for (i = 2; i <= NF; ++i) {
+        split($i, part, "=")
+        if (part[1] == name) return part[2]
+      }
+      return ""
+    }
+    /^# benchmark_config: / {
+      expected_iterations = value("iterations")
+      expected_runs = value("runs")
+      next
+    }
+    /^#/ { next }
+    $1 == "kernel/capability/resolve_matrix_q4_k" {
+      cases += 1
+      rust = value("rust_ns_per_op")
+      cpp = value("cpp_ns_per_op")
+      ratio = value("rust_vs_cpp_ratio")
+      valid = rust + 0 > 0 && cpp + 0 > 0 && ratio + 0 > 0 && ratio + 0 <= 2.0
+      valid = valid && ((rust / cpp) - ratio < 0.00001) && (ratio - (rust / cpp) < 0.00001)
+      valid = valid && value("outcome") == "native_quantized"
+      valid = valid && value("dispatch_allocations") == "0"
+      valid = valid && value("iter") == expected_iterations && value("runs") == expected_runs
+      if (!valid) invalid = 1
+      next
+    }
+    NF { invalid = 1 }
+    END { exit invalid || cases != 1 }
+  ' "$artifact"; then
+    echo "error: $label has an invalid kernel-capability benchmark case" >&2
+    exit 1
+  fi
+}
+
 if [[ "$SUITE" == "gguf" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   current_iterations="${current_config_values%% *}"
@@ -957,6 +1111,9 @@ elif [[ "$SUITE" == "model-vocabulary" ]]; then
 elif [[ "$SUITE" == "token-profile" ]]; then
   current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
   validate_token_profile_artifact "$CURRENT" "current benchmark artifact"
+elif [[ "$SUITE" == "kernel-capability" ]]; then
+  current_config_values="$(validate_io_read_config "$CURRENT" "current benchmark artifact" "$pointer_width")"
+  validate_kernel_capability_artifact "$CURRENT" "current benchmark artifact"
 fi
 
 if $UPDATE; then
@@ -1139,10 +1296,25 @@ elif [[ "$SUITE" == "token-profile" ]]; then
       exit 1
     }
   done
+elif [[ "$SUITE" == "kernel-capability" ]]; then
+  baseline_arch="$(validate_io_read_arch "$BASELINE" "benchmark baseline")"
+  baseline_pointer_width="$(validate_io_read_pointer_width "$BASELINE" "benchmark baseline")"
+  validate_io_read_config "$BASELINE" "benchmark baseline" "$baseline_pointer_width" >/dev/null
+  validate_kernel_capability_artifact "$BASELINE" "benchmark baseline"
+  if [[ "$baseline_arch" != "$host_arch" || "$baseline_pointer_width" != "$pointer_width" ]]; then
+    echo "error: kernel capability benchmark architecture differs from baseline" >&2
+    exit 1
+  fi
+  for field in source_repository source_commit source_kernel_events_blob source_kernel_detail_blob source_generation_header_blob source_generation_blob benchmark_fixture benchmark_timing benchmark_validation benchmark_interpretation; do
+    [[ "$(grep "^# $field: " "$BASELINE")" == "$(grep "^# $field: " "$CURRENT")" ]] || {
+      echo "error: kernel capability benchmark $field differs from baseline" >&2
+      exit 1
+    }
+  done
 fi
 
 max_ratio="${EMEL_BENCH_MAX_REGRESSION_RATIO:-2.0}"
-if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-vocabulary" ]]; then
+if [[ "$SUITE" == "io-mmap" || "$SUITE" == "io-staged-read" || "$SUITE" == "io-loader" || "$SUITE" == "model-tensor" || "$SUITE" == "model-vocabulary" || "$SUITE" == "kernel-capability" ]]; then
   awk -v max_ratio="$max_ratio" -v suite="$SUITE" '
     function value(name,    field_index, part) {
       for (field_index = 2; field_index <= NF; ++field_index) {

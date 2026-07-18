@@ -221,9 +221,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "emel-kernel-capability-parity"
+version = "0.1.0"
+dependencies = [
+ "emel-kernels",
+ "emel-model",
+ "emel-tensor",
+]
+
+[[package]]
 name = "emel-kernels"
 version = "0.1.0"
 dependencies = [
+ "allocation-counter",
+ "emel-tensor",
  "stateforward-sml",
 ]
 

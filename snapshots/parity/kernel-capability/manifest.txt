@@ -1,0 +1,82 @@
+kernel-capability-parity/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_generation_header_blob=d521cf68e1bf52a2a193bbdb460741772199b318
+source_generation_blob=099058ccd441d1dc6bebbb0c4994070d2f533c47
+label=f32 value=f32
+label=q2_k value=q2_k
+label=q3_k value=q3_k
+label=q4_k value=q4_k
+label=q6_k value=q6_k
+label=q4_0 value=q4_0
+label=unknown value=unknown
+scope=vector code=0 outcome=approved_dense_f32_by_contract
+scope=vector code=1 outcome=explicit_no_claim
+scope=vector code=2 outcome=approved_dense_f32_by_contract
+scope=vector code=3 outcome=approved_dense_f32_by_contract
+scope=vector code=6 outcome=approved_dense_f32_by_contract
+scope=vector code=7 outcome=explicit_no_claim
+scope=vector code=8 outcome=approved_dense_f32_by_contract
+scope=vector code=9 outcome=explicit_no_claim
+scope=vector code=10 outcome=approved_dense_f32_by_contract
+scope=vector code=11 outcome=approved_dense_f32_by_contract
+scope=vector code=12 outcome=approved_dense_f32_by_contract
+scope=vector code=13 outcome=explicit_no_claim
+scope=vector code=14 outcome=approved_dense_f32_by_contract
+scope=vector code=15 outcome=explicit_no_claim
+scope=vector code=16 outcome=explicit_no_claim
+scope=vector code=17 outcome=explicit_no_claim
+scope=vector code=18 outcome=explicit_no_claim
+scope=vector code=19 outcome=explicit_no_claim
+scope=vector code=20 outcome=explicit_no_claim
+scope=vector code=21 outcome=explicit_no_claim
+scope=vector code=22 outcome=explicit_no_claim
+scope=vector code=23 outcome=explicit_no_claim
+scope=vector code=24 outcome=explicit_no_claim
+scope=vector code=25 outcome=explicit_no_claim
+scope=vector code=26 outcome=explicit_no_claim
+scope=vector code=27 outcome=explicit_no_claim
+scope=vector code=28 outcome=explicit_no_claim
+scope=vector code=29 outcome=explicit_no_claim
+scope=vector code=30 outcome=explicit_no_claim
+scope=vector code=34 outcome=explicit_no_claim
+scope=vector code=35 outcome=explicit_no_claim
+scope=vector code=39 outcome=explicit_no_claim
+scope=vector code=41 outcome=explicit_no_claim
+scope=vector code=42 outcome=explicit_no_claim
+scope=matrix code=0 outcome=disallowed_fallback
+scope=matrix code=1 outcome=explicit_no_claim
+scope=matrix code=2 outcome=native_quantized
+scope=matrix code=3 outcome=native_quantized
+scope=matrix code=6 outcome=native_quantized
+scope=matrix code=7 outcome=explicit_no_claim
+scope=matrix code=8 outcome=native_quantized
+scope=matrix code=9 outcome=explicit_no_claim
+scope=matrix code=10 outcome=native_quantized
+scope=matrix code=11 outcome=native_quantized
+scope=matrix code=12 outcome=native_quantized
+scope=matrix code=13 outcome=explicit_no_claim
+scope=matrix code=14 outcome=native_quantized
+scope=matrix code=15 outcome=explicit_no_claim
+scope=matrix code=16 outcome=explicit_no_claim
+scope=matrix code=17 outcome=explicit_no_claim
+scope=matrix code=18 outcome=explicit_no_claim
+scope=matrix code=19 outcome=explicit_no_claim
+scope=matrix code=20 outcome=explicit_no_claim
+scope=matrix code=21 outcome=explicit_no_claim
+scope=matrix code=22 outcome=explicit_no_claim
+scope=matrix code=23 outcome=explicit_no_claim
+scope=matrix code=24 outcome=explicit_no_claim
+scope=matrix code=25 outcome=explicit_no_claim
+scope=matrix code=26 outcome=explicit_no_claim
+scope=matrix code=27 outcome=explicit_no_claim
+scope=matrix code=28 outcome=explicit_no_claim
+scope=matrix code=29 outcome=explicit_no_claim
+scope=matrix code=30 outcome=explicit_no_claim
+scope=matrix code=34 outcome=explicit_no_claim
+scope=matrix code=35 outcome=explicit_no_claim
+scope=matrix code=39 outcome=explicit_no_claim
+scope=matrix code=41 outcome=explicit_no_claim
+scope=matrix code=42 outcome=explicit_no_claim
