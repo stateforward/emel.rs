@@ -38,6 +38,7 @@ version = "0.0.0"
 dependencies = [
  "emel-gguf",
  "emel-io",
+ "emel-kernels",
  "emel-model",
  "emel-tensor",
  "emel-token",
@@ -63,11 +64,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "emel-kernels"
+version = "0.1.0"
+dependencies = [
+ "emel-tensor",
+ "stateforward-sml",
+]
+
+[[package]]
 name = "emel-model"
 version = "0.1.0"
 dependencies = [
  "emel-gguf",
  "emel-io",
+ "emel-kernels",
  "emel-tensor",
  "emel-token",
  "stateforward-sml",

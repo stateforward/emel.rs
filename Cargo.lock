@@ -259,6 +259,7 @@ dependencies = [
  "allocation-counter",
  "emel-gguf",
  "emel-io",
+ "emel-kernels",
  "emel-tensor",
  "emel-token",
  "stateforward-sml",

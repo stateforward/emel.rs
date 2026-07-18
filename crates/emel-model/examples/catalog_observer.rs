@@ -394,3 +394,4 @@ const fn error(error: Error) -> &'static str {
         _ => "other",
     }
 }
+use emel_kernels as _;

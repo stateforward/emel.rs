@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub(crate) mod data;
+pub mod generation;
 pub mod generation_audit;
 pub(crate) mod loader;
 pub mod tensor;

@@ -837,6 +837,13 @@ run_model_catalog_parity() {
       EMEL_MODEL_CATALOG_PARITY_SNAPSHOT="$MODEL_CATALOG_SNAPSHOT" \
       "$ROOT_DIR/scripts/model-catalog-parity.sh" "${mode[0]}"
   fi
+  if [[ ${#mode[@]} -eq 0 ]]; then
+    EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      "$ROOT_DIR/scripts/model-generation-parity.sh"
+  else
+    EMEL_CPP_SOURCE_DIR="$EMEL_CPP_SOURCE" \
+      "$ROOT_DIR/scripts/model-generation-parity.sh" "${mode[0]}"
+  fi
 }
 
 run_token_profile_parity() {

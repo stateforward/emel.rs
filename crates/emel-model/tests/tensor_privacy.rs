@@ -82,4 +82,5 @@ fn machine_context_and_state_inspection_remain_private() {
     assert!(stderr.contains("is_ready"), "{stderr}");
 }
 use emel_gguf as _;
+use emel_kernels as _;
 use emel_token as _;

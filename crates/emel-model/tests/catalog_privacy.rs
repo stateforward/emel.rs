@@ -91,3 +91,4 @@ fn private_records_storage_fields_identities_and_state_are_inaccessible() {
         assert!(!output.status.success(), "{case} unexpectedly compiled");
     }
 }
+use emel_kernels as _;

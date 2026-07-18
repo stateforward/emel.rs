@@ -335,3 +335,4 @@ fn hparam_child_outcomes_are_classified_only_by_sml() {
         );
     }
 }
+use emel_kernels as _;

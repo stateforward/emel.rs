@@ -1,0 +1,6 @@
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_generation_header_blob: d521cf68e1bf52a2a193bbdb460741772199b318
+# source_generation_implementation_blob: 099058ccd441d1dc6bebbb0c4994070d2f533c47
+# benchmark_operand: same prebound attention+QK block index 0; Rust public BlockVisit vs C++ public lookup_block_view; full returned view black-boxed and index checksum observed
+# benchmark_config: iterations=1000000 runs=11 warmup_iterations=100000 sample_policy=median max_ratio=2.0
+model/generation/block_visit rust_ns_per_op=19 cpp_ns_per_op=13.648 rust_vs_cpp_ratio=1.392145 outcome=found checksum=0

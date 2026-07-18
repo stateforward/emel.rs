@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 emel-gguf = { workspace = true }
 emel-io = { workspace = true }
+emel-kernels = { workspace = true }
 emel-tensor = { workspace = true }
 emel-token = { workspace = true }
 sml = { workspace = true }
@@ -19,6 +20,9 @@ allocation-counter = "=0.8.1"
 
 [[example]]
 name = "tensor_parity"
+
+[[example]]
+name = "generation_observer"
 
 [[example]]
 name = "vocabulary_observer"

@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 emel-gguf = { path = "../crates/emel-gguf" }
 emel-io = { path = "../crates/emel-io" }
+emel-kernels = { path = "../crates/emel-kernels" }
 emel-model = { path = "../crates/emel-model" }
 emel-tensor = { path = "../crates/emel-tensor" }
 emel-token = { path = "../crates/emel-token" }
@@ -95,6 +96,13 @@ bench = false
 [[bin]]
 name = "emel_model_catalog"
 path = "fuzz_targets/emel_model_catalog.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_model_generation"
+path = "fuzz_targets/emel_model_generation.rs"
 test = false
 doc = false
 bench = false

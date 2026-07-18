@@ -35,6 +35,15 @@ void require(bool condition, std::string_view message) {
   }
 }
 
+template <typename T> inline void do_not_optimize(const T &value) {
+#if defined(__GNUC__) || defined(__clang__)
+  asm volatile("" : : "m"(value) : "memory");
+#else
+  volatile const T *sink = &value;
+  (void)sink;
+#endif
+}
+
 void append(fixture &value, std::span<const std::uint8_t> name,
             std::int32_t type, std::int32_t dimensions,
             std::array<std::int64_t, 4> shape, std::uint64_t data_size,
@@ -159,6 +168,106 @@ double median(std::vector<double> samples) {
   return samples[samples.size() / 2];
 }
 
+fixture generation_fixture() {
+  fixture value{};
+  value.model->params.n_ctx = 4096;
+  const std::array<std::string_view, 14> names = {
+      "token_embd.weight", "output_norm.weight", "output.weight",
+      "blk.0.attn_norm.weight", "blk.0.attn_q.weight",
+      "blk.0.attn_k.weight", "blk.0.attn_v.weight",
+      "blk.0.attn_q_norm.weight", "blk.0.attn_k_norm.weight",
+      "blk.0.attn_output.weight", "blk.0.ffn_norm.weight",
+      "blk.0.ffn_gate.weight", "blk.0.ffn_down.weight",
+      "blk.0.ffn_up.weight"};
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    const auto type = index == 1 || index == 3 || index == 7 || index == 8 ||
+                              index == 10
+                          ? 0
+                          : 14;
+    append(value, names[index], type, 1, {256, 1, 1, 1}, 210, true);
+  }
+  return value;
+}
+
+void print_generation(std::string_view label, const model_data &model,
+                      std::int32_t block_count, bool require_qk_norm) {
+  using namespace emel::model::generation;
+  execution_view execution{};
+  execution.model = &model;
+  execution.block_count = block_count;
+  execution.blocks.resize(static_cast<std::size_t>(block_count));
+  require(bind_tensor_view(model, "token_embd.weight", execution.token_embedding),
+          "token embedding");
+  require(bind_tensor_view(model, "output_norm.weight", execution.output_norm),
+          "output norm");
+  require(bind_output_view(model, execution.token_embedding, false,
+                           execution.output),
+          "output");
+  for (std::int32_t index = 0; index < block_count; ++index) {
+    require(bind_attention_block(model, index, require_qk_norm, false,
+                                 execution.blocks[static_cast<std::size_t>(index)]) == 0,
+            "attention block");
+  }
+  topology graph{&execution, 13, 13, 4, 13 * 128 * 4};
+  step_plan prefill{};
+  step_plan decode{};
+  require(build_step_plans(graph, prefill, decode) == 0, "step plans");
+  const auto audit = build_quantized_path_audit(execution);
+  std::cout << "generation_case=" << label << " block_count=" << block_count
+            << " prefill=" << prefill.max_step_tokens
+            << " decode=" << decode.max_step_tokens << " uses_attention=1\n";
+  for (const auto &stage : audit.stages) {
+    std::cout << "stage=" << quantized_stage_family_name(stage.family)
+              << " type=" << tensor_type_name(stage.tensor_type)
+              << " contract=" << quantized_contract_kind_name(stage.contract)
+              << " consistent=" << stage.consistent_across_layers << '\n';
+  }
+}
+
+void generation_parity() {
+  std::cout << "model-generation-parity-snapshot/v1\n";
+  std::cout << "source_commit=843a117386ef17dc5a50549bbfc821074c2141d6\n";
+  std::cout << "source_generation_header_blob=d521cf68e1bf52a2a193bbdb460741772199b318\n";
+  std::cout << "source_generation_implementation_blob=099058ccd441d1dc6bebbb0c4994070d2f533c47\n";
+  const auto value = generation_fixture();
+  print_generation("attention_qk", *value.model, 1, true);
+}
+
+void generation_benchmark(std::uint64_t iterations, std::size_t runs,
+                          std::uint64_t warmup) {
+  using namespace emel::model::generation;
+  const auto value = generation_fixture();
+  execution_view execution{};
+  execution.model = value.model.get();
+  execution.block_count = 1;
+  execution.blocks.resize(1);
+  require(bind_attention_block(*value.model, 0, true, false,
+                               execution.blocks[0]) == 0,
+          "benchmark block");
+  block_view block{};
+  for (std::uint64_t index = 0; index < warmup; ++index) {
+    require(lookup_block_view(execution, 0, block) == 0, "warmup lookup");
+  }
+  std::vector<double> samples;
+  samples.reserve(runs);
+  std::int64_t checksum = 0;
+  for (std::size_t run = 0; run < runs; ++run) {
+    const auto start = std::chrono::steady_clock::now();
+    for (std::uint64_t index = 0; index < iterations; ++index) {
+      require(lookup_block_view(execution, 0, block) == 0, "block lookup");
+      do_not_optimize(block);
+      checksum += block.index;
+    }
+    const auto elapsed = std::chrono::duration<double, std::nano>(
+        std::chrono::steady_clock::now() - start);
+    samples.push_back(elapsed.count() / static_cast<double>(iterations));
+  }
+  std::cout << std::fixed << std::setprecision(3)
+            << "cpp_ns_per_visit=" << median(std::move(samples))
+            << " outcome=found checksum=" << checksum << " iter=" << iterations
+            << " runs=" << runs << '\n';
+}
+
 void probe_done(const emel::gguf::loader::events::probe_done &) {}
 void probe_error(const emel::gguf::loader::events::probe_error &event) {
   throw std::runtime_error{"GGUF probe error " + std::to_string(event.err)};
@@ -245,6 +354,12 @@ parsed_fixture parse_fixture(const std::filesystem::path &path) {
     record.data = output.bytes.data();
   }
   return output;
+}
+
+void observe_generation_fixture(const std::filesystem::path &path) {
+  auto value = parse_fixture(path);
+  value.model->params.n_ctx = 4096;
+  print_generation("llama_real_fixture", *value.model, 2, false);
 }
 
 struct semantic_digest {
@@ -361,12 +476,26 @@ int main(int argc, char **argv) try {
               std::strtoull(argv[4], nullptr, 10));
     return 0;
   }
+  if (argc == 2 && std::string_view{argv[1]} == "--generation") {
+    generation_parity();
+    return 0;
+  }
+  if (argc == 5 && std::string_view{argv[1]} == "--generation-benchmark") {
+    generation_benchmark(std::strtoull(argv[2], nullptr, 10),
+                         static_cast<std::size_t>(std::strtoull(argv[3], nullptr, 10)),
+                         std::strtoull(argv[4], nullptr, 10));
+    return 0;
+  }
+  if (argc == 3 && std::string_view{argv[1]} == "--generation-fixture") {
+    observe_generation_fixture(argv[2]);
+    return 0;
+  }
   if (argc == 4 && std::string_view{argv[1]} == "--fixtures") {
     observe_fixture("llama", argv[2], "output_norm.weight");
     observe_fixture("lfm", argv[3], "token_embd.weight");
     return 0;
   }
-  std::cerr << "usage: emel-model-catalog-reference [--benchmark ITER RUNS WARMUP|--fixtures LLAMA LFM]\n";
+  std::cerr << "usage: emel-model-catalog-reference [--benchmark ITER RUNS WARMUP|--fixtures LLAMA LFM|--generation|--generation-benchmark ITER RUNS WARMUP|--generation-fixture LLAMA]\n";
   return 2;
 } catch (const std::exception &error) {
   std::cerr << "error: " << error.what() << '\n';

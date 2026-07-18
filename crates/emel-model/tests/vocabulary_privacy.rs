@@ -75,3 +75,4 @@ fn callback_borrows_cannot_escape_the_dispatch() {
         "callback borrow escaped actor dispatch"
     );
 }
+use emel_kernels as _;
