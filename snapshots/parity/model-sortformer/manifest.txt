@@ -1,0 +1,13 @@
+model-sortformer-parity-snapshot/v1
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_sortformer_any_blob=d79cb231e0dfc75f5aa4d8da7db2ecf36c92c9b6
+source_sortformer_detail_header_blob=72766c7042707a8037ac49779b8e3f8e2b34c555
+source_sortformer_detail_implementation_blob=011a3ec4dfaab102457c3f6ca6e20a5adf9934b1
+contract sample_rate=16000 speakers=4 frame_shift_ms=80 chunk_len=188 right_context=1 fifo_len=0 cache_period=188 cache_len=188
+family=prep. count=2 first=prep.feat.fb
+family=enc. count=709 first=enc.l0.conv.bn.b
+family=mods. count=8 first=mods.ep.b
+family=te. count=288 first=te.l0.sa.k.b
+fixture_sha256=1b85d7bf641350d0d355e7494c4b7d92a1ff2fb2d886cd6dcc43f358a6266ff0
+source_owner_map_sha256=661bb39af6a284fee6b9ce15f37032e99a5835d3fb831c57309b93eb6af0cc62
+reference_tool_sha256=c714ef05b3461221f00179098e9aa5151e2d7e63b796992d1ce2a722e01d4db5

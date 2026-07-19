@@ -15,6 +15,7 @@ pub mod lfm2;
 pub mod llama;
 pub(crate) mod loader;
 pub mod qwen3;
+pub mod sortformer;
 pub mod tensor;
 pub mod vocabulary;
 

@@ -1,0 +1,8 @@
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# fixture_sha256: 1b85d7bf641350d0d355e7494c4b7d92a1ff2fb2d886cd6dcc43f358a6266ff0
+# operand: same real GGUF bytes through each public loader, model binding, Sortformer family contract construction, and final descriptor observation
+# config: iterations=1 runs=3 warmup=0 process_runs=3 max_ratio=2.0
+model/sortformer/contract_visit/process run=1 cpp_ns_per_op=65238875 rust_ns_per_op=78626417 paired_ratio=1.205208 checksum=2127
+model/sortformer/contract_visit/process run=2 cpp_ns_per_op=65063792 rust_ns_per_op=72559541 paired_ratio=1.115206 checksum=2127
+model/sortformer/contract_visit/process run=3 cpp_ns_per_op=68231292 rust_ns_per_op=72597708 paired_ratio=1.063994 checksum=2127
+model/sortformer/contract_visit rust_median_ns_per_op=72597708 cpp_median_ns_per_op=65238875 paired_ratio_median=1.115206 checksum=2127

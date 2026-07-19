@@ -46,6 +46,9 @@ model_qwen3_warmup_iterations=100000
 model_gemma4_iterations=1000000
 model_gemma4_runs=11
 model_gemma4_warmup_iterations=100000
+model_sortformer_iterations=1
+model_sortformer_runs=3
+model_sortformer_warmup_iterations=0
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -63,7 +66,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-catalog, --suite=model-generation, --suite=model-qwen3, --suite=model-gemma4, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-catalog, --suite=model-generation, --suite=model-qwen3, --suite=model-gemma4, --suite=model-sortformer, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -83,6 +86,7 @@ for argument in "$@"; do
       model_generation_iterations="${argument#*=}"
       model_qwen3_iterations="${argument#*=}"
       model_gemma4_iterations="${argument#*=}"
+      model_sortformer_iterations="${argument#*=}"
       ;;
     --runs=*)
       runner_args+=("$argument")
@@ -94,6 +98,7 @@ for argument in "$@"; do
       model_generation_runs="${argument#*=}"
       model_qwen3_runs="${argument#*=}"
       model_gemma4_runs="${argument#*=}"
+      model_sortformer_runs="${argument#*=}"
       ;;
     --warmup-iterations=*)
       runner_args+=("$argument")
@@ -105,6 +110,7 @@ for argument in "$@"; do
       model_generation_warmup_iterations="${argument#*=}"
       model_qwen3_warmup_iterations="${argument#*=}"
       model_gemma4_warmup_iterations="${argument#*=}"
+      model_sortformer_warmup_iterations="${argument#*=}"
       ;;
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
@@ -117,6 +123,7 @@ for argument in "$@"; do
     --suite=model-generation) SUITE=model-generation ;;
     --suite=model-qwen3) SUITE=model-qwen3 ;;
     --suite=model-gemma4) SUITE=model-gemma4 ;;
+    --suite=model-sortformer) SUITE=model-sortformer ;;
     --suite=model-vocabulary) SUITE=model-vocabulary ;;
     --suite=token-profile) SUITE=token-profile ;;
     --suite=kernel-capability) SUITE=kernel-capability ;;
@@ -164,6 +171,13 @@ if [[ "$SUITE" == "model-gemma4" ]]; then
   $SNAPSHOT_MODE && gemma4_args+=(--snapshot)
   $UPDATE && gemma4_args+=(--update)
   exec "$ROOT_DIR/scripts/model-gemma4-bench.sh" "${gemma4_args[@]}"
+fi
+
+if [[ "$SUITE" == "model-sortformer" ]]; then
+  sortformer_args=("--iterations=$model_sortformer_iterations" "--runs=$model_sortformer_runs" "--warmup-iterations=$model_sortformer_warmup_iterations")
+  $SNAPSHOT_MODE && sortformer_args+=(--snapshot)
+  $UPDATE && sortformer_args+=(--update)
+  exec "$ROOT_DIR/scripts/model-sortformer-bench.sh" "${sortformer_args[@]}"
 fi
 
 if [[ -n "${EMEL_BENCH_RUNNER:-}" ]]; then
