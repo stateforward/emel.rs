@@ -1,0 +1,8 @@
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# fixture_sha256: 955b5c847cc95c94ff14a27667d9aca039983448fd8cefe4f2804d3bfae621ae
+# operand: same real GGUF bytes through each loader, direct OmniEmbed hparams, six-family contract construction, and descriptor observation; generic vocabulary and architecture routing excluded
+# config: iterations=1 runs=3 warmup=0 process_runs=3 max_ratio=2.0
+model/omniembed/contract_visit/process run=1 cpp_ns_per_op=20894750 rust_ns_per_op=18926416 paired_ratio=0.905798 checksum=309
+model/omniembed/contract_visit/process run=2 cpp_ns_per_op=20654417 rust_ns_per_op=18543042 paired_ratio=0.897776 checksum=309
+model/omniembed/contract_visit/process run=3 cpp_ns_per_op=20614250 rust_ns_per_op=18566833 paired_ratio=0.900680 checksum=309
+model/omniembed/contract_visit rust_median_ns_per_op=18566833 cpp_median_ns_per_op=20654417 paired_ratio_median=0.900680 checksum=309

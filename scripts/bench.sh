@@ -49,6 +49,9 @@ model_gemma4_warmup_iterations=100000
 model_sortformer_iterations=1
 model_sortformer_runs=3
 model_sortformer_warmup_iterations=0
+model_omniembed_iterations=1
+model_omniembed_runs=3
+model_omniembed_warmup_iterations=0
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -66,7 +69,7 @@ usage: scripts/bench.sh [--snapshot|--compare] [--update] [runner options]
   --compare   alias for --snapshot
   --update    replace the baseline after a successful benchmark run
 
-Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-catalog, --suite=model-generation, --suite=model-qwen3, --suite=model-gemma4, --suite=model-sortformer, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
+Suites: --suite=gguf, --suite=io-read, --suite=io-mmap, --suite=io-staged-read, --suite=io-loader, --suite=model-tensor, --suite=model-data, --suite=model-catalog, --suite=model-generation, --suite=model-qwen3, --suite=model-gemma4, --suite=model-omniembed, --suite=model-sortformer, --suite=model-vocabulary, --suite=token-profile, --suite=kernel-capability
 Runner options: --iterations=N --runs=N --warmup-iterations=N
 Set EMEL_BENCH_MAX_REGRESSION_RATIO to change the default 2.0x gate.
 USAGE
@@ -87,6 +90,7 @@ for argument in "$@"; do
       model_qwen3_iterations="${argument#*=}"
       model_gemma4_iterations="${argument#*=}"
       model_sortformer_iterations="${argument#*=}"
+      model_omniembed_iterations="${argument#*=}"
       ;;
     --runs=*)
       runner_args+=("$argument")
@@ -99,6 +103,7 @@ for argument in "$@"; do
       model_qwen3_runs="${argument#*=}"
       model_gemma4_runs="${argument#*=}"
       model_sortformer_runs="${argument#*=}"
+      model_omniembed_runs="${argument#*=}"
       ;;
     --warmup-iterations=*)
       runner_args+=("$argument")
@@ -111,6 +116,7 @@ for argument in "$@"; do
       model_qwen3_warmup_iterations="${argument#*=}"
       model_gemma4_warmup_iterations="${argument#*=}"
       model_sortformer_warmup_iterations="${argument#*=}"
+      model_omniembed_warmup_iterations="${argument#*=}"
       ;;
     --suite=gguf) SUITE=gguf; runner_args[0]=gguf ;;
     --suite=io-read) SUITE=io-read; runner_args[0]=io-read ;;
@@ -123,6 +129,7 @@ for argument in "$@"; do
     --suite=model-generation) SUITE=model-generation ;;
     --suite=model-qwen3) SUITE=model-qwen3 ;;
     --suite=model-gemma4) SUITE=model-gemma4 ;;
+    --suite=model-omniembed) SUITE=model-omniembed ;;
     --suite=model-sortformer) SUITE=model-sortformer ;;
     --suite=model-vocabulary) SUITE=model-vocabulary ;;
     --suite=token-profile) SUITE=token-profile ;;
@@ -178,6 +185,13 @@ if [[ "$SUITE" == "model-sortformer" ]]; then
   $SNAPSHOT_MODE && sortformer_args+=(--snapshot)
   $UPDATE && sortformer_args+=(--update)
   exec "$ROOT_DIR/scripts/model-sortformer-bench.sh" "${sortformer_args[@]}"
+fi
+
+if [[ "$SUITE" == "model-omniembed" ]]; then
+  omniembed_args=("--iterations=$model_omniembed_iterations" "--runs=$model_omniembed_runs" "--warmup-iterations=$model_omniembed_warmup_iterations")
+  $SNAPSHOT_MODE && omniembed_args+=(--snapshot)
+  $UPDATE && omniembed_args+=(--update)
+  exec "$ROOT_DIR/scripts/model-omniembed-bench.sh" "${omniembed_args[@]}"
 fi
 
 if [[ -n "${EMEL_BENCH_RUNNER:-}" ]]; then

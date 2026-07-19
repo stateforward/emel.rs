@@ -5,10 +5,11 @@ use emel_gguf::Loader;
 use emel_gguf::event::{
     Bind, ElementKind, Error, MetadataDescriptor, MetadataKind, Parse, Probe, QueryError,
     ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64,
-    ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned,
-    ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage, TensorDescriptor, VisitBoolArray,
-    VisitF32Array, VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor,
-    WithString, WithStringArrayElement, WithTensor,
+    ReadF64ArrayElement, ReadIntegerArrayCount, ReadSigned, ReadSignedArrayElement,
+    ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, ReadUnsignedArrayMetrics,
+    Storage, TensorDescriptor, VisitBoolArray, VisitF32Array, VisitSignedArray, VisitStringArray,
+    VisitUnsignedArray, WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
+    WithTensor,
 };
 use emel_tensor::dtype::SerializedType;
 use sml as _;
@@ -201,12 +202,21 @@ fn tensor_fixture() -> Vec<u8> {
 }
 
 fn serialized_tensor_fixture(tensor_type: u32, dimensions: &[u64], data_size: usize) -> Vec<u8> {
+    serialized_named_tensor_fixture(b"packed", tensor_type, dimensions, data_size)
+}
+
+fn serialized_named_tensor_fixture(
+    name: &[u8],
+    tensor_type: u32,
+    dimensions: &[u64],
+    data_size: usize,
+) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&MAGIC);
     append_u32(&mut bytes, VERSION);
     append_u64(&mut bytes, 1);
     append_u64(&mut bytes, 0);
-    append_string(&mut bytes, b"packed");
+    append_string(&mut bytes, name);
     append_u32(&mut bytes, u32::try_from(dimensions.len()).unwrap());
     for dimension in dimensions {
         append_u64(&mut bytes, *dimension);
@@ -687,7 +697,7 @@ fn string_array_metrics_are_exact_constant_work_and_allocation_free() {
 }
 
 #[test]
-fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
+fn numeric_array_bulk_visits_are_allocation_free() {
     let file = typed_metadata_fixture();
     let mut loader = load(&file).unwrap();
     let mut floats = [0.0_f32; 2];
@@ -708,6 +718,28 @@ fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
     assert_eq!(result.unwrap(), Ok(Some(1)));
     assert_eq!(floats[0].to_bits(), 2.0_f32.to_bits());
 
+    let mut signed = [0_i64; 2];
+    let mut signed_result = None;
+    assert_eq!(
+        measure(|| {
+            signed_result = Some(loader.process_event(VisitSignedArray::new(
+                b"a.i16",
+                |index: u32, value: i64| {
+                    signed[index as usize] = value;
+                },
+            )));
+        })
+        .count_total,
+        0
+    );
+    assert_eq!(signed_result.unwrap(), Ok(Some(2)));
+    assert_eq!(signed, [-1, 2]);
+}
+
+#[test]
+fn unsigned_array_bulk_queries_preserve_source_coercions_and_metrics() {
+    let file = typed_metadata_fixture();
+    let mut loader = load(&file).unwrap();
     for (key, expected, count) in [
         (b"a.u8".as_slice(), [1, 2], 2),
         (b"a.i8".as_slice(), [u64::MAX, 2], 2),
@@ -732,6 +764,10 @@ fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
             .unwrap();
         assert_eq!(metrics.element_count(), count);
         assert_eq!(
+            loader.process_event(ReadIntegerArrayCount::new(key)),
+            Ok(Some(count))
+        );
+        assert_eq!(
             metrics.maximum(),
             *expected[..usize::try_from(count).unwrap()]
                 .iter()
@@ -739,6 +775,42 @@ fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
                 .unwrap()
         );
     }
+}
+
+#[test]
+fn signed_and_float_array_bulk_queries_preserve_coercions_and_failures() {
+    let file = typed_metadata_fixture();
+    let mut loader = load(&file).unwrap();
+    for (key, expected, count) in [
+        (b"a.u8".as_slice(), [1_i64, 2], 2),
+        (b"a.i8".as_slice(), [-1, 2], 2),
+        (b"a.u16".as_slice(), [1, 2], 2),
+        (b"a.i16".as_slice(), [-1, 2], 2),
+        (b"a.u32".as_slice(), [1, 2], 2),
+        (b"a.i32".as_slice(), [-1, 2], 2),
+        (b"a.i64".as_slice(), [-7, 0], 1),
+    ] {
+        let mut integers = [0_i64; 2];
+        assert_eq!(
+            loader.process_event(VisitSignedArray::new(key, |index: u32, value: i64| {
+                integers[index as usize] = value;
+            })),
+            Ok(Some(count))
+        );
+        assert_eq!(integers, expected);
+    }
+    assert_eq!(
+        loader.process_event(VisitSignedArray::new(b"a.u64", |_, _| {})),
+        Err(QueryError::Range)
+    );
+    assert_eq!(
+        loader.process_event(VisitSignedArray::new(b"a.f32", |_, _| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitSignedArray::new(b"missing", |_, _| {})),
+        Ok(None)
+    );
 
     let mut f32_bits = 0_u32;
     assert_eq!(
@@ -751,6 +823,14 @@ fn numeric_array_bulk_queries_preserve_coercions_ranges_and_zero_allocation() {
     assert_eq!(
         loader.process_event(ReadUnsignedArrayMetrics::new(b"a.f32")),
         Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadIntegerArrayCount::new(b"a.f32")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadIntegerArrayCount::new(b"missing")),
+        Ok(None)
     );
     assert_eq!(
         loader.process_event(ReadUnsignedArrayMetrics::new(b"missing")),
@@ -948,6 +1028,29 @@ fn tensor_queries_expose_only_semantic_data_from_the_bound_source() {
         )),
         Ok(None)
     );
+}
+
+#[test]
+fn long_tensor_names_and_zero_dimensional_scalars_match_gguf_wire_semantics() {
+    let name = b"text_encoder.0.auto_model.encoder.layer.0.attention.output.LayerNorm.weight";
+    assert!(name.len() > 64);
+    let file = serialized_named_tensor_fixture(name, 0, &[], 32);
+    let mut loader = load(&file).unwrap();
+    let observed = loader
+        .process_event(WithTensor::new(
+            0,
+            |borrowed_name: &[u8], descriptor: TensorDescriptor, data: &[u8]| {
+                (
+                    borrowed_name == name,
+                    descriptor.dimension_count(),
+                    descriptor.dimensions(),
+                    descriptor.data_size(),
+                    data.len(),
+                )
+            },
+        ))
+        .unwrap();
+    assert_eq!(observed, Some((true, 0, [1; 4], 4, 4)));
 }
 
 #[test]

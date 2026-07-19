@@ -115,6 +115,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "emel_model_omniembed"
+path = "fuzz_targets/emel_model_omniembed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "emel_tensor_dtype"
 path = "fuzz_targets/emel_tensor_dtype.rs"
 test = false

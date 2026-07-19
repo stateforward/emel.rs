@@ -14,6 +14,7 @@ pub mod generation_audit;
 pub mod lfm2;
 pub mod llama;
 pub(crate) mod loader;
+pub mod omniembed;
 pub mod qwen3;
 pub mod sortformer;
 pub mod tensor;

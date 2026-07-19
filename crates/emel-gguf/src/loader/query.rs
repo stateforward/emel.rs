@@ -12,10 +12,11 @@ use super::detail::{
 };
 use crate::event::{
     ElementKind, QueryError, ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32,
-    ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement,
-    ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement, ReadUnsignedArrayMetrics,
-    Storage, StringArrayMetrics, UnsignedArrayMetrics, VisitBoolArray, VisitF32Array,
-    VisitStringArray, VisitUnsignedArray, WithByteArray, WithString, WithStringArrayElement,
+    ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadIntegerArrayCount, ReadSigned,
+    ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement,
+    ReadUnsignedArrayMetrics, Storage, StringArrayMetrics, UnsignedArrayMetrics, VisitBoolArray,
+    VisitF32Array, VisitSignedArray, VisitStringArray, VisitUnsignedArray, WithByteArray,
+    WithString, WithStringArrayElement,
 };
 
 mod sm;
@@ -1161,6 +1162,40 @@ impl Operation for ReadUnsignedArrayMetrics<'_> {
     }
 }
 
+impl Operation for ReadIntegerArrayCount<'_> {
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        array(entry).map_or(Decision::TypeMismatch, |value| integer_decision(value.kind))
+    }
+    result_methods!(u64);
+    fn apply_array_uint8(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int8(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_uint16(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int16(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_uint32(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int32(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_uint64(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int64(&mut self, value: Array<'_>) {
+        self.result = Ok(Some(value.count));
+    }
+}
+
 fn publish_unsigned_visit<F>(
     array: Array<'_>,
     size: usize,
@@ -1219,6 +1254,114 @@ where
     fn apply_array_int64(&mut self, v: Array<'_>) {
         publish_unsigned_visit(v, 8, decode_u64_raw, &mut self.visitor);
         self.result = Ok(Some(v.count));
+    }
+}
+
+fn publish_signed_visit<F>(
+    array: Array<'_>,
+    size: usize,
+    decode: impl FnMut(&[u8]) -> i64,
+    visitor: &mut F,
+) where
+    F: FnMut(u32, i64),
+{
+    for_each_array_value(array, size, decode, visitor);
+}
+
+impl<F> Operation for VisitSignedArray<'_, F>
+where
+    F: FnMut(u32, i64),
+{
+    fn key(&self) -> &[u8] {
+        self.key
+    }
+    fn decision(&self, entry: Entry<'_>) -> Decision {
+        let Some(value) = array(entry) else {
+            return Decision::TypeMismatch;
+        };
+        if integer_decision(value.kind) != Decision::Accept {
+            Decision::TypeMismatch
+        } else if value.kind == TYPE_UINT64
+            && value.count > 0
+            && unsigned_metrics(value, 8, decode_u64_raw).maximum() > I64_MAX_U64
+        {
+            Decision::Range
+        } else {
+            Decision::Accept
+        }
+    }
+    fn missing(&mut self) {
+        self.result = Ok(None);
+    }
+    fn error(&mut self, error: QueryError) {
+        self.result = Err(error);
+    }
+    fn apply_array_uint8(&mut self, value: Array<'_>) {
+        publish_signed_visit(value, 1, |bytes| i64::from(bytes[0]), &mut self.visitor);
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int8(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            1,
+            |bytes| i64::from(i8::from_le_bytes([bytes[0]])),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_uint16(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            2,
+            |bytes| i64::from(read_u16(bytes)),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int16(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            2,
+            |bytes| i64::from(i16::from_le_bytes(read_u16(bytes).to_le_bytes())),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_uint32(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            4,
+            |bytes| i64::from(read_u32(bytes)),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int32(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            4,
+            |bytes| i64::from(i32::from_le_bytes(read_u32(bytes).to_le_bytes())),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_uint64(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            8,
+            |bytes| i64::try_from(read_u64(bytes)).expect("range guard validates u64"),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
+    }
+    fn apply_array_int64(&mut self, value: Array<'_>) {
+        publish_signed_visit(
+            value,
+            8,
+            |bytes| i64::from_le_bytes(read_u64(bytes).to_le_bytes()),
+            &mut self.visitor,
+        );
+        self.result = Ok(Some(value.count));
     }
 }
 

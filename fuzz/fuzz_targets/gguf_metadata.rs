@@ -5,10 +5,11 @@ mod common;
 use emel_gguf::Loader;
 use emel_gguf::event::{
     Bind, ElementKind, MetadataDescriptor, Parse, Probe, QueryError, ReadArrayLength, ReadBool,
-    ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned,
-    ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned, ReadUnsignedArrayElement,
-    ReadUnsignedArrayMetrics, Storage, VisitBoolArray, VisitF32Array, VisitStringArray,
-    VisitUnsignedArray, WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement,
+    ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64, ReadF64ArrayElement,
+    ReadIntegerArrayCount, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned,
+    ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage, VisitBoolArray, VisitF32Array,
+    VisitSignedArray, VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor,
+    WithString, WithStringArrayElement,
 };
 use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
@@ -112,6 +113,11 @@ fn exercise_queries(loader: &mut Loader, key: &[u8], index: u64) -> u64 {
     );
     hash_result(
         &mut hash,
+        loader.process_event(ReadIntegerArrayCount::new(key)),
+        |hash, value| hash_bytes(hash, &value.to_le_bytes()),
+    );
+    hash_result(
+        &mut hash,
         loader.process_event(ReadUnsignedArrayElement::new(key, index)),
         |hash, value| hash_bytes(hash, &value.to_le_bytes()),
     );
@@ -166,6 +172,18 @@ fn exercise_queries(loader: &mut Loader, key: &[u8], index: u64) -> u64 {
     }));
     hash_result(&mut hash, visit, |hash, value| hash_bytes(hash, &value.to_le_bytes()));
     hash_bytes(&mut hash, &unsigned_hash.to_le_bytes());
+    let mut signed_hash = FNV_OFFSET;
+    let visit = loader.process_event(VisitSignedArray::new(
+        key,
+        |visited_index: u32, value: i64| {
+            hash_bytes(&mut signed_hash, &visited_index.to_le_bytes());
+            hash_bytes(&mut signed_hash, &value.to_le_bytes());
+        },
+    ));
+    hash_result(&mut hash, visit, |hash, value| {
+        hash_bytes(hash, &value.to_le_bytes());
+    });
+    hash_bytes(&mut hash, &signed_hash.to_le_bytes());
     let mut bool_hash = FNV_OFFSET;
     let visit = loader.process_event(VisitBoolArray::new(
         key,

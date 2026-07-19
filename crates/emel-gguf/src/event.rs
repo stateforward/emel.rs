@@ -853,6 +853,33 @@ impl Event for ReadUnsignedArrayMetrics<'_> {
     }
 }
 
+/// Read the element count from an integer-array header without visiting its payload.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadIntegerArrayCount<'a> {
+    pub(crate) key: &'a [u8],
+    pub(crate) result: Result<Option<u64>, QueryError>,
+}
+
+impl<'a> ReadIntegerArrayCount<'a> {
+    /// Creates a constant-time integer-array count query.
+    #[must_use]
+    pub const fn new(key: &'a [u8]) -> Self {
+        Self {
+            key,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl sealed::Sealed for ReadIntegerArrayCount<'_> {}
+impl Event for ReadIntegerArrayCount<'_> {
+    type Output = Result<Option<u64>, QueryError>;
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
+}
+
 macro_rules! array_element_query {
     ($name:ident, $value:ty) => {
         #[doc = concat!("Read one optional array element as `", stringify!($value), "`.")]
@@ -1041,6 +1068,56 @@ pub struct VisitUnsignedArray<'a, F> {
     pub(crate) key: &'a [u8],
     pub(crate) visitor: F,
     pub(crate) result: Result<Option<u64>, QueryError>,
+}
+
+/// Visit every integer-array element with signed numeric decoding semantics.
+///
+/// `u8`, `u16`, and `u32` elements are widened; `i8`, `i16`, and `i32`
+/// elements are sign-extended; and `i64` elements are preserved exactly. An
+/// unsigned `u64` element above `i64::MAX` produces [`QueryError::Range`]
+/// before the visitor is invoked. Non-integer arrays produce
+/// [`QueryError::TypeMismatch`], while a missing key produces `Ok(None)`.
+///
+/// The loader invokes the visitor synchronously and in wire order before
+/// `process_event` returns. Each index and value is passed by immutable copy;
+/// the loader retains neither the key, visitor, nor any delivered value. The
+/// visitor must not allocate, retain actor-owned data, or re-enter the loader.
+pub struct VisitSignedArray<'a, F> {
+    pub(crate) key: &'a [u8],
+    pub(crate) visitor: F,
+    pub(crate) result: Result<Option<u64>, QueryError>,
+}
+
+impl<'a, F> VisitSignedArray<'a, F> {
+    /// Creates a bulk signed-integer-array visitor.
+    #[must_use]
+    pub const fn new(key: &'a [u8], visitor: F) -> Self {
+        Self {
+            key,
+            visitor,
+            result: Err(QueryError::Internal),
+        }
+    }
+}
+
+impl<F> fmt::Debug for VisitSignedArray<'_, F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VisitSignedArray")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+impl<F> sealed::Sealed for VisitSignedArray<'_, F> where F: FnMut(u32, i64) {}
+impl<F> Event for VisitSignedArray<'_, F>
+where
+    F: FnMut(u32, i64),
+{
+    type Output = Result<Option<u64>, QueryError>;
+    fn dispatch(mut self, actor: &mut Loader) -> Self::Output {
+        actor.query(&mut self);
+        self.result
+    }
 }
 
 impl<'a, F> VisitUnsignedArray<'a, F> {

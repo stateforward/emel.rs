@@ -17,6 +17,7 @@ MODEL_GENERATION_REPORT="${EMEL_MODEL_GENERATION_COVERAGE_REPORT:-$ROOT_DIR/targ
 MODEL_LFM2_REPORT="${EMEL_MODEL_LFM2_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-lfm2.json}"
 MODEL_QWEN3_REPORT="${EMEL_MODEL_QWEN3_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-qwen3.json}"
 MODEL_GEMMA4_REPORT="${EMEL_MODEL_GEMMA4_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-gemma4.json}"
+MODEL_OMNIEMBED_REPORT="${EMEL_MODEL_OMNIEMBED_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-omniembed.json}"
 MODEL_SORTFORMER_REPORT="${EMEL_MODEL_SORTFORMER_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-sortformer.json}"
 MODEL_VOCABULARY_REPORT="${EMEL_MODEL_VOCABULARY_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-vocabulary.json}"
 TOKEN_PROFILE_REPORT="${EMEL_TOKEN_PROFILE_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-token-profile.json}"
@@ -33,6 +34,7 @@ MODEL_GENERATION_COVERAGE_TARGET_DIR="${EMEL_MODEL_GENERATION_COVERAGE_TARGET_DI
 MODEL_LFM2_COVERAGE_TARGET_DIR="${EMEL_MODEL_LFM2_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-lfm2}"
 MODEL_QWEN3_COVERAGE_TARGET_DIR="${EMEL_MODEL_QWEN3_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-qwen3}"
 MODEL_GEMMA4_COVERAGE_TARGET_DIR="${EMEL_MODEL_GEMMA4_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-gemma4}"
+MODEL_OMNIEMBED_COVERAGE_TARGET_DIR="${EMEL_MODEL_OMNIEMBED_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-omniembed}"
 MODEL_SORTFORMER_COVERAGE_TARGET_DIR="${EMEL_MODEL_SORTFORMER_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-sortformer}"
 MODEL_VOCABULARY_COVERAGE_TARGET_DIR="${EMEL_MODEL_VOCABULARY_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-vocabulary}"
 TOKEN_PROFILE_COVERAGE_TARGET_DIR="${EMEL_TOKEN_PROFILE_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-token-profile}"
@@ -82,6 +84,7 @@ mkdir -p \
   "$(dirname "$MODEL_LFM2_REPORT")" \
   "$(dirname "$MODEL_QWEN3_REPORT")" \
   "$(dirname "$MODEL_GEMMA4_REPORT")" \
+  "$(dirname "$MODEL_OMNIEMBED_REPORT")" \
   "$(dirname "$MODEL_SORTFORMER_REPORT")" \
   "$(dirname "$MODEL_VOCABULARY_REPORT")" \
   "$(dirname "$TOKEN_PROFILE_REPORT")" \
@@ -172,6 +175,11 @@ run_coverage "$MODEL_SORTFORMER_COVERAGE_TARGET_DIR" "$MODEL_SORTFORMER_REPORT" 
   '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-tensor/|crates/emel-kernels/|crates/emel-model/(src/(lib\.rs|architecture/|attention_family/|catalog/|data\.rs|gemma4/|generation/|generation_audit\.rs|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|tensor/|vocabulary/|whisper/|sortformer/(sm\.rs|tests\.rs))|tests/|examples/))' \
   --package emel-model -- sortformer::
 
+echo "Running maintained emel-model OmniEmbed family coverage"
+run_coverage "$MODEL_OMNIEMBED_COVERAGE_TARGET_DIR" "$MODEL_OMNIEMBED_REPORT" \
+  '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-tensor/|crates/emel-kernels/|crates/emel-model/(src/(lib\.rs|architecture/|attention_family/|catalog/|data\.rs|gemma4/|generation/|generation_audit\.rs|lfm2/|llama/|loader/|moshi/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/|vocabulary/|whisper/|omniembed/(sm\.rs|tests\.rs))|tests/|examples/))' \
+  --package emel-model -- omniembed::
+
 echo "Running maintained emel-model vocabulary and typed hyperparameter coverage"
 run_coverage "$MODEL_VOCABULARY_COVERAGE_TARGET_DIR" "$MODEL_VOCABULARY_REPORT" \
   '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-token/|crates/emel-model/(src/(lib\.rs|architecture/|data\.rs|gemma4/|generation/|lfm2/|llama/|loader/(mod\.rs|test_gguf\.rs)|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/|vocabulary/tests\.rs|whisper/)|tests/|examples/)|sm\.rs$)' \
@@ -203,6 +211,7 @@ python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-model-lfm2=$MODEL_LFM2_REPORT" \
   "emel-model-qwen3=$MODEL_QWEN3_REPORT" \
   "emel-model-gemma4=$MODEL_GEMMA4_REPORT" \
+  "emel-model-omniembed=$MODEL_OMNIEMBED_REPORT" \
   "emel-model-sortformer=$MODEL_SORTFORMER_REPORT" \
   "emel-model-vocabulary=$MODEL_VOCABULARY_REPORT" \
   "emel-token-profile=$TOKEN_PROFILE_REPORT" \

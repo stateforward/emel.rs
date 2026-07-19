@@ -1,0 +1,14 @@
+model-omniembed-parity-snapshot/v1
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_omniembed_detail_header_blob=88669d66bc799b05dcd1a2b99c88516f951a48e7
+source_omniembed_detail_implementation_blob=03e558a90e8df7824a0880ec2aa5500d9cc6f76b
+contract embedding=1280 image_encoder=1280 audio_encoder=1920 matryoshka_count=5 matryoshka_0=1280 matryoshka_3=256 image_size=384 audio_rate=32000 audio_fft=1024 audio_window=800 audio_hop=320 audio_mels=128
+family=text_encoder. count=103 first=text_encoder.0.auto_model.embeddings.LayerNorm.bias
+family=text_projection. count=10 first=text_projection.expand.0.bias
+family=image_encoder. count=385 first=image_encoder.blocks.0.0.bn1.bias
+family=image_projection. count=10 first=image_projection.expand.0.bias
+family=audio_encoder. count=266 first=audio_encoder.classifier.2.bias
+family=audio_projection. count=10 first=audio_projection.expand.0.bias
+fixture_sha256=955b5c847cc95c94ff14a27667d9aca039983448fd8cefe4f2804d3bfae621ae
+source_owner_map_sha256=ac3a4db5101cbb5c561c09a9624fb9cc5fbb0c10948aa76395ad402e6350775c
+reference_tool_sha256=dbdd4ee1577e288836b552c223e24279e9c7d3ed62993ce6e02afddb0067cbbc
