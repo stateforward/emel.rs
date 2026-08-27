@@ -1,0 +1,55 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_scalar_target_router
+reference=../emel.cpp
+kernel-target-scalar-unary-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_scalar_unary_exp_tanh_elu_gelu_silu_f32_dense_and_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=exp status=ok output_bits=3cf76081,3f1b4598,3f800000,3fd3094c,4117cdc4
+case=tanh status=ok output_bits=bf7f8896,beec9a9f,00000000,3eec9a9f,3f7a5feb
+case=elu status=ok output_bits=bf7844fc,bec974d0,00000000,3f000000,40100000
+case=gelu status=ok output_bits=ba218000,be1e0000,00000000,3eb10000,400e4000
+case=silu_scalar_residual status=ok output_bits=bdd21c2e,be414d03,00000000,3e9f597f,40024509
+case=zero_exp status=reject error=InvalidView output_bits=
+case=zero_tanh status=reject error=InvalidView output_bits=
+case=zero_silu status=reject error=InvalidView output_bits=
+case=invalid_shape status=reject error=ShapeMismatch output_bits=7fc00001,7fc00001
+source_detail_span=src/emel/kernel/detail.hpp:2392-2411,3271-3325
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:826-834,848-860,877-886
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:9194-9211,9376-9380
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:1195-1223
+events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+output_sha256=61298b3d6de1cdc5167d722aa39f4cc7199697c67d3099b3ffa376e743579ec2
+reference_observer_sha256=36a29e6c68e094876443d21ec63d99f2256ef681157006f9ec40723b94763060
+rust_observer_sha256=9a254cb6a7d6b1659dfee66476825bc9f47e79f4c7b3e97db3a30fe401de7d80
+rust_module=crates/emel-kernels/src/detail/scalar_unary.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::scalar_unary_*
+scope=scalar F32 exp/tanh/elu/gelu/silu over equal non-empty dense slices
+body_tail_case=count=5 (scalar path; SiLU misses SIMD alignment predicate)
+positive_cases=exp/tanh/elu/gelu/silu scalar residual exact output bits
+rejection_cases=zero_exp/zero_tanh/zero_silu and unequal invalid_shape typed rejection
+rejection_sentinel=unequal_count output remains 7fc00001; C++ zero-count storage remains sentinel
+cpp_only_probe=malformed stride plus unknown-dtype metadata rejected with sentinel-preserving output
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/target-scalar-unary-live
+residuals=SIMD SiLU is excluded; no portable/strided/quantized/non-F32 variants; no x86 live target claim
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml C++ commit 49207123cd3f39767764bae774932cb48623f92f
+result=match

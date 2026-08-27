@@ -3,10 +3,13 @@
 use std::env;
 use std::hint::black_box;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use emel_gguf::Loader as GgufLoader;
-use emel_gguf::event::{Bind, Error, Load, Parse, Probe};
+use emel_gguf::event::{
+    Bind, Error, Parse, Probe, QueryError, Storage as GgufStorage, VisitStringArray,
+};
 use emel_io::loader::Loader as IoLoader;
 use emel_io::loader::event::{LoadTensor, StrategyKind, StrategyPolicy, TensorLoadSpan};
 use emel_io::mmap::Mapper;
@@ -29,6 +32,7 @@ use emel_model::tensor::event::{
     ReleaseMapped, StorageBatch, StorageEntry, StrategyKind as TensorStrategy, TensorMetadata,
     WithTensor,
 };
+use emel_tensor::dtype::SerializedType;
 use std::cell::Cell;
 
 const ALIGNMENT: usize = 32;
@@ -199,9 +203,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_gguf(config: Config) -> Result<(), Error> {
+fn run_gguf(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    println!("# source_repository: ggml-org/llama.cpp");
+    println!("# source_commit: ecbcb7ea9d3303097519723b264a8b5f1e977028");
+    println!("# contract_source_repository: stateforward/emel.cpp");
+    println!("# contract_source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6");
+    println!(
+        "# contract_source_blobs: kernel_events=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9 kernel_detail=c8a82643eabfe8f2d7883e655955f455794511b0 gguf_loader_detail=4ec9829c6d640cfa65a6d546c5891cb048b29f90"
+    );
+    println!(
+        "# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 packed_tensor_entries=64 packed_wire_codes=41,42 packed_shapes=256x9,512x8 packed_tensor_bytes=2304 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index"
+    );
+    println!(
+        "# benchmark_validation: public_typed_outcomes every_timed_observation serialized_q4_k_bytes=9437184 serialized_packed_41_bytes=2304 serialized_packed_42_bytes=2304 exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125"
+    );
+    println!(
+        "# benchmark_allocation: probe times Arc capability clone; load includes caller preallocation; parse reuses bound storage; string query times allocation-free RTC dispatch over a preloaded actor"
+    );
     let metadata = metadata_fixture();
     let tensors = tensor_fixture();
+    let packed_tensors = packed_tensor_fixture();
+    let string_array = string_array_fixture();
     print_case(
         "gguf/probe/metadata_64",
         benchmark_probe(&metadata, config)?,
@@ -223,11 +245,47 @@ fn run_gguf(config: Config) -> Result<(), Error> {
         config,
     );
     print_case(
+        "gguf/parse/packed_41_42_tensors_64",
+        benchmark_parse(&packed_tensors, config)?,
+        config,
+    );
+    print_case(
         "gguf/load/tensors_64",
         benchmark_load(&tensors, config)?,
         config,
     );
+    print_case(
+        "gguf/query/string_array_4096",
+        benchmark_string_array_visit(&string_array, config)?,
+        config,
+    );
+    print_case(
+        "tensor/dtype/serialized_size",
+        benchmark_serialized_dtype(config)?,
+        config,
+    );
     Ok(())
+}
+
+fn benchmark_serialized_dtype(config: Config) -> Result<f64, core::convert::Infallible> {
+    measure(config, || {
+        let ordinary = SerializedType::try_from(black_box(12)).unwrap();
+        let ordinary_size = ordinary
+            .data_size(black_box([4096, 4096, 1, 1]), black_box(2))
+            .unwrap();
+        let packed_41 = SerializedType::try_from(black_box(41)).unwrap();
+        let packed_41_size = packed_41
+            .data_size(black_box([256, 9, 1, 1]), black_box(2))
+            .unwrap();
+        let packed_42 = SerializedType::try_from(black_box(42)).unwrap();
+        let packed_42_size = packed_42
+            .data_size(black_box([512, 8, 1, 1]), black_box(2))
+            .unwrap();
+        assert_eq!(black_box(ordinary_size), 9_437_184);
+        assert_eq!(black_box(packed_41_size), 2_304);
+        assert_eq!(black_box(packed_42_size), 2_304);
+        Ok(())
+    })
 }
 
 fn run_io_read(config: Config) -> Result<(), emel_io::read::event::Error> {
@@ -654,16 +712,24 @@ fn parse_config() -> Result<(Suite, Config), Box<dyn std::error::Error>> {
 
 fn benchmark_probe(bytes: &[u8], config: Config) -> Result<f64, Error> {
     let mut loader = GgufLoader::new();
+    let source: Arc<[u8]> = Arc::from(bytes);
     measure(config, || {
-        let requirements = loader.process_event(Probe::new(black_box(bytes)))?;
+        let requirements = loader.process_event(Probe::new(black_box(source.clone())))?;
         black_box(requirements);
         Ok(())
     })
 }
 
 fn benchmark_load(bytes: &[u8], config: Config) -> Result<f64, Error> {
+    let source: Arc<[u8]> = Arc::from(bytes);
     measure(config, || {
-        let model = GgufLoader::new().process_event(Load::new(black_box(bytes)))?;
+        let mut loader = GgufLoader::new();
+        let requirements = loader.process_event(Probe::new(black_box(source.clone())))?;
+        let storage = GgufStorage::exact(requirements)?;
+        loader
+            .process_event(Bind::new(storage))
+            .map_err(|error| error.error())?;
+        let model = loader.process_event(Parse::new())?;
         black_box(model);
         Ok(())
     })
@@ -671,13 +737,105 @@ fn benchmark_load(bytes: &[u8], config: Config) -> Result<f64, Error> {
 
 fn benchmark_parse(bytes: &[u8], config: Config) -> Result<f64, Error> {
     let mut loader = GgufLoader::new();
-    loader.process_event(Probe::new(bytes))?;
-    loader.process_event(Bind::exact())?;
+    let requirements = loader.process_event(Probe::new(Arc::from(bytes)))?;
+    loader
+        .process_event(Bind::new(GgufStorage::exact(requirements)?))
+        .map_err(|error| error.error())?;
     measure(config, || {
-        let model = loader.process_event(Parse::new(black_box(bytes)))?;
+        let model = loader.process_event(Parse::new())?;
         black_box(model);
         Ok(())
     })
+}
+
+const STRING_ARRAY_FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const STRING_ARRAY_FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const STRING_ARRAY_EXPECTED_FNV1A: u64 = 0x743e_126d_c9e1_e125;
+
+#[derive(Clone, Copy)]
+struct StringArrayObservation {
+    outcome: Option<u64>,
+    visited: u64,
+    ordered: bool,
+    digest: u64,
+}
+
+fn visit_string_array(loader: &mut GgufLoader) -> Result<StringArrayObservation, QueryError> {
+    let mut visited = 0_u64;
+    let mut ordered = true;
+    let mut digest = STRING_ARRAY_FNV_OFFSET;
+    let outcome = loader.process_event(VisitStringArray::new(
+        b"benchmark.string-array",
+        |index: u32, value: &[u8]| {
+            ordered &= u64::from(index) == visited;
+            for byte in index.to_le_bytes().iter().chain(value) {
+                digest ^= u64::from(*byte);
+                digest = digest.wrapping_mul(STRING_ARRAY_FNV_PRIME);
+            }
+            visited += 1;
+        },
+    ))?;
+    Ok(StringArrayObservation {
+        outcome,
+        visited,
+        ordered,
+        digest,
+    })
+}
+
+fn validate_string_array_observation(
+    observation: StringArrayObservation,
+) -> Result<(), QueryError> {
+    if !string_array_observation_is_valid(observation) {
+        return Err(QueryError::Internal);
+    }
+    Ok(())
+}
+
+fn string_array_observation_is_valid(observation: StringArrayObservation) -> bool {
+    const ELEMENT_COUNT: u64 = 4096;
+    observation.outcome == Some(ELEMENT_COUNT)
+        && observation.visited == ELEMENT_COUNT
+        && observation.ordered
+        && observation.digest == STRING_ARRAY_EXPECTED_FNV1A
+}
+
+fn benchmark_string_array_visit(bytes: &[u8], config: Config) -> Result<f64, QueryError> {
+    let mut loader = GgufLoader::new();
+    let requirements = loader
+        .process_event(Probe::new(Arc::from(bytes)))
+        .map_err(|_| QueryError::Internal)?;
+    loader
+        .process_event(Bind::new(
+            GgufStorage::exact(requirements).map_err(|_| QueryError::Internal)?,
+        ))
+        .map_err(|_| QueryError::Internal)?;
+    loader
+        .process_event(Parse::new())
+        .map_err(|_| QueryError::Internal)?;
+
+    for _ in 0..config.warmup_iterations {
+        validate_string_array_observation(visit_string_array(&mut loader)?)?;
+    }
+    let mut samples = Vec::with_capacity(config.runs);
+    for _ in 0..config.runs {
+        let started = Instant::now();
+        let mut observations_valid = true;
+        let mut observed_iterations = 0_u64;
+        for _ in 0..config.iterations {
+            observations_valid &=
+                string_array_observation_is_valid(visit_string_array(&mut loader)?);
+            observed_iterations += 1;
+        }
+        let elapsed = started.elapsed();
+        if !observations_valid || observed_iterations != config.iterations {
+            return Err(QueryError::Internal);
+        }
+        let iterations = f64::from(u32::try_from(config.iterations).expect("validated iterations"));
+        samples.push(elapsed.as_secs_f64() * 1_000_000_000.0 / iterations);
+    }
+    samples.sort_by(f64::total_cmp);
+    Ok(median(&samples))
 }
 
 fn measure<E>(config: Config, mut operation: impl FnMut() -> Result<(), E>) -> Result<f64, E> {
@@ -697,7 +855,7 @@ fn measure<E>(config: Config, mut operation: impl FnMut() -> Result<(), E>) -> R
     Ok(median(&samples))
 }
 
-fn median(samples: &[f64]) -> f64 {
+const fn median(samples: &[f64]) -> f64 {
     let middle = samples.len() / 2;
     if samples.len().is_multiple_of(2) {
         samples[middle - 1].midpoint(samples[middle])
@@ -750,6 +908,20 @@ fn metadata_fixture() -> Vec<u8> {
     bytes
 }
 
+fn string_array_fixture() -> Vec<u8> {
+    const ELEMENT_COUNT: u64 = 4096;
+    let mut bytes = Vec::new();
+    append_header(&mut bytes, 0, 1);
+    append_string(&mut bytes, b"benchmark.string-array");
+    append_u32(&mut bytes, 9);
+    append_u32(&mut bytes, 8);
+    append_u64(&mut bytes, ELEMENT_COUNT);
+    for index in 0..ELEMENT_COUNT {
+        append_string(&mut bytes, &index.to_le_bytes());
+    }
+    bytes
+}
+
 fn tensor_fixture() -> Vec<u8> {
     const TENSOR_COUNT: u64 = 64;
     const ELEMENTS: u64 = 256 * 4;
@@ -775,26 +947,62 @@ fn tensor_fixture() -> Vec<u8> {
     bytes
 }
 
+fn packed_tensor_fixture() -> Vec<u8> {
+    const TENSOR_COUNT: u64 = 64;
+    const TENSOR_BYTES: u64 = 2_304;
+    let mut bytes = Vec::new();
+    append_header(&mut bytes, TENSOR_COUNT, 0);
+    for index in 0..TENSOR_COUNT {
+        append_string(
+            &mut bytes,
+            format!("benchmark.packed-tensor.{index:02}").as_bytes(),
+        );
+        append_u32(&mut bytes, 2);
+        if index.is_multiple_of(2) {
+            append_u64(&mut bytes, 256);
+            append_u64(&mut bytes, 9);
+            append_u32(&mut bytes, 41);
+        } else {
+            append_u64(&mut bytes, 512);
+            append_u64(&mut bytes, 8);
+            append_u32(&mut bytes, 42);
+        }
+        append_u64(&mut bytes, index * TENSOR_BYTES);
+    }
+    bytes.resize(bytes.len().next_multiple_of(ALIGNMENT), 0);
+    bytes.resize(
+        bytes.len() + usize::try_from(TENSOR_COUNT * TENSOR_BYTES).expect("fixture size"),
+        0xa5,
+    );
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use allocation_counter::measure;
     use emel_gguf::Loader as GgufLoader;
-    use emel_gguf::event::{Load, ParseDone};
+    use emel_gguf::event::{Bind, Parse, ParseDone, Probe, Storage};
     use emel_model::tensor::event::{
         ApplyBoundEffectResults, ApplyOwnedEffectResults, CaptureTensorState,
         Lifecycle as TensorLifecycle, MappedLoad, OwnedEffectResult, ReleaseMapped,
     };
+    use std::sync::Arc;
 
     use super::{
         BindStorage, EffectBuffer, EffectRequest, Mapper, PlanLoad, StorageBatch, StorageEntry,
         TensorActors, TensorMetadata, TensorStore, TensorStrategy, WithTensor, median,
-        metadata_fixture, open_benchmark_source, tensor_fixture,
+        metadata_fixture, open_benchmark_source, packed_tensor_fixture, tensor_fixture,
     };
 
-    fn load(file_image: &[u8]) -> ParseDone<'_> {
-        GgufLoader::new()
-            .process_event(Load::new(file_image))
-            .expect("fixture loads")
+    fn load(file_image: &[u8]) -> ParseDone {
+        let mut loader = GgufLoader::new();
+        let requirements = loader
+            .process_event(Probe::new(Arc::from(file_image)))
+            .expect("fixture probes");
+        loader
+            .process_event(Bind::new(Storage::exact(requirements).expect("storage")))
+            .expect("storage binds");
+        loader.process_event(Parse::new()).expect("fixture parses")
     }
 
     fn assert_tensor_lifecycle<Dependencies>(
@@ -933,8 +1141,9 @@ mod tests {
 
     #[test]
     fn representative_fixtures_load() {
-        assert_eq!(load(&metadata_fixture()).metadata().len(), 64);
-        assert_eq!(load(&tensor_fixture()).tensors().len(), 64);
+        assert_eq!(load(&metadata_fixture()).metadata_count(), 64);
+        assert_eq!(load(&tensor_fixture()).tensor_count(), 64);
+        assert_eq!(load(&packed_tensor_fixture()).tensor_count(), 64);
     }
 
     #[test]

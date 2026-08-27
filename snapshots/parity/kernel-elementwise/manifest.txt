@@ -1,0 +1,19 @@
+kernel-elementwise-parity/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_kernel_any_blob=a85d0942c81ef8f4d2dc293c5ceeaa63ac0e2c49
+scope=dense_contiguous_f32
+case=op_dup status=ok output_bits=3fc00000,c0000000,3e800000
+case=op_add status=ok output_bits=3f800000,40000000,40100000
+case=op_sub status=ok output_bits=40000000,c0c00000,bfe00000
+case=op_mul status=ok output_bits=bf400000,c1000000,3f000000
+case=op_div status=ok output_bits=c0400000,bf000000,3e000000
+case=op_sqr status=ok output_bits=40100000,40800000,3d800000
+case=op_sqrt status=ok output_bits=00000000,40000000,40400000
+case=invalid_shape status=invalid_shape
+reference_tool_sha256=114b9ad8801ee33f839365b4a01aa211447269db7fb6eb87476951c2a6285d03
+rust_observer_sha256=f7243657f3bf240f5aff002d52608e7f1643faa485617f8cea1a13050fe3ded7
+config=Release,cxx20,dense-contiguous-f32,public-rust-actor,public-cpp-kernel
+result=match

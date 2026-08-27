@@ -1,0 +1,11 @@
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_qwen3_detail_header_blob: 6e31b097184042bfe1ec9486af060214f1d01b2b
+# source_qwen3_detail_implementation_blob: a43d8fee3ed962d84447360e7601c999468bf6f8
+# benchmark_operand: same alternating completed Qwen3 headwise-QK-RMS attention block indices 0 and 1; Rust public family BlockVisit vs C++ public generation lookup_block_view over the source-built Qwen3 contract; full descriptor black-boxed and nonzero index checksum observed
+# benchmark_config: iterations=1000000 runs=11 warmup_iterations=100000 process_runs=5 sample_policy=median_paired_process_ratio scheduling=darwin-throughput-0-latency-0 max_ratio=2.0
+model/qwen3/block_visit/process run=1 cpp_ns_per_op=14.549 rust_ns_per_op=5 paired_ratio=0.343666
+model/qwen3/block_visit/process run=2 cpp_ns_per_op=14.294 rust_ns_per_op=5 paired_ratio=0.349797
+model/qwen3/block_visit/process run=3 cpp_ns_per_op=14.278 rust_ns_per_op=5 paired_ratio=0.350189
+model/qwen3/block_visit/process run=4 cpp_ns_per_op=14.348 rust_ns_per_op=5 paired_ratio=0.348481
+model/qwen3/block_visit/process run=5 cpp_ns_per_op=14.253 rust_ns_per_op=5 paired_ratio=0.350803
+model/qwen3/block_visit rust_median_ns_per_op=5 cpp_median_ns_per_op=14.294 paired_ratio_median=0.349797 outcome=found checksum=5500000

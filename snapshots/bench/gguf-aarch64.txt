@@ -1,7 +1,19 @@
 # bench_host_arch: aarch64
+# bench_pointer_width: 64
 # benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
-gguf/probe/metadata_64 ns_per_op=4647.000 iter=1000 runs=5
-gguf/load/metadata_64 ns_per_op=9054.250 iter=1000 runs=5
-gguf/probe/tensors_64 ns_per_op=4586.791 iter=1000 runs=5
-gguf/parse/tensors_64 ns_per_op=4472.167 iter=1000 runs=5
-gguf/load/tensors_64 ns_per_op=8860.208 iter=1000 runs=5
+# source_repository: ggml-org/llama.cpp
+# source_commit: ecbcb7ea9d3303097519723b264a8b5f1e977028
+# contract_source_repository: stateforward/emel.cpp
+# contract_source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# contract_source_blobs: kernel_events=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9 kernel_detail=c8a82643eabfe8f2d7883e655955f455794511b0 gguf_loader_detail=4ec9829c6d640cfa65a6d546c5891cb048b29f90
+# benchmark_fixture: metadata_entries=64 tensor_entries=64 tensor_shape=256x4 tensor_type=f32 packed_tensor_entries=64 packed_wire_codes=41,42 packed_shapes=256x9,512x8 packed_tensor_bytes=2304 string_array_elements=4096 string_element_encoding=le_u64_length+le_u64_index
+# benchmark_validation: public_typed_outcomes every_timed_observation serialized_q4_k_bytes=9437184 serialized_packed_41_bytes=2304 serialized_packed_42_bytes=2304 exact_string_visit_count=4096 exact_string_visit_order=0..4095 expected_string_fnv1a=0x743e126dc9e1e125
+# benchmark_allocation: probe times Arc capability clone; load includes caller preallocation; parse reuses bound storage; string query times allocation-free RTC dispatch over a preloaded actor
+gguf/probe/metadata_64 ns_per_op=354.250 iter=1000 runs=5
+gguf/load/metadata_64 ns_per_op=5234.709 iter=1000 runs=5
+gguf/probe/tensors_64 ns_per_op=560.125 iter=1000 runs=5
+gguf/parse/tensors_64 ns_per_op=4910.333 iter=1000 runs=5
+gguf/parse/packed_41_42_tensors_64 ns_per_op=4748.834 iter=1000 runs=5
+gguf/load/tensors_64 ns_per_op=5096.625 iter=1000 runs=5
+gguf/query/string_array_4096 ns_per_op=55318.625 iter=1000 runs=5
+tensor/dtype/serialized_size ns_per_op=7.459 iter=1000 runs=5

@@ -1,0 +1,43 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-aarch64-q6-prepared-matrix-x8-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_q6_prepared_matrix_x8_m8_k256_and_typed_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+live_path=execute_neon_mul_mat_q6_vector_prepared_q8_rhs_i8mm_matrix_x8
+case=q6_prepared_matrix_x8_m8_k256 status=ok output_bits=c3d9d000,c2412780,c37942a0,c486f2f9,440fbf8c,444f0ebc,43c9d8d8,c492f28a,c3fd1000,c3a39bfc,438c62f0,449a73d8,c4a23e64,41df1980,c4c5800a,c30fda08,4520cb00,45004b59,c4efa378,45304b1a,c48e2a50,c29c5bf8,450b6020,452a55e6,4566f800,43146c80,c38e73f0,c47489f4,4566f5d4,451087e1,c32dbd00,c569e605,c581da80,c5a219ad,452df30e,c54b3712,4590def2,c56e637e,c5c1f79c,45059e49,45751000,457de570,c5b1a578,c50e04d6,c5d5b5d7,c2a68330,4557bcfb,c4835446,c5073000,456113f6,43e9b298,c51a8d0a,458ba523,44869f7a,c4c4385b,c5ed51b0,44314000,c5debf37,455f3444,44d53dd8,458d50c4,c4a1079c,c51e3d9c,46329a3c
+case=zero_count status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+case=k_zero status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+case=invalid_rhs_rows status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:221-254
+source_aarch64_action_span=src/emel/kernel/aarch64/guards.hpp:265-273
+source_aarch64_execution_span=src/emel/kernel/aarch64/actions.hpp:6254-6315
+source_aarch64_kernel_span=src/emel/kernel/aarch64/actions.hpp:5177-5325
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:445-448
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+output_sha256=69b15eaa9f1d082547028184e4151dfd5820b2832752f5f5d3c39761d958cf40
+rust_module=crates/emel-kernels/src/aarch64/q6_prepared.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::router_dispatches_q6_prepared_matrix_x8
+scope=q6_k_x8_q8_prepared_lhs_packed_q8_k_rhs_matrix_x8_f32_destination_m8_k256
+positive_cases=q6_prepared_matrix_x8_m8_k256_exact_output_bits
+rejection_cases=zero_count_k_zero_and_rhs_rows_not_eight_sentinel_preserving
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (existing focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/q6-prepared-matrix-x8
+residuals=argmax prepared, generic neon prepared, F16 neon, and x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 49207123cd3f39767764bae774932cb48623f92f
+result=match

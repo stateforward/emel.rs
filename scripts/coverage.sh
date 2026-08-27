@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COVERAGE_TOOLCHAIN="${EMEL_COVERAGE_TOOLCHAIN:-nightly-2026-07-12}"
-CARGO_LLVM_COV_VERSION="${CARGO_LLVM_COV_VERSION:-0.8.6}"
+COVERAGE_TOOLCHAIN="${EMEL_COVERAGE_TOOLCHAIN:-nightly-2026-08-25}"
+CARGO_LLVM_COV_VERSION="${CARGO_LLVM_COV_VERSION:-0.9.0}"
 LINE_COVERAGE_MIN="${LINE_COVERAGE_MIN:-90}"
 BRANCH_COVERAGE_MIN="${BRANCH_COVERAGE_MIN:-50}"
 GGUF_REPORT="${EMEL_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-gguf.json}"
@@ -12,12 +12,16 @@ IO_MMAP_REPORT="${EMEL_IO_MMAP_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-i
 IO_STAGED_READ_REPORT="${EMEL_IO_STAGED_READ_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-staged-read.json}"
 IO_LOADER_REPORT="${EMEL_IO_LOADER_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-io-loader.json}"
 MODEL_TENSOR_REPORT="${EMEL_MODEL_TENSOR_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model-tensor.json}"
+MODEL_REPORT="${EMEL_MODEL_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-model.json}"
+KERNELS_REPORT="${EMEL_KERNELS_COVERAGE_REPORT:-$ROOT_DIR/target/coverage/emel-kernels.json}"
 GGUF_COVERAGE_TARGET_DIR="${EMEL_GGUF_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-gguf}"
 IO_COVERAGE_TARGET_DIR="${EMEL_IO_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io}"
 IO_MMAP_COVERAGE_TARGET_DIR="${EMEL_IO_MMAP_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-mmap}"
 IO_STAGED_READ_COVERAGE_TARGET_DIR="${EMEL_IO_STAGED_READ_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-staged-read}"
 IO_LOADER_COVERAGE_TARGET_DIR="${EMEL_IO_LOADER_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-io-loader}"
 MODEL_TENSOR_COVERAGE_TARGET_DIR="${EMEL_MODEL_TENSOR_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model-tensor}"
+MODEL_COVERAGE_TARGET_DIR="${EMEL_MODEL_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-model}"
+KERNELS_COVERAGE_TARGET_DIR="${EMEL_KERNELS_COVERAGE_TARGET_DIR:-$ROOT_DIR/target/llvm-cov-target/emel-kernels}"
 
 if [[ $# -ne 0 ]]; then
   echo "usage: scripts/coverage.sh" >&2
@@ -56,9 +60,12 @@ mkdir -p \
   "$(dirname "$IO_MMAP_REPORT")" \
   "$(dirname "$IO_STAGED_READ_REPORT")" \
   "$(dirname "$IO_LOADER_REPORT")" \
-  "$(dirname "$MODEL_TENSOR_REPORT")"
-echo "Coverage scope: emel-gguf, maintained emel-io, and emel-model tensor-core sources"
+  "$(dirname "$MODEL_TENSOR_REPORT")" \
+  "$(dirname "$MODEL_REPORT")" \
+  "$(dirname "$KERNELS_REPORT")"
+echo "Coverage scope: emel-gguf, maintained emel-io, emel-model tensor-core, and emel-kernels sources"
 echo "Generated GGUF sm.rs is excluded; maintained emel-io and tensor-core SML sources are fully enforced"
+echo "Maintained target router surfaces, portable orchestration, and all other emel-kernels sources remain enforced"
 echo "Coverage thresholds: lines >= ${LINE_COVERAGE_MIN}%, branches >= ${BRANCH_COVERAGE_MIN}%"
 
 echo "Running emel-gguf coverage"
@@ -122,12 +129,26 @@ CARGO_LLVM_COV_TARGET_DIR="$MODEL_TENSOR_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_
   --ignore-filename-regex '(^|/)(tools/|crates/emel-io/|crates/emel-gguf/|crates/emel-model/(src/(lib\.rs|architecture/|gemma4/|generation/|lfm2/|llama/|loader/|moshi/|omniembed/|port_inventory_tests\.rs|qwen3/|sortformer/|tensor/(tests\.rs|window/)|whisper/)|tests/|examples/))' \
   --summary-only --json --output-path "$MODEL_TENSOR_REPORT"
 
+echo "Running maintained emel-model production coverage"
+CARGO_LLVM_COV_TARGET_DIR="$MODEL_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
+  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-model --all-features --locked --branch --tests \
+  --ignore-filename-regex '(^|/)(tools/|crates/emel-model/(src/(lib\.rs|port_inventory_tests\.rs|.*/sm\.rs)|tests/|examples/))' \
+  --summary-only --json --output-path "$MODEL_REPORT" \
+  -- --skip "benchmark"
+
+echo "Running maintained emel-kernels coverage"
+CARGO_LLVM_COV_TARGET_DIR="$KERNELS_COVERAGE_TARGET_DIR" cargo +"$COVERAGE_TOOLCHAIN" llvm-cov \
+  --manifest-path "$ROOT_DIR/Cargo.toml" --package emel-kernels --all-features --locked --branch \
+  --summary-only --json --output-path "$KERNELS_REPORT"
+
 python3 - "$LINE_COVERAGE_MIN" "$BRANCH_COVERAGE_MIN" \
   "emel-gguf=$GGUF_REPORT" "emel-io=$IO_REPORT" \
   "emel-io-mmap=$IO_MMAP_REPORT" \
   "emel-io-staged-read=$IO_STAGED_READ_REPORT" \
   "emel-io-loader=$IO_LOADER_REPORT" \
-  "emel-model-tensor=$MODEL_TENSOR_REPORT" <<'PY'
+  "emel-model-tensor=$MODEL_TENSOR_REPORT" \
+  "emel-model=$MODEL_REPORT" \
+  "emel-kernels=$KERNELS_REPORT" <<'PY'
 import json
 import math
 import pathlib

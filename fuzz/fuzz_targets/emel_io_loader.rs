@@ -23,8 +23,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let mut bytes = [0_u8; 64];
     let target = Target::new(&mut bytes[..target_len]);
-    let span = TensorLoadSpan::new(1, "fuzz.bin", Some(source), &target)
-        .with_range(offset, size);
+    let span = TensorLoadSpan::new(1, "fuzz.bin", Some(source), &target).with_range(offset, size);
     let mut loader = Loader::with_dependencies(Reader::new(), Stager::new());
     let _ = loader.process_event(LoadTensor::new(
         span,

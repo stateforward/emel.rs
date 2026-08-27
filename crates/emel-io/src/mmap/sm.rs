@@ -1,6 +1,7 @@
 //! Private explicit mapper orchestration.
 
 #![allow(
+    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
     reason = "stateforward-sml generated state tokens intentionally derive PartialEq"
 )]

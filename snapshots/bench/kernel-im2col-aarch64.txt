@@ -1,0 +1,12 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# source_kernel_events_blob: 4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+# source_kernel_detail_blob: c8a82643eabfe8f2d7883e655955f455794511b0
+# source_kernel_x86_sm_blob: 0b4d635ebbd0fbd52dbca8a2345547fb571205c8
+# benchmark_config: input=64 kernel=3 padding=1 stride=1 dilation=1 iterations=10000 warmup=1000
+# benchmark_operand: dense contiguous F32 input=1.0, public Rust Kernel -> owned Im2ColKernel, reference public Kernel route
+# benchmark_timing: storage, actor construction, and event construction are outside measurement; actor is reused
+# benchmark_validation: both lanes report output=192 and probe_bits=00000000,3f800000,3f800000
+kernel/im2col/op_im2col rust_ns_per_dispatch=351.154 cpp_ns_per_dispatch=552.95 rust_vs_cpp_ratio=0.635056 output=192 probe_bits=00000000,3f800000,3f800000

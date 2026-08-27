@@ -1,0 +1,9 @@
+[package]
+name = "emel-kernel-activation-parity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+emel-kernels = { workspace = true }

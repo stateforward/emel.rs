@@ -1,5 +1,9 @@
 gguf-parity-snapshot/v1
 reference_ref=ecbcb7ea9d3303097519723b264a8b5f1e977028
+packed_reference_repository=https://github.com/stateforward/emel.cpp
+packed_reference_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+packed_reference_loader_detail_blob=4ec9829c6d640cfa65a6d546c5891cb048b29f90
+packed_reference_lane=out-of-process-public-loader-events
 canonical_format=gguf-parity/v1
 fixture_count=19
 fixture=invalid/deprecated-tensor-type.gguf sha256=6e6d339f27c9493b3a1ddbfa4be37438bf5102a7424d2438002a0583ff158c3f bytes=28
@@ -19,5 +23,5 @@ fixture=valid/bool-normalization.gguf sha256=f290ea5b577fab25b66740339e075a85491
 fixture=valid/custom-alignment.gguf sha256=bd6f3c14e52a7f68b8f88b08d16e20fc4aa3e082017631534df208618f7c137f bytes=293
 fixture=valid/empty-v2.gguf sha256=0d67a762adee005b865f8f53b7610edcac09d41c3b68c8801c0c4fec51f4b615 bytes=74
 fixture=valid/empty-v3.gguf sha256=73595fd64d0c8f6050e17ea3918f32eba28a3db5e4f6277ca2892b59c67f5cb9 bytes=74
-fixture=valid/metadata.gguf sha256=00352b98fa44616573f0057f7a8b86c466e4922c40921ccbeb37fde9fe7019af bytes=1068
-fixture=valid/tensors.gguf sha256=5d1617f9058bd73b2e8486a90ab5c9dd33b456daaa12fa46be5fe77ad5b82d48 bytes=4716
+fixture=valid/metadata.gguf sha256=ab5969d90298837b71838b6b7b4f6c9f779c8ac4967392f5018013864f90b746 bytes=1929
+fixture=valid/tensors.gguf sha256=715629fdba631c515b5cfa9c259602c3df423af948b34936f554360f0164b676 bytes=5018

@@ -1,0 +1,40 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-f32-gemv-aarch64-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_f32_gemv_dense_contiguous_body_and_tail_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=gemv_m5_k17 status=ok output_bits=4451c000,c39d2000,c3cbe000,4464d000,c3bd5000
+case=zero_count status=reject error=InvalidShape output_bits=7fc00001
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:397-405
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:1210-1231
+source_aarch64_execution_span=src/emel/kernel/aarch64/actions.hpp:7019-7042
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:515-518
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+output_sha256=1284bcde01a36aed328c5ca2eed54b954c002bd0318e51c44ada90ff28d0b64b
+rust_module=crates/emel-kernels/src/aarch64/gemv.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::router_dispatches_gemv
+scope=dense_contiguous_f32_gemv_m5_k17_body_tail_and_typed_rejection
+positive_cases=gemv_m5_k17_exact_output_bits
+rejection_cases=zero_count_and_dimension_mismatch_sentinel_preserving
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (existing focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/target-f32-gemv-aarch64-live
+residuals=n_gt_1 dense matrix, noncontiguous strides, other dtypes, and x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 49207123cd3f39767764bae774932cb48623f92f
+result=match

@@ -3,6 +3,7 @@
 use allocation_counter as _;
 use emel_io as _;
 use emel_model as _;
+use emel_tensor as _;
 use sml as _;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +11,9 @@ use std::process::{Command, Output};
 
 fn check_project(case: &str, source: &str) -> Output {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let project =
-        std::env::temp_dir().join(format!("emel-model-privacy-{case}-{}", std::process::id()));
+    let project = root
+        .join("../../.artifacts/model-tensor-privacy")
+        .join(format!("{case}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(
@@ -80,3 +82,6 @@ fn machine_context_and_state_inspection_remain_private() {
     assert!(stderr.contains("window"), "{stderr}");
     assert!(stderr.contains("is_ready"), "{stderr}");
 }
+use emel_gguf as _;
+use emel_kernels as _;
+use emel_token as _;

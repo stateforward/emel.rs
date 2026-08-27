@@ -1,0 +1,41 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-aarch64-conv-transpose-1d-f32-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+event=op_conv_transpose_1d shape=kernel5_out2_in1_length2_stride2_padding0_dilation1
+scope=dense_f32_weights_input_output
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=valid_dense_f32_neon status=ok output_bits=3f800000,40000000,40a00000,41000000,41300000,41000000,41200000,3f000000,3fc00000,40600000,40d00000,41180000,40e00000,41100000
+case=invalid_input_length status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+case=invalid_padding status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+source_guard_span=src/emel/kernel/aarch64/guards.hpp:287-297,408-417,1026-1049
+source_action_span=src/emel/kernel/aarch64/actions.hpp:1252-1258,7074-7121,8770-8779
+source_transition_span=src/emel/kernel/aarch64/sm.hpp:800-818
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+output_sha256=1134388d462c963a234f33d14039c2a13d99feec256ddda17a4e69a6fedaa81d
+reference_observer_sha256=002fb0da0b623f92a29fe561264390577653bb0e5f6587fc83598963270adefd
+rust_observer_sha256=d924f6e87fc2902dc59d502ac42b4214341295dfd09dc0e2a54674b574da58bf
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_actor=crates/emel-kernels/src/aarch64/conv_transpose_1d.rs
+positive_case=dense F32 NEON op_conv_transpose_1d kernel5 out2 in1 input_length2 stride2
+rejection_cases=invalid input length and nonzero padding preserve sentinel
+residuals=F16 weights,strided tensor metadata,shared scalar transition,portable and x86 routes
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations covered by maintained actor test
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=/Users/gabrielwillen/VSCode/stateforward/emel/emel.rs/.artifacts/kernel-goal/target-aarch64-conv-transpose-1d-f32-live
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+sml_commit=49207123cd3f39767764bae774932cb48623f92f
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+result=match

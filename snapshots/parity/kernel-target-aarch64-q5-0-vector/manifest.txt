@@ -1,0 +1,41 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-aarch64-q5-0-vector-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_q5_0_vector_m5_k32_and_typed_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=q5_0_vector_m5_k32 status=ok output_bits=432b9480,423edac0,41488e00,c1fdb780,c2109f00
+case=zero_count status=reject error=InvalidShape output_bits=7fc00001
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:342-351
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:1099-1130
+source_aarch64_execution_span=src/emel/kernel/aarch64/actions.hpp:7123-7172
+source_aarch64_dot_span=src/emel/kernel/aarch64/actions.hpp:3817-3855
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:355-358
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+output_sha256=7349b648a6b5d668b331caf21a6897b1e359796d2419d1892f4807e5578c66dd
+rust_module=crates/emel-kernels/src/aarch64/q5_0.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::router_dispatches_q5_0_vector
+scope=q5_0_lhs_dense_f32_rhs_q8_0_scratch_f32_destination_m5_k32
+positive_cases=q5_0_vector_m5_k32_exact_output_bits
+rejection_cases=zero_count_and_non_block_k_sentinel_preserving
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (existing focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/target-aarch64-q5-0-vector-live
+residuals=q6/q8 neon vector, F16 neon, generic quantized mul_mat, and x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 49207123cd3f39767764bae774932cb48623f92f
+result=match

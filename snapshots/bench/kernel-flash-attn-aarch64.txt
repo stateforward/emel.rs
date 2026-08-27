@@ -1,0 +1,8 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# benchmark_config: flash_attn_ext_canonical iterations=10000 warmup=1000
+# benchmark_operand: f32_q_f32_dst_f16_k_f16_v query_count=1
+# benchmark_validation: both public observer lanes report output=2
+kernel/flash_attn_ext/canonical rust_ns_per_dispatch=135.746 cpp_ns_per_dispatch=128.662 rust_vs_cpp_ratio=1.055060 output=2

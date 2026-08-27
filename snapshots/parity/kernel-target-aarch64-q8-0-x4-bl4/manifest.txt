@@ -1,0 +1,40 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-aarch64-q8-0-x4-bl4-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_q8_0_packed_bl4_m5_k32_and_typed_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=q8_0_packed_bl4_m5_k32 status=ok output_bits=44ab0000,44aa0000,44a90000,44a80000,44a70000
+case=zero_count status=reject error=InvalidShape output_bits=7fc00001
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:455-466
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:1282-1322
+source_aarch64_execution_span=src/emel/kernel/aarch64/actions.hpp:6416-6466
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:387-388
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+output_sha256=07e4cc4c103d5774db4566d1576078be4c666cb26c670ccc42ec6bffd0299ef1
+rust_module=crates/emel-kernels/src/aarch64/q8_0_packed.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::router_dispatches_q8_0_packed_bl4
+scope=q8_0_x4_bl4_lhs_packed_q8_0_rhs_f32_destination_m5_k32
+positive_cases=q8_0_packed_bl4_m5_k32_exact_output_bits
+rejection_cases=zero_count_and_non_block_k_sentinel_preserving
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (existing focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/target-aarch64-q8-0-x4-bl4-live
+residuals=packed q8 bl8/I8MM, F16 neon, generic quantized mul_mat, and x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 49207123cd3f39767764bae774932cb48623f92f
+result=match

@@ -1,0 +1,17 @@
+kernel-argmax-parity/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+scope=f32_plus_aligned_native_quantized_argmax
+families=q5_0,q8_0,q2_k,q3_k,q4_k,q6_k
+excluded=q4_0,q4_1_reference_run_has_no_branch
+case=f32_success status=ok index=1 output_bits=41700000
+case=f32_shape_error status=error error=ShapeMismatch index=-77 output_bits=7fc05678
+case=f32_invalid_view status=error error=InvalidView index=-77 output_bits=7fc09abc
+case=q5_0_success status=ok index=1 output_bits=44effc40
+case=q8_0_success status=ok index=1 output_bits=437ffc00
+case=q2_k_success status=ok index=1 output_bits=46340000
+case=q3_k_success status=ok index=0 output_bits=00000000
+case=q4_k_success status=ok index=1 output_bits=45700000
+case=q6_k_success status=ok index=1 output_bits=45f80000

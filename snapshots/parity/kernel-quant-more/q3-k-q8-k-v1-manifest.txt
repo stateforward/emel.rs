@@ -1,0 +1,24 @@
+kernel-quant-more-q3-k-q8-k/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_layout_span=247-253
+source_scalar_block_span=2567-2656
+source_scalar_row_span=2658-2760
+rust_surface=crates/emel-kernels/src/quant_more.rs
+rust_tests=crates/emel-kernels/tests/quant_more.rs
+scope=borrowed_scalar_q3_k_q8_k_rows
+layout=q3_k_110_bytes,q8_k_292_bytes,qk_k_256_values
+case=dot_q3_k_q8_k_uniform status=ok output_bits=00000047
+case=dot_q3_k_q8_k_second_half_high_masks status=ok output_bits=00008046
+case=dot_q3_k_q8_k_asymmetric_source_oracle status=ok
+case=invalid_block_length status=error
+case=mismatched_block_count status=error
+reproduction=before_repair red left=Ok(32768.0) expected=Ok(16384.0)
+repair=high_mask_progression bits=0..3_then_4..7
+focused_test_count_before_repair=22
+focused_test_count_after_repair=24
+dispatch=direct_safe_scalar_no_allocation
+observer=none_live_cpp_observer
+result=source_contract_only
+residual=live_cpp_differential_fixture,target_specialized_simd,argmax_wiring,full_kernel_parity

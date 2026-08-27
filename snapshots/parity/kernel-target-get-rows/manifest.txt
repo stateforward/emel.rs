@@ -1,0 +1,23 @@
+kernel-target-get-rows-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_kernel_x86_sm_blob=0b4d635ebbd0fbd52dbca8a2345547fb571205c8
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_get_rows_f32_f16_bf16_dense_positive_and_typed_rejection
+execution=split_reference_and_public_target_router
+case=f32 status=ok output_bits=40400000,40800000,3f800000,40000000
+case=f16 status=ok output_bits=40400000,40800000,3f800000,40000000
+case=bf16 status=ok output_bits=40400000,40800000,3f800000,40000000
+case=f32_invalid_index status=reject error=IndexOutOfBounds output_bits=7fc00001,7fc00001,7fc00001,7fc00001
+case=f16_invalid_index status=reject error=IndexOutOfBounds output_bits=7fc00001,7fc00001,7fc00001,7fc00001
+case=bf16_invalid_index status=reject error=IndexOutOfBounds output_bits=7fc00001,7fc00001,7fc00001,7fc00001
+source_detail_spans=can_run_get_rows:4460-4501,run_get_rows_as:4503-4525
+source_x86_transition_span=src/emel/kernel/x86_64/sm.hpp:535-568
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:656-689
+reference_execution=detail_can_run_get_rows_plus_run_get_rows_as
+rust_execution=public_target_router_process_get_rows
+output_sha256=10a8953b80e2af0cb854faddf2ba52e697a0b9e134aa28ebd71635bb95e9ac69
+result=match

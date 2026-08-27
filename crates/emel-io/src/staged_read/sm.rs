@@ -1,6 +1,7 @@
 //! Explicit staged-copy orchestration and bounded data-plane copy actions.
 
 #![allow(
+    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
     reason = "stateforward-sml generated state tokens intentionally derive PartialEq"
 )]
@@ -441,14 +442,14 @@ fn copy_single<const HAS_REMAINDER: bool>(event: SingleRuntime<'_, '_, '_>) {
 
 fn span_valid(span: StageSpan<'_>) -> bool {
     (span.byte_size > 0)
-        & span
+        && span
             .file_offset
             .checked_add(span.byte_size)
             .is_some_and(|end| {
                 span.source
                     .is_some_and(|source| u64::try_from(source.len()).is_ok_and(|len| end <= len))
             })
-        & u64::try_from(span.target.len()).is_ok_and(|len| len >= span.byte_size)
+        && u64::try_from(span.target.len()).is_ok_and(|len| len >= span.byte_size)
 }
 
 fn compute_batch_assessment(event: BatchRuntime<'_, '_, '_>) -> BatchAssessment {
@@ -470,7 +471,7 @@ fn compute_batch_assessment(event: BatchRuntime<'_, '_, '_>) -> BatchAssessment 
         index += 1;
     }
     BatchAssessment {
-        valid: global_valid & (found == 0),
+        valid: global_valid && (found == 0),
         failed_index: first * u32::from(global_valid),
     }
 }

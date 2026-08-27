@@ -1,454 +1,431 @@
-//! Generation graph surfaces from `emel.cpp/src/emel/model/generation/any.hpp`
-//! and `any.cpp`.
+//! Allocation-free common generation-contract actor.
+//!
+//! This module ports the architecture-neutral behavior in pinned
+//! `emel.cpp/src/emel/model/generation/any.hpp` and `any.cpp`. Architecture
+//! selection remains at the architecture-router boundary; callers submit the
+//! already-selected layer contract one block per dispatch.
+//!
+//! ```compile_fail
+//! use emel_model::generation::storage::BlockSlot;
+//! ```
+//!
+//! ```compile_fail
+//! let catalog = emel_model::catalog::Catalog::try_new().unwrap();
+//! let capability = emel_model::generation::quantized_path::Resolver::new();
+//! let builder = emel_model::generation::Builder::new(catalog, capability);
+//! let _ = builder.state();
+//! ```
 
-use crate::data::{ModelData, TensorRecord, Data};
-use crate::{
-    GenerationAttentionQkNormRoute, GenerationAttentionVNormRoute,
-    GenerationAttentionValueRoute, GenerationAttentionWindowRoute, GenerationResidualRoute,
-};
+mod actor;
+pub mod event;
+pub mod quantized_path;
+mod sm;
+mod storage;
 
-/// Count of quantized stage families (C++ `k_quantized_stage_family_count`).
-pub const K_QUANTIZED_STAGE_FAMILY_COUNT: u32 = 14;
+pub use actor::Builder;
 
-/// Bound tensor view (C++ `generation::tensor_view`).
-#[derive(Clone, Debug, Default)]
-pub struct TensorView {
-    /// Optional tensor record pointer shell (owned index in Rust).
-    pub tensor_index: Option<usize>,
-    /// Tensor name.
-    pub name: String,
+use emel_tensor::dtype::SerializedType;
+
+use crate::catalog::event::{ModelIdentity, TensorId};
+
+/// Exact number of pinned quantized stage families.
+pub const QUANTIZED_STAGE_FAMILY_COUNT: usize = 14;
+
+/// Per-layer residual path selected by an owning family actor.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ResidualRoute {
+    #[default]
+    Attention = 0,
+    Shortconv = 1,
 }
 
-impl TensorView {
-    /// Build from a model tensor record reference.
+/// Per-layer Q/K normalization contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AttentionQkNormRoute {
+    #[default]
+    None = 0,
+    HeadwiseRms = 1,
+}
+
+/// Per-layer value projection contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AttentionValueRoute {
+    #[default]
+    DedicatedValue = 0,
+    SharedKeyValue = 1,
+}
+
+/// Per-layer value normalization contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AttentionVNormRoute {
+    #[default]
+    None = 0,
+    Rms = 1,
+}
+
+/// Per-layer attention-window contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AttentionWindowRoute {
+    #[default]
+    FullContext = 0,
+    SlidingWindow = 1,
+}
+
+/// Source-exact generation execution facts for one layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LayerExecution {
+    residual_route: ResidualRoute,
+    qk_norm_route: AttentionQkNormRoute,
+    value_route: AttentionValueRoute,
+    v_norm_route: AttentionVNormRoute,
+    window_route: AttentionWindowRoute,
+    attention_key_length: i32,
+    attention_value_length: i32,
+    attention_rope_dim: i32,
+    attention_rope_freq_base: f32,
+}
+
+impl LayerExecution {
+    /// Constructs one already-selected layer contract.
     #[must_use]
-    pub fn from_record(index: usize, record: &TensorRecord, name: impl Into<String>) -> Self {
-        let _ = record;
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        residual_route: ResidualRoute,
+        qk_norm_route: AttentionQkNormRoute,
+        value_route: AttentionValueRoute,
+        v_norm_route: AttentionVNormRoute,
+        window_route: AttentionWindowRoute,
+        attention_key_length: i32,
+        attention_value_length: i32,
+        attention_rope_dim: i32,
+        attention_rope_freq_base: f32,
+    ) -> Self {
         Self {
-            tensor_index: Some(index),
-            name: name.into(),
+            residual_route,
+            qk_norm_route,
+            value_route,
+            v_norm_route,
+            window_route,
+            attention_key_length,
+            attention_value_length,
+            attention_rope_dim,
+            attention_rope_freq_base,
+        }
+    }
+
+    #[must_use]
+    pub const fn residual_route(self) -> ResidualRoute {
+        self.residual_route
+    }
+    #[must_use]
+    pub const fn qk_norm_route(self) -> AttentionQkNormRoute {
+        self.qk_norm_route
+    }
+    #[must_use]
+    pub const fn value_route(self) -> AttentionValueRoute {
+        self.value_route
+    }
+    #[must_use]
+    pub const fn v_norm_route(self) -> AttentionVNormRoute {
+        self.v_norm_route
+    }
+    #[must_use]
+    pub const fn window_route(self) -> AttentionWindowRoute {
+        self.window_route
+    }
+    #[must_use]
+    pub const fn attention_key_length(self) -> i32 {
+        self.attention_key_length
+    }
+    #[must_use]
+    pub const fn attention_value_length(self) -> i32 {
+        self.attention_value_length
+    }
+    #[must_use]
+    pub const fn attention_rope_dim(self) -> i32 {
+        self.attention_rope_dim
+    }
+    #[must_use]
+    pub const fn attention_rope_freq_base(self) -> f32 {
+        self.attention_rope_freq_base
+    }
+}
+
+/// Prefill or decode plan kind.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StepKind {
+    #[default]
+    Prefill = 0,
+    Decode = 1,
+}
+
+/// Immutable source-exact step plan.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StepPlan {
+    kind: StepKind,
+    node_count: u32,
+    tensor_count: u32,
+    expected_outputs: i32,
+    max_step_tokens: i32,
+}
+
+impl StepPlan {
+    #[must_use]
+    pub const fn kind(self) -> StepKind {
+        self.kind
+    }
+    #[must_use]
+    pub const fn node_count(self) -> u32 {
+        self.node_count
+    }
+    #[must_use]
+    pub const fn tensor_count(self) -> u32 {
+        self.tensor_count
+    }
+    #[must_use]
+    pub const fn expected_outputs(self) -> i32 {
+        self.expected_outputs
+    }
+    #[must_use]
+    pub const fn max_step_tokens(self) -> i32 {
+        self.max_step_tokens
+    }
+}
+
+/// One of the fourteen source audit families.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum QuantizedStageFamily {
+    #[default]
+    TokenEmbedding = 0,
+    OutputNorm,
+    Output,
+    AttentionNorm,
+    AttentionQ,
+    AttentionK,
+    AttentionV,
+    AttentionQNorm,
+    AttentionKNorm,
+    AttentionOutput,
+    FeedForwardNorm,
+    FeedForwardGate,
+    FeedForwardDown,
+    FeedForwardUp,
+}
+
+impl QuantizedStageFamily {
+    /// All source stage families in source order.
+    pub const ALL: [Self; QUANTIZED_STAGE_FAMILY_COUNT] = [
+        Self::TokenEmbedding,
+        Self::OutputNorm,
+        Self::Output,
+        Self::AttentionNorm,
+        Self::AttentionQ,
+        Self::AttentionK,
+        Self::AttentionV,
+        Self::AttentionQNorm,
+        Self::AttentionKNorm,
+        Self::AttentionOutput,
+        Self::FeedForwardNorm,
+        Self::FeedForwardGate,
+        Self::FeedForwardDown,
+        Self::FeedForwardUp,
+    ];
+
+    pub(crate) const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Returns the pinned source label.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TokenEmbedding => "token_embedding",
+            Self::OutputNorm => "output_norm",
+            Self::Output => "output",
+            Self::AttentionNorm => "attention_norm",
+            Self::AttentionQ => "attention_q",
+            Self::AttentionK => "attention_k",
+            Self::AttentionV => "attention_v",
+            Self::AttentionQNorm => "attention_q_norm",
+            Self::AttentionKNorm => "attention_k_norm",
+            Self::AttentionOutput => "attention_output",
+            Self::FeedForwardNorm => "feed_forward_norm",
+            Self::FeedForwardGate => "feed_forward_gate",
+            Self::FeedForwardDown => "feed_forward_down",
+            Self::FeedForwardUp => "feed_forward_up",
         }
     }
 }
 
-/// Per-block weight view (C++ `generation::block_view`).
-#[derive(Clone, Debug, Default)]
-pub struct BlockView {
-    /// Block index.
-    pub index: i32,
-    /// Whether this block uses attention.
-    pub uses_attention: bool,
-    /// Attention norm tensor.
-    pub attention_norm: TensorView,
-    /// Attention Q.
-    pub attention_q: TensorView,
-    /// Attention K.
-    pub attention_k: TensorView,
-    /// Attention V.
-    pub attention_v: TensorView,
-    /// Attention Q norm.
-    pub attention_q_norm: TensorView,
-    /// Attention K norm.
-    pub attention_k_norm: TensorView,
-    /// Attention output.
-    pub attention_output: TensorView,
-    /// Short-conv kernel.
-    pub shortconv_conv: TensorView,
-    /// Short-conv input projection.
-    pub shortconv_in_proj: TensorView,
-    /// Short-conv output projection.
-    pub shortconv_out_proj: TensorView,
-    /// FFN norm.
-    pub feed_forward_norm: TensorView,
-    /// FFN gate.
-    pub feed_forward_gate: TensorView,
-    /// FFN down.
-    pub feed_forward_down: TensorView,
-    /// FFN up.
-    pub feed_forward_up: TensorView,
-}
-
-/// Full execution view over model weights (C++ `generation::execution_view`).
-#[derive(Clone, Debug, Default)]
-pub struct ExecutionView {
-    /// Max blocks (C++ `k_max_blocks` ≈ `data::k_max_metadata_arrays`).
-    pub block_count: i32,
-    /// Token embedding.
-    pub token_embedding: TensorView,
-    /// Output norm.
-    pub output_norm: TensorView,
-    /// Output projection.
-    pub output: TensorView,
-    /// Per-block views.
-    pub blocks: Vec<BlockView>,
-}
-
-impl ExecutionView {
-    /// Max blocks capacity constant.
-    pub const K_MAX_BLOCKS: u32 = Data::K_MAX_METADATA_ARRAYS as u32;
-}
-
-/// Per-layer generation execution routing (C++ `generation_layer_execution`).
-#[derive(Clone, Debug, Default)]
-pub struct GenerationLayerExecution {
-    /// Residual route.
-    pub residual_route: GenerationResidualRoute,
-    /// QK norm route.
-    pub qk_norm_route: GenerationAttentionQkNormRoute,
-    /// Value route.
-    pub value_route: GenerationAttentionValueRoute,
-    /// V norm route.
-    pub v_norm_route: GenerationAttentionVNormRoute,
-    /// Window route.
-    pub window_route: GenerationAttentionWindowRoute,
-    /// Attention key length.
-    pub attention_key_length: i32,
-    /// Attention value length.
-    pub attention_value_length: i32,
-    /// RoPE dimension.
-    pub attention_rope_dim: i32,
-    /// RoPE frequency base.
-    pub attention_rope_freq_base: f32,
-}
-
-/// Generation execution descriptor (C++ `generation_execution_descriptor`).
-#[derive(Clone, Debug, Default)]
-pub struct GenerationExecutionDescriptor {
-    /// Layer count.
-    pub layer_count: u32,
-    /// Per-layer descriptors (capacity: `K_MAX_LAYERS`).
-    pub layers: Vec<GenerationLayerExecution>,
-}
-
-impl GenerationExecutionDescriptor {
-    /// Max layers (C++ `k_max_layers`).
-    pub const K_MAX_LAYERS: u32 = Data::K_MAX_METADATA_ARRAYS as u32;
-}
-
-/// Topology summary (C++ `generation::topology`).
-#[derive(Clone, Debug, Default)]
-pub struct Topology {
-    /// Node count.
-    pub node_count: u32,
-    /// Tensor count.
-    pub tensor_count: u32,
-    /// Bytes per tensor estimate.
-    pub bytes_per_tensor: u64,
-    /// Workspace capacity.
-    pub workspace_capacity_bytes: u64,
-}
-
-/// Step kind (C++ `generation::step_kind`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
-#[repr(u8)]
-pub enum StepKind {
-    /// Prefill step.
-    #[default]
-    Prefill = 0,
-    /// Decode step.
-    Decode = 1,
-}
-
-/// Step plan (C++ `generation::step_plan`).
-#[derive(Clone, Debug, Default)]
-pub struct StepPlan {
-    /// Prefill or decode.
-    pub kind: StepKind,
-    /// Node count.
-    pub node_count: u32,
-    /// Tensor count.
-    pub tensor_count: u32,
-    /// Expected outputs.
-    pub expected_outputs: i32,
-    /// Max tokens this step.
-    pub max_step_tokens: i32,
-}
-
-/// Quantized stage family (C++ `quantized_stage_family`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
-#[repr(u8)]
-pub enum QuantizedStageFamily {
-    /// Token embedding stage.
-    #[default]
-    TokenEmbedding = 0,
-    /// Output norm.
-    OutputNorm,
-    /// Output.
-    Output,
-    /// Attention norm.
-    AttentionNorm,
-    /// Attention Q.
-    AttentionQ,
-    /// Attention K.
-    AttentionK,
-    /// Attention V.
-    AttentionV,
-    /// Attention Q norm.
-    AttentionQNorm,
-    /// Attention K norm.
-    AttentionKNorm,
-    /// Attention output.
-    AttentionOutput,
-    /// FFN norm.
-    FeedForwardNorm,
-    /// FFN gate.
-    FeedForwardGate,
-    /// FFN down.
-    FeedForwardDown,
-    /// FFN up.
-    FeedForwardUp,
-}
-
-/// Quantized contract kind (C++ `quantized_contract_kind`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
+/// Source-exact quantized contract classification.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
 pub enum QuantizedContractKind {
-    /// Native quantized path.
     NativeQuantized = 0,
-    /// Approved dense f32 by contract.
     #[default]
     ApprovedDenseF32ByContract,
-    /// Disallowed fallback.
     DisallowedFallback,
-    /// Explicit no claim.
     ExplicitNoClaim,
-    /// Not applicable.
     NotApplicable,
 }
 
-/// Per-stage quantized audit (C++ `quantized_stage_audit`).
-#[derive(Clone, Debug, Default)]
-pub struct QuantizedStageAudit {
-    /// Stage family.
-    pub family: QuantizedStageFamily,
-    /// Tensor type id.
-    pub tensor_type: i32,
-    /// Contract classification.
-    pub contract: QuantizedContractKind,
-    /// Consistency across layers.
-    pub consistent_across_layers: bool,
-}
-
-/// Full quantized path audit (C++ `quantized_path_audit`).
-#[derive(Clone, Debug, Default)]
-pub struct QuantizedPathAudit {
-    /// Per-family stages.
-    pub stages: Vec<QuantizedStageAudit>,
-}
-
-/// Generation contract aggregate (C++ `generation::contract`).
-#[derive(Clone, Debug, Default)]
-pub struct Contract {
-    /// Bound execution view.
-    pub execution: ExecutionView,
-    /// Generation execution descriptor.
-    pub generation_execution: GenerationExecutionDescriptor,
-    /// Topology.
-    pub topology: Topology,
-    /// Prefill plan.
-    pub prefill_plan: StepPlan,
-    /// Decode plan.
-    pub decode_plan: StepPlan,
-    /// Quantized path audit.
-    pub quantized_audit: QuantizedPathAudit,
-}
-
-impl Contract {
-    /// Reset all fields (C++ `contract::reset`).
-    pub fn reset(&mut self) {
-        *self = Self::default();
+impl QuantizedContractKind {
+    /// Returns the pinned source label.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NativeQuantized => "native_quantized",
+            Self::ApprovedDenseF32ByContract => "approved_dense_f32_by_contract",
+            Self::DisallowedFallback => "disallowed_fallback",
+            Self::ExplicitNoClaim => "explicit_no_claim",
+            Self::NotApplicable => "not_applicable",
+        }
     }
 }
 
-/// Build a generation contract from model data.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp
-/// (`build_contract` declared in any.hpp).
-pub fn build_contract(_model_data: &ModelData, _contract_out: &mut Contract) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::build_contract
-    todo!(
-        "TODO: port build_contract from emel.cpp/src/emel/model/generation/any.cpp \
-         (any.hpp)"
-    )
+/// Final audit for one stage family.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StageAudit {
+    family: QuantizedStageFamily,
+    tensor_type: Option<SerializedType>,
+    contract: QuantizedContractKind,
+    consistent_across_layers: bool,
 }
 
-/// Whether model data contains a tensor with the given name.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`has_tensor_named`).
-pub fn has_tensor_named(_model_data: &ModelData, _name: &str) -> bool {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::has_tensor_named
-    todo!("TODO: port has_tensor_named from emel.cpp/src/emel/model/generation/any.cpp")
+impl StageAudit {
+    pub(crate) const fn empty(family: QuantizedStageFamily) -> Self {
+        Self {
+            family,
+            tensor_type: None,
+            contract: QuantizedContractKind::NotApplicable,
+            consistent_across_layers: true,
+        }
+    }
+    #[must_use]
+    pub const fn family(self) -> QuantizedStageFamily {
+        self.family
+    }
+    #[must_use]
+    pub const fn tensor_type(self) -> Option<SerializedType> {
+        self.tensor_type
+    }
+    #[must_use]
+    pub const fn contract(self) -> QuantizedContractKind {
+        self.contract
+    }
+    #[must_use]
+    pub const fn consistent_across_layers(self) -> bool {
+        self.consistent_across_layers
+    }
 }
 
-/// Bind a named tensor into a view.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`bind_tensor_view`).
-pub fn bind_tensor_view(
-    _model_data: &ModelData,
-    _name: &str,
-    _view_out: &mut TensorView,
-) -> bool {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::bind_tensor_view
-    todo!("TODO: port bind_tensor_view from emel.cpp/src/emel/model/generation/any.cpp")
+/// Immutable topology facts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TopologyDescriptor {
+    node_count: u32,
+    tensor_count: u32,
+    bytes_per_tensor: u64,
+    workspace_capacity_bytes: u64,
 }
 
-/// Bind the output projection view (with optional tied embedding).
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`bind_output_view`).
-pub fn bind_output_view(
-    _model_data: &ModelData,
-    _token_embedding: &TensorView,
-    _allow_tied_output: bool,
-    _output_out: &mut TensorView,
-) -> bool {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::bind_output_view
-    todo!("TODO: port bind_output_view from emel.cpp/src/emel/model/generation/any.cpp")
+impl TopologyDescriptor {
+    #[must_use]
+    pub const fn node_count(self) -> u32 {
+        self.node_count
+    }
+    #[must_use]
+    pub const fn tensor_count(self) -> u32 {
+        self.tensor_count
+    }
+    #[must_use]
+    pub const fn bytes_per_tensor(self) -> u64 {
+        self.bytes_per_tensor
+    }
+    #[must_use]
+    pub const fn workspace_capacity_bytes(self) -> u64 {
+        self.workspace_capacity_bytes
+    }
 }
 
-/// Bind a block-local tensor by suffix.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`bind_block_tensor_view`).
-pub fn bind_block_tensor_view(
-    _model_data: &ModelData,
-    _block_index: i32,
-    _suffix: &str,
-    _view_out: &mut TensorView,
-) -> bool {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::bind_block_tensor_view
-    todo!("TODO: port bind_block_tensor_view from emel.cpp/src/emel/model/generation/any.cpp")
+/// Immutable completed contract descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContractDescriptor {
+    model: ModelIdentity,
+    token_embedding: TensorId,
+    output_norm: TensorId,
+    output: TensorId,
+    block_count: u32,
+    topology: TopologyDescriptor,
+    prefill: StepPlan,
+    decode: StepPlan,
+    audit: [StageAudit; QUANTIZED_STAGE_FAMILY_COUNT],
 }
 
-/// Require that a block tensor exists.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`require_block_tensor`).
-pub fn require_block_tensor(_model_data: &ModelData, _block_index: i32, _suffix: &str) -> bool {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::require_block_tensor
-    todo!("TODO: port require_block_tensor from emel.cpp/src/emel/model/generation/any.cpp")
+impl ContractDescriptor {
+    #[must_use]
+    pub const fn model(self) -> ModelIdentity {
+        self.model
+    }
+    #[must_use]
+    pub const fn token_embedding(self) -> TensorId {
+        self.token_embedding
+    }
+    #[must_use]
+    pub const fn output_norm(self) -> TensorId {
+        self.output_norm
+    }
+    #[must_use]
+    pub const fn output(self) -> TensorId {
+        self.output
+    }
+    #[must_use]
+    pub const fn block_count(self) -> u32 {
+        self.block_count
+    }
+    #[must_use]
+    pub const fn topology(self) -> TopologyDescriptor {
+        self.topology
+    }
+    #[must_use]
+    pub const fn prefill_plan(self) -> StepPlan {
+        self.prefill
+    }
+    #[must_use]
+    pub const fn decode_plan(self) -> StepPlan {
+        self.decode
+    }
+    #[must_use]
+    pub const fn audit(self) -> [StageAudit; QUANTIZED_STAGE_FAMILY_COUNT] {
+        self.audit
+    }
 }
 
-/// Reject presence of a block tensor.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`reject_block_tensor`).
-pub fn reject_block_tensor(_model_data: &ModelData, _block_index: i32, _suffix: &str) -> bool {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::reject_block_tensor
-    todo!("TODO: port reject_block_tensor from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Bind an attention block view.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`bind_attention_block`).
-pub fn bind_attention_block(
-    _model_data: &ModelData,
-    _block_index: i32,
-    _require_qk_norm: bool,
-    _use_shared_key_value: bool,
-    _block_out: &mut BlockView,
-) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::bind_attention_block
-    todo!("TODO: port bind_attention_block from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Bind a short-conv block view.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`bind_shortconv_block`).
-pub fn bind_shortconv_block(
-    _model_data: &ModelData,
-    _block_index: i32,
-    _block_out: &mut BlockView,
-) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::bind_shortconv_block
-    todo!("TODO: port bind_shortconv_block from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Lookup a block view by index.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`lookup_block_view`).
-pub fn lookup_block_view(
-    _execution: &ExecutionView,
-    _block_index: i32,
-    _block_out: &mut BlockView,
-) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::lookup_block_view
-    todo!("TODO: port lookup_block_view from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Build prefill and decode step plans from topology.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`build_step_plans`).
-pub fn build_step_plans(
-    _topology_in: &Topology,
-    _prefill_out: &mut StepPlan,
-    _decode_out: &mut StepPlan,
-) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::build_step_plans
-    todo!("TODO: port build_step_plans from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Validate a filled contract.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`validate_contract`).
-pub fn validate_contract(_contract_in: &Contract) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::validate_contract
-    todo!("TODO: port validate_contract from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Complete a partially filled contract.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`complete_contract`).
-pub fn complete_contract(_contract_out: &mut Contract) -> Result<(), i32> {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::complete_contract
-    todo!("TODO: port complete_contract from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Build quantized path audit for an execution view.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`build_quantized_path_audit`).
+/// Returns the pinned source label for a serialized tensor type.
 #[must_use]
-pub fn build_quantized_path_audit(_execution: &ExecutionView) -> QuantizedPathAudit {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::build_quantized_path_audit
-    todo!("TODO: port build_quantized_path_audit from emel.cpp/src/emel/model/generation/any.cpp")
+pub const fn tensor_type_name(tensor_type: SerializedType) -> &'static str {
+    match tensor_type {
+        SerializedType::F32 => "f32",
+        SerializedType::Q2K => "q2_k",
+        SerializedType::Q3K => "q3_k",
+        SerializedType::Q4K => "q4_k",
+        SerializedType::Q6K => "q6_k",
+        SerializedType::Q4_0 => "q4_0",
+        _ => "unknown",
+    }
 }
 
-/// Name for a quantized stage family.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`quantized_stage_family_name`).
-#[must_use]
-pub fn quantized_stage_family_name(_family: QuantizedStageFamily) -> &'static str {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::quantized_stage_family_name
-    todo!("TODO: port quantized_stage_family_name from emel.cpp/src/emel/model/generation/any.cpp")
-}
+use actor::{
+    AttentionRuntime, AuditRuntime, BeginRuntime, BlockVisitRuntime, GlobalRuntime, PlanRuntime,
+    RejectRuntime, ResetRuntime, ShortconvRuntime, StageRuntime, StorageBindRuntime,
+    StorageReleaseRuntime, TopologyRuntime, UnexpectedRuntime, ValidateRuntime, VisitRuntime,
+};
 
-/// Name for a quantized contract kind.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`quantized_contract_kind_name`).
-#[must_use]
-pub fn quantized_contract_kind_name(_kind: QuantizedContractKind) -> &'static str {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::quantized_contract_kind_name
-    todo!("TODO: port quantized_contract_kind_name from emel.cpp/src/emel/model/generation/any.cpp")
-}
-
-/// Name for a tensor type id.
-///
-/// TODO: convert from emel.cpp/src/emel/model/generation/any.cpp (`tensor_type_name`).
-#[must_use]
-pub fn tensor_type_name(_tensor_type: i32) -> &'static str {
-    // TODO: convert from emel.cpp/src/emel/model/generation/any.cpp /
-    // emel.cpp/src/emel/model/generation/any.hpp::tensor_type_name
-    todo!("TODO: port tensor_type_name from emel.cpp/src/emel/model/generation/any.cpp")
-}
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,21 @@
+model-data-parity-snapshot/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_model_tree=278b7b20545b630be33bee8bed0cb4c8db8990c3
+source_header_blob=78a25b987423d8cbef17965a8ca92596ffc0ecef
+source_implementation_blob=b33ace170b569d076844a36146c7ca86d4ffa7fc
+source_header_sha256=4b604d57fef1c22c8a9ebee36779a0c9cd4e7fe811856455d5cafd645498a151
+source_implementation_sha256=c8231f4feb2bc395a642bf3d66e74f5ee6ad243d706f277245b2b28c620c8816
+fixture_config=all_constants,enums,fields,defaults,byte_views,block_index_bounds,allocation_free_reset
+storage_contract=safe_exact_length_boxed_slices;fallible_construction;private_to_emel_model
+case=tensor_name_valid offset=0 length=5 bytes=ff6e616d65
+case=tensor_name_out_of_bounds offset=4294967295 length=4294967295 bytes=
+case=metadata_valid offset=0 length=4 bytes=fe6d6574
+case=metadata_zero_length offset=0 length=0 bytes=
+case=metadata_used_bound offset=3 length=2 used=4 bytes=
+case=architecture_nul_terminated bytes=6d6f736869
+case=architecture_full_capacity length=64
+case=block_index_valid input=blk.17.attn output=17
+case=block_index_i32_max input=blk.2147483647.x output=2147483647
+case=block_index_overflow input=blk.2147483648.x output=none
+case=reset allocation_count=0 defaults=restored

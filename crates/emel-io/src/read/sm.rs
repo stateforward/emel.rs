@@ -1,6 +1,7 @@
 //! Private explicit state machine for read validation, copy, and publication.
 
 #![allow(
+    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
     reason = "SML-generated state enums contain completion machinery without Eq"
 )]

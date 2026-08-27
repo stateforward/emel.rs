@@ -1,0 +1,11 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=5 runs=5 sample_policy=median warmup_iterations=1
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_header_blob: 78a25b987423d8cbef17965a8ca92596ffc0ecef
+# benchmark_fixture: complete fixed-capacity model data schema
+# benchmark_validation: safe construction; allocation-free reset and accessors
+model/data/construction ns_per_op=503350.000 iter=5 runs=5 batch=1
+model/data/reset ns_per_op=365108.400 iter=5 runs=5 batch=1
+model/data/accessors ns_per_op=2.885 iter=5 runs=5 batch=100000

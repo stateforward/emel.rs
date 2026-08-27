@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(emel-kernel-target-rope-reference LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT DEFINED EMEL_CPP_SOURCE_DIR)
+  message(FATAL_ERROR "EMEL_CPP_SOURCE_DIR is required")
+endif()
+if(NOT DEFINED FETCHCONTENT_SOURCE_DIR_STATEFORWARD_SML)
+  message(FATAL_ERROR "FETCHCONTENT_SOURCE_DIR_STATEFORWARD_SML is required")
+endif()
+add_subdirectory("${EMEL_CPP_SOURCE_DIR}" emel-cpp EXCLUDE_FROM_ALL)
+add_executable(emel-kernel-target-rope-reference main.cpp)
+target_include_directories(emel-kernel-target-rope-reference PRIVATE
+  "${EMEL_CPP_SOURCE_DIR}/include" "${EMEL_CPP_SOURCE_DIR}/src"
+  "${FETCHCONTENT_SOURCE_DIR_STATEFORWARD_SML}/include")
+target_link_libraries(emel-kernel-target-rope-reference PRIVATE emel)

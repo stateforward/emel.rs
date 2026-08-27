@@ -1,0 +1,41 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_and_public_rust_observers
+reference=../emel.cpp
+kernel-target-aarch64-dup-f32-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_dup_f32_dense_body_tail_and_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=dup status=ok output_bits=00000000,bfc00000,40100000,40800000,c1000000,41800000,42000000,c2800000,43000000
+case=zero_count status=reject error=InvalidShape output_bits=
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001,7fc00001
+source_detail_validate_span=src/emel/kernel/detail.hpp:1920-1926
+source_detail_copy_span=src/emel/kernel/detail.hpp:3788-3791
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:320-329
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:887-930,2217-2237,8448-8478
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:30-43
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+output_sha256=21b42c45ea4cdd2432f6705a8a55e8bb4a37915c8c5ae58a96af3337a1668dd0
+rust_module=crates/emel-kernels/src/aarch64/dup.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_dup_f32.rs
+scope=dense_f32_dup_neon_body_tail_zero_count_and_typed_rejection
+live_artifacts=.artifacts/kernel-goal/target-aarch64-dup-f32-live
+positive_cases=dup_count_9_body_and_tail_exact_output_bits
+rejection_cases=zero_count_and_unequal_count_typed_sentinel_preserving
+reference_metadata_probe=malformed_stride_accepted_and_mutated_by_pinned_fallback
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_router
+residuals=malformed tensor metadata is reference-only because public Rust accepts slices; no portable/strided/quantized/non-F32 variants; no x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 1.2.0
+result=match

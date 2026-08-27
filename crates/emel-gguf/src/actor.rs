@@ -24,41 +24,36 @@ impl Loader {
         event.dispatch(self)
     }
 
-    pub(crate) fn probe(
-        &mut self,
-        event: event::Probe<'_>,
-    ) -> Result<event::ProbeDone, event::Error> {
+    pub(crate) fn probe(&mut self, event: event::Probe) -> Result<event::ProbeDone, event::Error> {
+        let source = event.into_source();
         self.inner
-            .probe(event.file_image())
-            .map(event::ProbeDone::new)
+            .probe(&source)
+            .map(|requirements| event::ProbeDone::new(requirements, source))
     }
 
-    pub(crate) fn bind(&mut self, event: event::Bind) -> Result<(), event::Error> {
-        if let Some((kv_arena_bytes, kv_entry_capacity, tensor_capacity)) = event.capacity() {
-            self.inner
-                .bind_with_capacity(kv_arena_bytes, kv_entry_capacity, tensor_capacity)
-        } else {
-            self.inner.bind()
-        }
-    }
-
-    pub(crate) fn parse<'a>(
-        &mut self,
-        event: event::Parse<'a>,
-    ) -> Result<event::ParseDone<'a>, event::Error> {
+    pub(crate) fn bind(&mut self, event: event::Bind) -> Result<(), event::BindError> {
         self.inner
-            .parse(event.file_image())
-            .map(event::ParseDone::new)
+            .bind(event.into_storage())
+            .map_err(|(error, storage)| event::BindError::new(error, storage))
     }
 
-    pub(crate) fn load<'a>(
-        &mut self,
-        event: event::Load<'a>,
-    ) -> Result<event::ParseDone<'a>, event::Error> {
-        let file_image = event.file_image();
-        self.probe(event::Probe::new(file_image))?;
-        self.bind(event::Bind::exact())?;
-        self.parse(event::Parse::new(file_image))
+    pub(crate) fn parse(&mut self, _event: event::Parse) -> Result<event::ParseDone, event::Error> {
+        self.inner.parse().map(event::ParseDone::new)
+    }
+
+    pub(crate) fn query<O: crate::loader::query::Operation>(&self, operation: &mut O) {
+        self.inner.query(operation);
+    }
+
+    pub(crate) fn with_metadata_descriptor<O: crate::loader::metadata::Operation>(
+        &self,
+        operation: &mut O,
+    ) {
+        self.inner.with_metadata_descriptor(operation);
+    }
+
+    pub(crate) fn with_tensor<O: crate::loader::tensor::Operation>(&self, operation: &mut O) {
+        self.inner.with_tensor(operation);
     }
 }
 

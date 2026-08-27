@@ -1,0 +1,15 @@
+[package]
+name = "emel-kernel-flash-attn-parity"
+description = "Public-actor FlashAttention parity observer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+emel-kernels.workspace = true
+
+[lints]
+workspace = true

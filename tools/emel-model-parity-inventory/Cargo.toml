@@ -1,0 +1,31 @@
+[package]
+name = "emel-model-parity-inventory"
+description = "Deterministic compiler-backed inventory for the emel-model parity program."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1.0.106", features = ["span-locations"] }
+quote = "1.0.40"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["unbounded_depth"] }
+sha2 = "0.10.9"
+shell-words = "1.1.0"
+syn = { version = "2.0.118", features = ["full", "visit"] }
+tempfile = "3.20.0"
+
+[target.'cfg(unix)'.dependencies]
+cap-std = "4.0.2"
+cap-tempfile = "4.0.2"
+uuid = { version = "1.24.0", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }
+
+[lints]
+workspace = true

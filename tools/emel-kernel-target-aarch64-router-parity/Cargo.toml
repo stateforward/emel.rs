@@ -1,0 +1,14 @@
+[package]
+name = "emel-kernel-target-aarch64-router-parity"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "emel-kernel-target-aarch64-router-parity"
+path = "src/main.rs"
+
+[dependencies]
+emel-kernels = { path = "../../crates/emel-kernels" }

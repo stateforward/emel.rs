@@ -11,4 +11,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+emel-tensor = { workspace = true }
 sml = { workspace = true }
+
+[dev-dependencies]
+allocation-counter = "=0.8.1"

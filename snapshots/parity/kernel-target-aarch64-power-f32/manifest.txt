@@ -1,0 +1,39 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_and_public_rust_observers
+reference=../emel.cpp
+kernel-target-aarch64-power-f32-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_power_f32_sqr_sqrt_dense_body_tail_and_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=sqr status=ok output_bits=00000000,3d800000,3f800000,41800000,42a20000,43800000,441c4000,44a20000,45161000
+case=sqrt status=ok output_bits=00000000,3f000000,3f800000,40000000,40400000,40800000,40a00000,40c00000,40e00000
+case=zero_sqr status=reject error=InvalidShape output_bits=
+case=zero_sqrt status=reject error=InvalidShape output_bits=
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001,7fc00001
+source_detail_validate_span=src/emel/kernel/detail.hpp:1920-1926
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:805-824
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:886-930,2346-2400,8464-8496
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:145-173
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+output_sha256=cf07cc47e5a5c14a31a4769613dc04efc31c35d489379218aef716c78418f325
+rust_module=crates/emel-kernels/src_aarch64_power_f32.rs
+rust_router=crates/emel-kernels/src_aarch64_kernel.rs
+rust_tests=crates/emel-kernels/tests/target_aarch64_power_f32.rs
+scope=dense_f32_power_sqr_sqrt_neon_body_tail_zero_count_and_typed_rejection
+live_artifacts=.artifacts/kernel-goal/target-aarch64-power-f32-live
+reference_metadata_probe=malformed_stride_rejected_and_sentinel_preserved
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_router
+residuals=malformed tensor metadata is reference-only because public Rust accepts slices; no portable/strided/quantized/non-F32 variants; no x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 1.2.0

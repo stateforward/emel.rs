@@ -1,0 +1,26 @@
+kernel-target-normalization-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_events_blob=4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_norm_rms_norm_f32_dense
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=norm status=ok output_bits=bf5584cc,be5584ca,3f857301,bf91236c,00000000,3f91236c
+case=rms_norm status=ok output_bits=3eb504f3,3f3504f3,3fb504f3,3eb504f3,3f624630,3fb504f3
+case=invalid_epsilon status=reject error=InvalidParameters output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+case=zero_columns status=reject error=InvalidView output_bits=7fc00001
+case=shape_mismatch status=reject error=ShapeMismatch output_bits=7fc00001,7fc00001,7fc00001,7fc00001
+result=live_split_observer_match
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_normalization
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:306-323
+source_detail_span=src/emel/kernel/detail.hpp:4546-4648
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_child=crates/emel-kernels/src/any/normalization.rs
+allocation=zero_after_construction
+unsafe=none
+live_artifacts=.artifacts/kernel-goal/target-normalization-live

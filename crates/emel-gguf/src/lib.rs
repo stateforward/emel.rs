@@ -1,6 +1,22 @@
 //! Bounds-checked GGUF v2/v3 probing and loading.
+//!
+//! The public runtime boundary is the [`Loader`] actor plus concrete types in
+//! [`event`]. Parsed records, storage offsets, generated machine state, guards,
+//! actions, and detail helpers remain private.
+//!
+//! ```compile_fail
+//! use emel_gguf::loader::KvEntry;
+//! ```
+//!
+//! ```compile_fail
+//! let loader = emel_gguf::Loader::new();
+//! let _ = loader.state();
+//! ```
 
 #![forbid(unsafe_code)]
+
+#[cfg(test)]
+use allocation_counter as _;
 
 /// Typed request and outcome events accepted or produced by GGUF actors.
 pub mod event;

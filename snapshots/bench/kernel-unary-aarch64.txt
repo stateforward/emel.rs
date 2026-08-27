@@ -1,0 +1,9 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# benchmark_config: count=1024 iterations=10000 warmup=1000
+# benchmark_operand: dense contiguous F32 OpUnary::Abs input=1.25
+# benchmark_validation: both public observer lanes report output=1.25
+# rust_execution: public_Kernel_process_event_to_owned_UnaryKernel
+kernel/unary/op_abs rust_ns_per_dispatch=99.650 cpp_ns_per_dispatch=98.0375 rust_vs_cpp_ratio=1.016450 output=1.25

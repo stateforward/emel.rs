@@ -1,6 +1,7 @@
 #![no_main]
 
 use emel_io::{read, staged_read};
+use emel_model::tensor::Store;
 use emel_model::tensor::dependency::Actors;
 use emel_model::tensor::event::{
     ApplyBoundEffectResults, ApplyEffectError, ApplyOwnedEffectResults, BindStorage,
@@ -8,7 +9,6 @@ use emel_model::tensor::event::{
     PlanLoad, ReadLoad, ReleaseMapped, StagedLoad, StorageBatch, StorageEntry, StrategyKind,
     TensorMetadata, WithTensor,
 };
-use emel_model::tensor::Store;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -73,9 +73,7 @@ fuzz_target!(|data: &[u8]| {
                     .into_boxed_slice();
                 let _ = store.process_event(ApplyBoundEffectResults::new(ids));
             }
-            StrategyKind::ReadCopy
-            | StrategyKind::ExternalBuffer
-            | StrategyKind::StagedRead => {
+            StrategyKind::ReadCopy | StrategyKind::ExternalBuffer | StrategyKind::StagedRead => {
                 let results = (0..capacity)
                     .map(|index| {
                         let size = usize::from(byte(data, index + 1) % 16) + 1;
@@ -114,9 +112,10 @@ fuzz_target!(|data: &[u8]| {
         .process_event(BindStorage::new(recovery))
         .expect("actor recovers ready after every classified plan/result path");
     store
-        .process_event(PlanLoad::new(StrategyKind::None, EffectBuffer::new(
-            vec![EffectRequest::Empty].into_boxed_slice(),
-        )))
+        .process_event(PlanLoad::new(
+            StrategyKind::None,
+            EffectBuffer::new(vec![EffectRequest::Empty].into_boxed_slice()),
+        ))
         .expect("recovery plan");
     store
         .process_event(ApplyBoundEffectResults::new(vec![0].into_boxed_slice()))
@@ -149,8 +148,8 @@ fn fuzz_io_routes(data: &[u8]) {
         } else {
             ""
         };
-        let request = ReadLoad::new(0, path, source, offset, len)
-            .with_file_index(u16::from(byte(data, 25)));
+        let request =
+            ReadLoad::new(0, path, source, offset, len).with_file_index(u16::from(byte(data, 25)));
         let _ = store.process_event(request);
     } else {
         let chunk = u64::from(byte(data, 24));
@@ -169,13 +168,7 @@ fn fuzz_io_routes(data: &[u8]) {
         .process_event(BindStorage::new(io_storage(4)))
         .expect("I/O actor recovers after every classified route");
     store
-        .process_event(ReadLoad::new(
-            0,
-            "recovery.bin",
-            Some(&[1, 2, 3, 4]),
-            0,
-            4,
-        ))
+        .process_event(ReadLoad::new(0, "recovery.bin", Some(&[1, 2, 3, 4]), 0, 4))
         .expect("valid recovery read");
     let mut capture = |bytes: &[u8]| <[u8; 4]>::try_from(bytes).ok();
     assert_eq!(

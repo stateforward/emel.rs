@@ -8,7 +8,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+emel-gguf = { workspace = true }
 emel-io = { workspace = true }
+emel-kernels = { workspace = true }
+emel-tensor = { workspace = true }
+emel-token = { workspace = true }
 sml = { workspace = true }
 
 [dev-dependencies]
@@ -16,6 +20,18 @@ allocation-counter = "=0.8.1"
 
 [[example]]
 name = "tensor_parity"
+
+[[example]]
+name = "generation_observer"
+
+[[example]]
+name = "llama_observer"
+
+[[example]]
+name = "gemma4_observer"
+
+[[example]]
+name = "vocabulary_observer"
 
 [lints]
 workspace = true

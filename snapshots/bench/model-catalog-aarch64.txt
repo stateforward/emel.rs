@@ -1,0 +1,7 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# operand_sha256: 4c0c663efcac31d2c927c729d2f88aeb3fc52dc07a55d8f47c6fce9a42fda4b7
+# benchmark_config: records=256 target=tensor.255 iterations=200000 runs=7 sample_policy=median warmup_iterations=20000
+# benchmark_timing: setup is separate; steady Rust timing includes public Catalog FindTensor dispatch; C++ uses public generation::bind_tensor_view
+model/catalog/find_last rust_ns_per_lookup=22.000 cpp_ns_per_lookup=636.795 rust_vs_cpp_ratio=0.034548 setup_ns=44292 checksum=179200000 iter=200000 runs=7

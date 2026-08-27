@@ -2,6 +2,7 @@
 //! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
 
 #![allow(
+    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
     clippy::module_name_repetitions,
     clippy::missing_errors_doc,

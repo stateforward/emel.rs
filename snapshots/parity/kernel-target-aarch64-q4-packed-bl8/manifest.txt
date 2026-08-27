@@ -1,0 +1,41 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-aarch64-q4-packed-bl8-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_q4_packed_bl8_m5_k256_and_typed_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=q4_packed_bl8_m5_k256 status=ok output_bits=4417dd00,c4b7ed52,c4269976,44c2a787,42793bd0
+case=zero_count status=reject error=InvalidShape output_bits=7fc00001
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001,7fc00001,7fc00001,7fc00001,7fc00001
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:512-522
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:1611-1616
+source_aarch64_execution_span=src/emel/kernel/aarch64/actions.hpp:5827-5862
+source_aarch64_kernel_span=src/emel/kernel/aarch64/actions.hpp:3102-3249
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:412-413
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+output_sha256=592fe921c7d7ae267d164ab8f2a44d225775bdd66e2fb0d5fe8d81aa5a1e4951
+rust_module=crates/emel-kernels/src/aarch64/q4_packed.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::router_dispatches_q4_packed_bl8
+scope=q4_k_x8_bl8_lhs_packed_q8_k_rhs_f32_destination_m5_k256
+positive_cases=q4_packed_bl8_m5_k256_exact_output_bits
+rejection_cases=zero_count_and_non_block_k_sentinel_preserving
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (existing focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/q4-packed-bl8
+residuals=packed q4 matrix_x4/f32-rhs, F16 neon, generic quantized mul_mat, and x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 49207123cd3f39767764bae774932cb48623f92f
+result=match

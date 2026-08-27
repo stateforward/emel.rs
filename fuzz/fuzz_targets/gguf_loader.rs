@@ -16,20 +16,35 @@ fuzz_target!(|data: &[u8]| {
     let first_probe = loader.probe(data);
 
     let repeated_probe = loader.probe(data);
-    assert_eq!(first_probe, repeated_probe);
+    assert_eq!(
+        first_probe.as_ref().map(|value| (
+            value.metadata_count(),
+            value.tensor_count(),
+            value.max_key_bytes(),
+            value.max_value_bytes(),
+            value.tensor_data_bytes(),
+        )),
+        repeated_probe.as_ref().map(|value| (
+            value.metadata_count(),
+            value.tensor_count(),
+            value.max_key_bytes(),
+            value.max_value_bytes(),
+            value.tensor_data_bytes(),
+        )),
+    );
 
     let Ok(requirements) = repeated_probe else {
         return;
     };
-    if !requirements_are_bounded(requirements) {
+    if !requirements_are_bounded(&requirements) {
         return;
     }
 
-    if loader.bind().is_err() {
+    if loader.bind(requirements.clone()).is_err() {
         return;
     }
 
     if let Ok(model) = loader.parse(data) {
-        validate_model(&model);
+        validate_model(model, &requirements);
     }
 });

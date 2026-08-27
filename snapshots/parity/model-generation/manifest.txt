@@ -1,0 +1,38 @@
+model-generation-parity-snapshot/v1
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_generation_header_blob=d521cf68e1bf52a2a193bbdb460741772199b318
+source_generation_implementation_blob=099058ccd441d1dc6bebbb0c4994070d2f533c47
+generation_case=attention_qk block_count=1 prefill=4096 decode=1 uses_attention=1
+stage=token_embedding type=q6_k contract=approved_dense_f32_by_contract consistent=1
+stage=output_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=output type=q6_k contract=native_quantized consistent=1
+stage=attention_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_q type=q6_k contract=native_quantized consistent=1
+stage=attention_k type=q6_k contract=native_quantized consistent=1
+stage=attention_v type=q6_k contract=native_quantized consistent=1
+stage=attention_q_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_k_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_output type=q6_k contract=native_quantized consistent=1
+stage=feed_forward_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=feed_forward_gate type=q6_k contract=native_quantized consistent=1
+stage=feed_forward_down type=q6_k contract=native_quantized consistent=1
+stage=feed_forward_up type=q6_k contract=native_quantized consistent=1
+reference_tool_sha256=7a647756db55e6279a3869e4a87ff2f582e8f59db02bb5f4666c35edd5a11aaf
+fixture_llama_sha256=8ed06dc5bd84bce3154a2b7e751c45a56562691933ee25b5823393f909329a67
+source_inventory_sha256=f07b162bb70289bc4f3c5051f3da3b70bc335d76deb0dd93ba4ab51a42132f09
+canonical_ast_inventory_sha256=240554f572f10c2469807e2e8f09325494d7a878e1eb608a052ef297b3a81ecc
+generation_case=llama_real_fixture block_count=2 prefill=4096 decode=1 uses_attention=1
+stage=token_embedding type=q2_k contract=approved_dense_f32_by_contract consistent=1
+stage=output_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=output type=q6_k contract=native_quantized consistent=1
+stage=attention_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=attention_q type=q2_k contract=native_quantized consistent=1
+stage=attention_k type=q2_k contract=native_quantized consistent=1
+stage=attention_v type=q3_k contract=native_quantized consistent=1
+stage=attention_q_norm type=unknown contract=not_applicable consistent=0
+stage=attention_k_norm type=unknown contract=not_applicable consistent=0
+stage=attention_output type=q3_k contract=native_quantized consistent=1
+stage=feed_forward_norm type=f32 contract=approved_dense_f32_by_contract consistent=1
+stage=feed_forward_gate type=q2_k contract=native_quantized consistent=1
+stage=feed_forward_down type=q3_k contract=native_quantized consistent=1
+stage=feed_forward_up type=q2_k contract=native_quantized consistent=1

@@ -11,4 +11,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+emel-tensor = { workspace = true }
 sml = { workspace = true }
+
+[target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+pulp = { workspace = true }
+
+[dev-dependencies]
+allocation-counter = "=0.8.1"

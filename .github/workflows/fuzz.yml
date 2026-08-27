@@ -14,22 +14,23 @@ concurrency:
 
 env:
   CARGO_FUZZ_VERSION: 0.13.2
+  EMEL_FUZZ_TOOLCHAIN: nightly-2026-08-25
 
 jobs:
   gguf:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install nightly --profile minimal
+      - run: rustup toolchain install "$EMEL_FUZZ_TOOLCHAIN" --profile minimal
       - uses: actions/cache@v4
         with:
           path: ${{ runner.tool_cache }}/cargo-fuzz
-          key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
+          key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}-${{ env.EMEL_FUZZ_TOOLCHAIN }}
       - run: echo "${{ runner.tool_cache }}/cargo-fuzz/bin" >> "$GITHUB_PATH"
       - name: Install cargo-fuzz
         run: |
           if ! command -v cargo-fuzz >/dev/null 2>&1; then
-            cargo +nightly install --root "${{ runner.tool_cache }}/cargo-fuzz" \
+            cargo +"$EMEL_FUZZ_TOOLCHAIN" install --root "${{ runner.tool_cache }}/cargo-fuzz" \
               --version "$CARGO_FUZZ_VERSION" cargo-fuzz --locked
           fi
       - uses: actions/cache@v4

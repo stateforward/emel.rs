@@ -20,6 +20,41 @@ members = [
     "tools/emel-inspect",
     "tools/emel-bench",
     "tools/emel-gguf-parity",
+    "tools/emel-kernel-capability-parity",
+    "tools/emel-kernel-elementwise-parity",
+    "tools/emel-kernel-conv-transpose-1d-parity",
+    "tools/emel-kernel-quantized-parity",
+    "tools/emel-kernel-quant-more-parity",
+    "tools/emel-kernel-im2col-parity",
+    "tools/emel-kernel-normalization-parity",
+    "tools/emel-kernel-rope-parity",
+    "tools/emel-kernel-power-parity",
+    "tools/emel-kernel-binary-parity",
+    "tools/emel-kernel-unary-parity",
+    "tools/emel-kernel-softmax-parity",
+    "tools/emel-kernel-aarch64-silu-parity",
+    "tools/emel-kernel-aarch64-f16-matmul-parity",
+    "tools/emel-kernel-aarch64-dup-f32-parity",
+    "tools/emel-kernel-f16-matmul-parity",
+    "tools/emel-kernel-matmul-parity",
+    "tools/emel-kernel-argmax-parity",
+    "tools/emel-kernel-get-rows-parity",
+    "tools/emel-kernel-target-get-rows-parity",
+    "tools/emel-kernel-target-get-rows-packed-parity",
+    "tools/emel-kernel-target-aarch64-binary-f32-parity",
+    "tools/emel-kernel-target-aarch64-broadcast-f32-parity",
+    "tools/emel-kernel-target-aarch64-dup-f32-parity",
+    "tools/emel-kernel-target-aarch64-power-f32-parity",
+    "tools/emel-kernel-target-aarch64-unary-f32-parity",
+    "tools/emel-kernel-target-scalar-unary-parity",
+    "tools/emel-kernel-target-normalization-parity",
+    "tools/emel-kernel-target-softmax-parity",
+    "tools/emel-kernel-target-scalar-trig-parity",
+    "tools/emel-kernel-target-aarch64-conv-transpose-1d-f32-parity",
+    "tools/emel-kernel-flash-attn-parity",
+    "tools/emel-kernel-broadcast-parity",
+    "tools/emel-kernel-activation-parity",
+    "tools/emel-model-parity-inventory",
 ]
 resolver = "3"
 
@@ -52,6 +87,7 @@ emel-speech = { path = "crates/emel-speech", version = "0.1.0" }
 emel-diarization = { path = "crates/emel-diarization", version = "0.1.0" }
 emel = { path = "crates/emel", version = "0.1.0" }
 sml = { package = "stateforward-sml", version = "=1.2.0" }
+pulp = { version = "=0.22.3", default-features = true }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

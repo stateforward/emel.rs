@@ -1,0 +1,8 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# benchmark_config: k=rows2xcols2 iterations=10000 warmup=1000
+# benchmark_operand: dense explicit-stride F32 get_rows root route
+# benchmark_validation: both public observer lanes report output=4
+kernel/get_rows/op_get_rows_f32 rust_ns_per_dispatch=58.283 cpp_ns_per_dispatch=39.5458 rust_vs_cpp_ratio=1.473810 output=4

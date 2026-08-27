@@ -326,3 +326,7 @@ const fn error(value: Error) -> &'static str {
         _ => "other",
     }
 }
+use emel_gguf as _;
+use emel_kernels as _;
+use emel_tensor as _;
+use emel_token as _;

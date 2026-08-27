@@ -1,0 +1,10 @@
+[package]
+name = "emel-kernel-target-aarch64-q8-0-x4-bl4-parity"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+emel-kernels = { path = "../../crates/emel-kernels" }
+
+[workspace]

@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 sml = { workspace = true }
+emel-model = { workspace = true }

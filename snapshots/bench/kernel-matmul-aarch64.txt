@@ -1,0 +1,19 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# source_kernel_events_blob: 4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+# source_kernel_detail_blob: c8a82643eabfe8f2d7883e655955f455794511b0
+# source_kernel_x86_sm_blob: 0b4d635ebbd0fbd52dbca8a2345547fb571205c8
+# source_kernel_x86_guards_blob: cb3dac8253f8417c9b44acff1de414f6d0a3a3cf
+# source_kernel_x86_actions_blob: d45558f5eb96950f43c16a09d768cb4f382d6d61
+# source_kernel_aarch64_sm_blob: 865a9cc6ba6115382ed043c464f3d62bcd851357
+# source_kernel_aarch64_guards_blob: c25714566ec9a02679daef85089544575123408e
+# source_kernel_aarch64_actions_blob: 267d4f74e6e7498155c8535920322ffef2c02fb6
+# active_kernel_sm_blob: 865a9cc6ba6115382ed043c464f3d62bcd851357
+# active_kernel_guards_blob: c25714566ec9a02679daef85089544575123408e
+# active_kernel_actions_blob: 267d4f74e6e7498155c8535920322ffef2c02fb6
+# benchmark_config: k=16,m=1,n=1 iterations=10000 warmup=1000
+# benchmark_operand: dense explicit nonzero-stride F32-by-F32-to-F32 root matmul
+# benchmark_validation: both public observer lanes report output=16
+kernel/matmul/op_mul_mat_f32 rust_ns_per_dispatch=135.400 cpp_ns_per_dispatch=242.958 rust_vs_cpp_ratio=0.557298 output=16

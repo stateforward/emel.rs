@@ -1,0 +1,8 @@
+# bench_host_arch: aarch64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_sml_commit: 49207123cd3f39767764bae774932cb48623f92f
+# benchmark_config: rope_norm_4d iterations=10000 warmup=1000
+# benchmark_operand: positive-contiguous-f32 public root route
+# benchmark_validation: both public observer lanes report output=4
+kernel/rope/op_rope_norm rust_ns_per_dispatch=75.600 cpp_ns_per_dispatch=39.8167 rust_vs_cpp_ratio=1.898700 output=4

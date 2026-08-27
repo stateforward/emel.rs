@@ -8,14 +8,29 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-emel-gguf = { path = "../crates/emel-gguf" }
-emel-io = { path = "../crates/emel-io" }
-emel-model = { path = "../crates/emel-model" }
+emel-gguf = { path = "../crates/emel-gguf", optional = true }
+emel-io = { path = "../crates/emel-io", optional = true }
+emel-kernels = { path = "../crates/emel-kernels", optional = true }
+emel-model = { path = "../crates/emel-model", optional = true }
+emel-tensor = { path = "../crates/emel-tensor", optional = true }
+emel-token = { path = "../crates/emel-token", optional = true }
 libfuzzer-sys = "0.4.13"
+
+[features]
+gguf_fuzz = ["dep:emel-gguf"]
+io_fuzz = ["dep:emel-io"]
+kernel_fuzz = ["dep:emel-kernels"]
+model_fuzz = ["dep:emel-model"]
+model_generation_fuzz = ["dep:emel-kernels", "dep:emel-model"]
+model_tensor_fuzz = ["dep:emel-io", "dep:emel-model"]
+model_vocabulary_fuzz = ["dep:emel-gguf", "dep:emel-model", "dep:emel-token"]
+tensor_fuzz = ["dep:emel-tensor"]
+token_fuzz = ["dep:emel-token"]
 
 [[bin]]
 name = "gguf_loader"
 path = "fuzz_targets/gguf_loader.rs"
+required-features = ["gguf_fuzz"]
 test = false
 doc = false
 bench = false
@@ -23,6 +38,7 @@ bench = false
 [[bin]]
 name = "gguf_load"
 path = "fuzz_targets/gguf_load.rs"
+required-features = ["gguf_fuzz"]
 test = false
 doc = false
 bench = false
@@ -30,6 +46,15 @@ bench = false
 [[bin]]
 name = "gguf_lifecycle"
 path = "fuzz_targets/gguf_lifecycle.rs"
+required-features = ["gguf_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gguf_metadata"
+path = "fuzz_targets/gguf_metadata.rs"
+required-features = ["gguf_fuzz"]
 test = false
 doc = false
 bench = false
@@ -37,6 +62,7 @@ bench = false
 [[bin]]
 name = "emel_io_read"
 path = "fuzz_targets/emel_io_read.rs"
+required-features = ["io_fuzz"]
 test = false
 doc = false
 bench = false
@@ -44,6 +70,7 @@ bench = false
 [[bin]]
 name = "emel_io_mmap"
 path = "fuzz_targets/emel_io_mmap.rs"
+required-features = ["io_fuzz"]
 test = false
 doc = false
 bench = false
@@ -51,6 +78,7 @@ bench = false
 [[bin]]
 name = "emel_io_staged_read"
 path = "fuzz_targets/emel_io_staged_read.rs"
+required-features = ["io_fuzz"]
 test = false
 doc = false
 bench = false
@@ -58,6 +86,7 @@ bench = false
 [[bin]]
 name = "emel_io_loader"
 path = "fuzz_targets/emel_io_loader.rs"
+required-features = ["io_fuzz"]
 test = false
 doc = false
 bench = false
@@ -65,6 +94,55 @@ bench = false
 [[bin]]
 name = "emel_model_tensor"
 path = "fuzz_targets/emel_model_tensor.rs"
+required-features = ["model_tensor_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_token_profile"
+path = "fuzz_targets/emel_token_profile.rs"
+required-features = ["token_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_model_vocabulary"
+path = "fuzz_targets/emel_model_vocabulary.rs"
+required-features = ["model_vocabulary_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_model_catalog"
+path = "fuzz_targets/emel_model_catalog.rs"
+required-features = ["model_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_model_generation"
+path = "fuzz_targets/emel_model_generation.rs"
+required-features = ["model_generation_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_tensor_dtype"
+path = "fuzz_targets/emel_tensor_dtype.rs"
+required-features = ["tensor_fuzz"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "emel_kernel_elementwise"
+path = "fuzz_targets/emel_kernel_elementwise.rs"
+required-features = ["kernel_fuzz"]
 test = false
 doc = false
 bench = false

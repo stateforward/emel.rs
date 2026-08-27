@@ -13,6 +13,7 @@ publish = false
 emel-gguf.workspace = true
 emel-io.workspace = true
 emel-model = { workspace = true }
+emel-tensor.workspace = true
 
 [dev-dependencies]
 allocation-counter = "=0.8.1"

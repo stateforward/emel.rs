@@ -1,0 +1,22 @@
+# Target x86 op_dup F32 bounded source-contract snapshot
+
+status=source_contract_only
+observer=none_live_cpp_observer
+result=source_contract_only
+source_repo=../emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+guard_blob=cb3dac8253f8417c9b44acff1de414f6d0a3a3cf
+action_blob=d45558f5eb96950f43c16a09d768cb4f382d6d61
+sm_blob=0b4d635ebbd0fbd52dbca8a2345547fb571205c8
+guard_span=src/emel/kernel/x86_64/guards.hpp:10-18,141-166
+action_span=src/emel/kernel/x86_64/actions.hpp:1664-1688,2240-2292
+transition_span=src/emel/kernel/x86_64/sm.hpp:30-44
+rust_actor=crates/emel-kernels/src/target_x86_dup_f32.rs
+rust_api=OpTargetX86DupF32+TargetX86DupF32Kernel
+backend=pulp-0.22.3-x86-v3
+contract=dense-nonempty-equal-length-contiguous-f32
+tail=scalar-f32-tail-after-safe-simd-vector-loop
+unsafe=none
+allocation=zero-in-dispatch
+live_cpp_differential=unavailable
+residuals=portable-wiring,generated-scaffold-replacement,non-dense-strides,empty-shapes,non-f32-dtypes,aarch64-route,full-kernel-parity

@@ -1,0 +1,15 @@
+[package]
+name = "emel-kernel-quantized-parity"
+description = "Public Rust quantized-kernel parity observer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+emel-kernels.workspace = true
+
+[lints]
+workspace = true

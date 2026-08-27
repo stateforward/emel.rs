@@ -1,0 +1,14 @@
+schema=emel.rs.parity.v1
+result=live_split_observer_match
+component=emel-kernels::target::aarch64::kernel
+source_repository=../emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+observer=single_public_router_and_pinned_aarch64_sm_reference
+operations=dense_f32_unary_abs;binary_add;dup;gemv;f16_matmul
+dispatch=public_Aarch64Kernel
+allocation_hot_path=zero_after_construction
+unsafe=none
+typed_unexpected_event_rejection=covered_by_public_router_observer
+live_artifacts=.artifacts/kernel-goal/target-aarch64-router-live
+residuals=packed;quantized;non_dense;scalar_trig
+result=match

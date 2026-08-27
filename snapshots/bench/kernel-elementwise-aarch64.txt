@@ -1,0 +1,15 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_kernel_events_blob: 4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+# source_kernel_detail_blob: c8a82643eabfe8f2d7883e655955f455794511b0
+# source_kernel_any_blob: a85d0942c81ef8f4d2dc293c5ceeaa63ac0e2c49
+# benchmark_config: count=4096 iterations=10000 runs=5 sample_policy=median warmup_iterations=1000
+# benchmark_operand: same dense contiguous F32 lhs=1.25 rhs=0.75 count=4096 for public Rust Kernel and pinned C++ Kernel
+# benchmark_timing: timed public actor dispatch only; storage and machine construction are outside measurement
+# benchmark_validation: both lanes report expected terminal output values and equal iteration/run configuration
+# reference_tool_sha256: 114b9ad8801ee33f839365b4a01aa211447269db7fb6eb87476951c2a6285d03
+# rust_observer_sha256: f7243657f3bf240f5aff002d52608e7f1643faa485617f8cea1a13050fe3ded7
+kernel/elementwise/op_add rust_ns_per_op=229.008 cpp_ns_per_op=365.442 rust_vs_cpp_ratio=0.626660 output=1.875 iter=10000 runs=5 warmup=1000
+kernel/elementwise/op_mul rust_ns_per_op=230.408 cpp_ns_per_op=340.621 rust_vs_cpp_ratio=0.676435 output=0.9375 iter=10000 runs=5 warmup=1000

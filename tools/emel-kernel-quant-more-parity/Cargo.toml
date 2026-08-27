@@ -1,0 +1,15 @@
+[package]
+name = "emel-kernel-quant-more-parity"
+description = "Public Rust q5_k by q8_k scalar parity observer."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+emel-kernels.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+kernel-broadcast-parity/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_sml_commit=49207123cd3f39767764bae774932cb48623f92f
+source_detail_guard_span=3788-3836
+source_detail_run_span=3823-3836
+source_x86_add_sm_span=46-63
+source_x86_mul_sm_span=111-128
+scope=portable_f32_row_broadcast_add_mul
+case=row_add status=ok output_bits=41300000,41b00000,42040000,41600000,41c80000,42100000
+case=row_mul status=ok output_bits=41200000,42200000,42b40000,42200000,42c80000,43340000
+case=row_add_implicit status=ok output_bits=41300000,41b00000,42040000,41600000,41c80000,42100000
+config=Release,cxx20,public-rust-broadcast-actor,public-cpp-kernel
+rust_execution=public_BroadcastKernel_process_event
+reference_execution=public_emel_kernel_Kernel_process_event
+result=match

@@ -55,19 +55,16 @@ fuzz_target!(|data: &[u8]| {
     let recovery_target_capability = Target::new(&mut recovery_target);
     let recovery = actor
         .process_event(
-            StageWindow::new(
-                0,
-                1,
-                1,
-                Some(&recovery_source),
-                &recovery_target_capability,
-            )
+            StageWindow::new(0, 1, 1, Some(&recovery_source), &recovery_target_capability)
                 .on_done(Callback::store(&recovery_done))
                 .on_error(Callback::store(&recovery_error)),
         )
         .expect("the actor must recover after every classified fuzz request");
     assert_eq!(recovery.bytes_committed(), 1);
-    assert_eq!(recovery_target_capability.try_matches(&recovery_source), Ok(true));
+    assert_eq!(
+        recovery_target_capability.try_matches(&recovery_source),
+        Ok(true)
+    );
     assert_eq!(recovery_done.get(), Some(recovery));
 });
 

@@ -1,0 +1,35 @@
+model-vocab-parity/v1
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_tree=d2fd66887fbdef6e0894de9391155099839e625c
+source_detail_blob=7c964f7449640fd7fe9eef21f4c14f3a65bf7b6a
+source_data_blob=78a25b987423d8cbef17965a8ca92596ffc0ecef
+source_model_profile_blob=ef7ff8da51f1f281082901bf4919a4b9a63f2671
+source_pre_profile_blob=16b2982ca16dfdfbee016d50d0eb924a7cdc18c4
+source_sml_commit=49207123cd3f39767764bae774932cb48623f92f
+reference_tool_sha256=f0f1b3e8b680b57100b879147b494284cc93039ac8ed26f3823064bef0c78516
+rust_observer_sha256=3fbfbed3f3acc04f5bb9df1bdae1d69dda0861c96a5ed24dc335458dc9c8fe4f
+token_profile_manifest_sha256=de80725a0e9e5e2ecc3b0d4cef7e3489ddf9bf4b6509574a1219ae3f17b43129
+token_profile_reference_tool_sha256=4b2abe4e1401946a67b880f8ef013693afc5cb0ec003c8deb2c5317349a9464a
+token_profile_rust_machine_sha256=cb823b65dc87bc8aa21043f83fa8c4dc4bda85f1c17aebdce9b526e641111dc4
+token_profile_rust_parity_test_sha256=40fbe60f5983325ca8403eb82f1dbf4163a35cd75a4d0d689a7565d906a0486c
+config=Release,tests-off,cxx20,public-cpp-model-facade,public-rust-actor,semantic-fnv1a64
+fixture=Llama-68M-Chat-v1-Q2_K.gguf sha256=8ed06dc5bd84bce3154a2b7e751c45a56562691933ee25b5823393f909329a67
+fixture=distilgpt2.Q2_K.gguf sha256=b046ac09ba24a848e2140676fba58c1dcf2f19617e45b03524043eabdb556a31
+fixture=flan-t5-small.Q2_K.gguf sha256=a67f632d17d2bdb819071c9b4d51e26a191f75c7f725861ee22e23e1d903dc57
+fixture=bert-base-uncased-q4_k_m.gguf sha256=48c02c00843964c2e1675e6d6aebfbdb03d4ca330d65a6b9695eee6f160109b0
+fixture=rwkv7-0.1B-g1-F16.gguf sha256=fea5c54f3fd2370ac90ae58f2ecd6cbe57c31df023598aed4c95b0966170f9c8
+fixture=model-tiny-q80.gguf sha256=52deb0fdcbb9c36b4d570e35f5a65a5ad4275ccdb85e7a06e81a8b05b3743c9d
+result=match
+pre_identity_proof=token-profile-live+opaque-eq-retention+observable-model-vocab
+pre_identity_mutation=alternate-public-resolver-id-rejected
+vocabulary-observer/v1
+case=standard ok=1 model=Bpe model_name=gpt2 pre_name=lfm2 counts=2,4,12,1,6,3 ids=0,0,-1,-1,-1,-1,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=161 digest=c5699ca22cf29745 tokens=3c7c7061647c3e:0:3:0:0;68656c6c6f:1069547520:1:0:0 merges=6820656c6c6f charmap=070809
+case=legacy_t5 ok=1 model=Unigram model_name=t5 pre_name=default counts=4,0,17,0,0,0 ids=-1,1,-1,-1,2,-1,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=56 digest=8495eed25ec9d2fc tokens=3c7061643e:0:3:0:0;3c2f733e:0:3:0:0;3c756e6b3e:0:2:0:0 merges= charmap=
+case=signed ok=1 model=Rwkv model_name=rwkv pre_name= counts=2,0,8,0,0,0 ids=0,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=32 digest=d038912b66f26436 tokens=3c733e:0:3:0:0;68656c6c6f:0:1:0:0 merges= charmap=
+case=gemma4_400001 ok=1 model=SentencePiece model_name=gemma4 pre_name= counts=2,4,10,400001,0,0 ids=0,1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=41 digest=e2cc62735218d31c tokens=3c626f733e:0:3:0:0;3c656f733e:0:3:0:0 merges=;; charmap=
+case=real/Llama-68M-Chat-v1-Q2_K.gguf ok=1 model=SentencePiece model_name=llama pre_name=default counts=32000,0,210919,0,0,0 ids=1,2,-1,-1,0,-1,2,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=41 digest=1291199e91033ed1 tokens=3c756e6b3e:3296329728:3:0:0;3c733e:3296329728:3:0:0;3c2f733e:3296329728:3:0:0 merges= charmap=
+case=real/distilgpt2.Q2_K.gguf ok=1 model=Bpe model_name=gpt2 pre_name=gpt-2 counts=50257,0,356735,50000,406304,0 ids=50256,50256,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=32 digest=388e71c8595af546 tokens=21:0:1:0:0;22:0:1:0:0;23:0:1:0:0 merges=c4a02074;c4a02061;682065 charmap=
+case=real/flan-t5-small.Q2_K.gguf ok=1 model=Unigram model_name=t5 pre_name=default counts=32128,0,266575,0,0,237539 ids=-1,1,-1,-1,2,-1,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=58 digest=3745b2a0b3fa870d tokens=3c7061643e:0:3:0:0;3c2f733e:0:3:0:0;3c756e6b3e:0:2:0:0 merges= charmap=00b40200008400000000008001000080
+case=real/bert-base-uncased-q4_k_m.gguf ok=1 model=WordPiece model_name=bert pre_name=jina-v2-en counts=30522,2,260415,0,0,0 ids=101,-1,-1,-1,100,102,0,-1,103,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=37 digest=085a6a4bc5c76a5e tokens=5b5041445d:0:3:0:0;5b756e75736564305d:0:1:0:0;5b756e75736564315d:0:1:0:0 merges= charmap=
+case=real/rwkv7-0.1B-g1-F16.gguf ok=1 model=Rwkv model_name=rwkv pre_name= counts=65536,0,577998,0,0,0 ids=0,0,261,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1 flags=32 digest=f3e748467b1bdaea tokens=3c733e:0:3:0:0;5c783030:0:1:0:0;5c783031:0:1:0:0 merges= charmap=
+case=real/model-tiny-q80.gguf ok=0

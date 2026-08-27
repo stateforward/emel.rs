@@ -744,37 +744,37 @@ impl GbnfRuleParserStateMachineContext for GbnfRuleParserContext {
         )
     }
     fn quantifier_braced_exact_shape(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::quantifier_braced_exact_shape
+        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_braced_exact_shape
         todo!(
             "TODO: port guard `quantifier_braced_exact_shape` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
         )
     }
     fn quantifier_braced_open_shape(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::quantifier_braced_open_shape
+        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_braced_open_shape
         todo!(
             "TODO: port guard `quantifier_braced_open_shape` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
         )
     }
     fn quantifier_braced_range_shape(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::quantifier_braced_range_shape
+        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_braced_range_shape
         todo!(
             "TODO: port guard `quantifier_braced_range_shape` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
         )
     }
     fn quantifier_token_plus(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::quantifier_token_plus
+        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_token_plus
         todo!(
             "TODO: port guard `quantifier_token_plus` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
         )
     }
     fn quantifier_token_question(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::quantifier_token_question
+        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_token_question
         todo!(
             "TODO: port guard `quantifier_token_question` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
         )
     }
     fn quantifier_token_star(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::quantifier_token_star
+        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_token_star
         todo!(
             "TODO: port guard `quantifier_token_star` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
         )

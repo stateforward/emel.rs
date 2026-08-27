@@ -1,0 +1,19 @@
+kernel-quant-more-parity/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_layout=q5_k_176_bytes,q8_k_292_bytes,qk_k_256_values
+source_scalar_dot_span=2944-3000
+scope=borrowed_scalar_q5_k_q8_k_rows
+case=dot_q5_k_q8_k_varied_qs status=ok output_bits=c484c000
+case=invalid_block_length status=error error=InvalidBlockLength { format: Q5K, bytes: 175 }
+case=mismatched_block_count status=error error=MismatchedBlockCount { lhs: 1, rhs: 2 }
+source_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+rust_surface=crates/emel-kernels/src/any/quant_more.rs
+rust_tests=crates/emel-kernels/tests/portable/quant_more.rs
+dispatch=direct_safe_scalar_no_allocation
+observer=split_live_cpp_and_public_rust
+result=live_match
+typed_rejection=Rust observer asserted InvalidBlockLength(Q5K,175) and MismatchedBlockCount(lhs=1,rhs=2)
+observer_sha256=cpp:6ed400fab912df3e83121be4b92f19916a965cd76b42e685074c76a6b2476ec3,rust:a763c70c03e76bf3db6426228323a18644730a5e2ce3ba5cf89c524b2814584d
+isolated_paths=BUILD_DIR=/Users/gabrielwillen/VSCode/stateforward/emel/emel.rs/.artifacts/kernel-goal/quant-more-live,CARGO_TARGET_DIR=/Users/gabrielwillen/VSCode/stateforward/emel/emel.rs/.artifacts/kernel-goal/quant-more-live/target/cargo,TMPDIR=/Users/gabrielwillen/VSCode/stateforward/emel/emel.rs/.artifacts/kernel-goal/quant-more-live/tmp,CMAKE_BUILD=/Users/gabrielwillen/VSCode/stateforward/emel/emel.rs/.artifacts/kernel-goal/quant-more-live/target/cpp-build
+residual=other_quantized_families,target_specialized_simd

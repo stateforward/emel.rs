@@ -1,0 +1,24 @@
+kernel-quant-q6-k-q8-k-parity/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_layout_span=detail.hpp:265-272,298-306
+source_scalar_block_span=detail.hpp:3002-3060
+source_scalar_row_span=detail.hpp:3062-3140
+rust_surface=crates/emel-kernels/src/quant_more.rs
+rust_tests=crates/emel-kernels/tests/quant_q6_k.rs
+scope=borrowed_scalar_q6_k_q8_k_rows
+layout=q6_k_210_bytes,q8_k_292_bytes,qk_k_256_values
+fixture=asymmetric_q6_k_low_high_bits_signed_scales
+case=asymmetric_packed_oracle status=ok output_bits=c82a2740
+case=multiple_blocks status=ok
+case=zero_allocation_hot_call status=ok
+case=invalid_block_length status=error
+case=mismatched_block_count status=error
+focused_tests=3_pass
+quant_more_regression_tests=28_pass
+all_targets=pass
+dispatch=direct_safe_scalar_no_allocation
+observer=none_live_cpp_observer
+result=source_contract_only
+residual=live_cpp_differential_fixture,target_specialized_simd,matrix_argmax_wiring

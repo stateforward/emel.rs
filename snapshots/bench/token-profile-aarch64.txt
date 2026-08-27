@@ -1,0 +1,10 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=10000000 runs=7 sample_policy=median warmup_iterations=1000000
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_model_blob: ef7ff8da51f1f281082901bf4919a4b9a63f2671
+# source_pre_blob: 16b2982ca16dfdfbee016d50d0eb924a7cdc18c4
+# benchmark_fixture: public Resolver/Resolve model=gpt2 pre=solar-open
+# benchmark_validation: typed success checked each iteration; allocation separately proven
+token/profile/resolve_worst_known ns_per_op=9.522 iter=10000000 runs=7

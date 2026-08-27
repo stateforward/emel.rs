@@ -1,0 +1,13 @@
+schema=emel.rs.parity.v1
+component=emel-kernels::Kernel
+result=live_split_observer_match
+source_repository=../emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+observer=one_public_portable_kernel_and_pinned_emel_kernel_sm_reference
+operations=op_dup;op_add;op_sqr
+dispatch=one_kernel_one_sm_typed_operation_events
+typed_unexpected_event_rejection=covered
+live_artifacts=.artifacts/kernel-goal/portable-router-live
+allocation_hot_path=zero_after_construction
+unsafe=none
+result=match

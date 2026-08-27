@@ -1,0 +1,14 @@
+# bench_host_arch: aarch64
+# bench_pointer_width: 64
+# benchmark_config: iterations=1000 runs=5 sample_policy=median warmup_iterations=100
+# source_repository: stateforward/emel.cpp
+# source_commit: 843a117386ef17dc5a50549bbfc821074c2141d6
+# source_kernel_events_blob: 4b3f02fa5ff9c5071d1fc83938cef1b22b4658b9
+# source_kernel_detail_blob: c8a82643eabfe8f2d7883e655955f455794511b0
+# source_generation_header_blob: d521cf68e1bf52a2a193bbdb460741772199b318
+# source_generation_blob: 099058ccd441d1dc6bebbb0c4994070d2f533c47
+# benchmark_fixture: same MatrixWeightContract tensor_type=Q4_K expected=NativeQuantized in both public owner APIs
+# benchmark_timing: Rust public Resolver dispatch versus pinned C++ public 14-stage generation audit; 100 warmups then median 5x1000 by default
+# benchmark_validation: every observation is native_quantized; Rust dispatch allocation separately proven zero
+# benchmark_interpretation: conservative source-owner comparison; C++ timing includes construction and traversal of its complete audit result
+kernel/capability/resolve_matrix_q4_k rust_ns_per_op=0.917 cpp_ns_per_op=20.583 rust_vs_cpp_ratio=0.044551 outcome=native_quantized dispatch_allocations=0 iter=1000 runs=5

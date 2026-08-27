@@ -1,0 +1,24 @@
+schema=emel.kernel.parity.v1
+result=source_contract_only
+observer=none_live_cpp_observer
+source_repository=../emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_guard_blob=cb3dac8253f8417c9b44acff1de414f6d0a3a3cf
+source_action_blob=d45558f5eb96950f43c16a09d768cb4f382d6d61
+source_sm_blob=0b4d635ebbd0fbd52dbca8a2345547fb571205c8
+source_guard_span=src/emel/kernel/x86_64/guards.hpp:10-18
+source_action_span=src/emel/kernel/x86_64/actions.hpp:1812-1865,2240-2292
+source_transition_span=src/emel/kernel/x86_64/sm.hpp:146-173
+rust_module=crates/emel-kernels/src/target_x86_power_f32.rs
+rust_actor=TargetX86PowerF32Kernel
+rust_events=OpTargetX86PowerSqr,OpTargetX86PowerSqrt
+capability=pulp-0.22.3:x86::Arch::V3
+contract=non_empty_equal_length_dense_f32_slices
+operations=op_sqr,op_sqrt
+action_formula_sqr=output[i]=input[i]*input[i]
+action_formula_sqrt=output[i]=sqrt(input[i])
+dispatch=rtc_single_writer
+allocation_hot_path=zero_after_construction
+unsafe=none
+result_scope=bounded x86 AVX2 source-contract slice; no live differential claim
+residuals=no portable-dispatch wiring; no scalar-backend fallback; no other target architectures; no quantized/strided/broadcast variants

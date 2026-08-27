@@ -5,9 +5,15 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use emel_gguf::Loader;
-use emel_gguf::event::{Load, Metadata, ParseDone};
+use emel_gguf::event::{
+    Bind, ElementKind, MetadataDescriptor, Parse, Probe, ReadArrayLength, ReadBool,
+    ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64, ReadF64ArrayElement, ReadSigned,
+    ReadSignedArrayElement, ReadUnsigned, ReadUnsignedArrayElement, Storage, TensorDescriptor,
+    VisitStringArray, WithByteArray, WithMetadataDescriptor, WithString, WithTensor,
+};
 
 const MAGIC: [u8; 4] = *b"GGUF";
 const VERSION: u32 = 3;
@@ -51,6 +57,9 @@ const TENSOR_LAYOUTS: &[(u32, u64, usize)] = &[
     (39, 32, 17),
 ];
 
+const PACKED_TENSOR_LAYOUTS: &[(u32, [u64; 2], usize)] =
+    &[(41, [256, 9], 2304), (42, [512, 1], 2304)];
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("emel-gguf-parity: {error}");
@@ -77,68 +86,404 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("expected exactly one GGUF path".into());
     }
     let bytes = fs::read(&first)?;
-    print!("{}", canonical_output(&bytes));
+    print!("{}", canonical_output(Path::new(&first), &bytes));
     Ok(())
 }
 
-fn canonical_output(bytes: &[u8]) -> String {
-    let mut output = String::from("gguf-parity/v1\n");
-    let Ok(model) = Loader::new().process_event(Load::new(bytes)) else {
+struct ParityScratch {
+    key: Vec<u8>,
+    value: Vec<u8>,
+    tensor_name: Vec<u8>,
+}
+
+impl ParityScratch {
+    fn new(max_key_bytes: usize, max_value_bytes: usize, source_bytes: usize) -> Self {
+        Self {
+            key: Vec::with_capacity(max_key_bytes),
+            value: Vec::with_capacity(max_value_bytes),
+            tensor_name: Vec::with_capacity(source_bytes),
+        }
+    }
+}
+
+fn canonical_output(_path: &Path, bytes: &[u8]) -> String {
+    let mut output = String::new();
+    output.push_str("gguf-parity/v1\n");
+    let mut loader = Loader::new();
+    let Ok(probe) = loader.process_event(Probe::new(Arc::from(bytes))) else {
         output.push_str("status=error\n");
         return output;
     };
+    let metadata_count = probe.metadata_count();
+    let tensor_count = probe.tensor_count();
+    let output_capacity = parity_output_capacity(bytes.len(), metadata_count, tensor_count);
+    output.reserve(output_capacity.saturating_sub(output.capacity()));
+    let max_key_bytes = usize::try_from(probe.max_key_bytes()).unwrap_or(bytes.len());
+    let max_value_bytes = usize::try_from(probe.max_value_bytes()).unwrap_or(bytes.len());
+    let mut scratch = ParityScratch::new(max_key_bytes, max_value_bytes, bytes.len());
+    let Ok(storage) = Storage::exact(probe) else {
+        output.push_str("status=error\n");
+        return output;
+    };
+    if loader.process_event(Bind::new(storage)).is_err()
+        || loader.process_event(Parse::new()).is_err()
+    {
+        output.push_str("status=error\n");
+        return output;
+    }
     output.push_str("status=ok\n");
     let version = u32::from_le_bytes(bytes[4..8].try_into().expect("validated GGUF header"));
-    let alignment = model
-        .metadata()
-        .find(|entry| entry.key() == b"general.alignment")
-        .map(Metadata::value)
-        .and_then(|value| value.try_into().ok())
-        .map_or(32, u32::from_le_bytes);
+    let alignment = loader
+        .process_event(ReadUnsigned::new(b"general.alignment"))
+        .ok()
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(32);
     writeln!(output, "version={version}").unwrap();
     writeln!(output, "alignment={alignment}").unwrap();
-    writeln!(output, "kv_count={}", model.metadata().len()).unwrap();
-    writeln!(output, "tensor_count={}", model.tensors().len()).unwrap();
-    append_kv_output(&mut output, &model);
-    append_tensor_output(&mut output, &model);
+    writeln!(output, "kv_count={metadata_count}").unwrap();
+    writeln!(output, "tensor_count={tensor_count}").unwrap();
+    if append_kv_output(&mut output, &mut loader, metadata_count, &mut scratch).is_err()
+        || append_tensor_output(&mut output, &mut loader, tensor_count, &mut scratch).is_err()
+    {
+        return String::from("gguf-parity/v1\nstatus=error\n");
+    }
     output
 }
 
-fn append_kv_output(output: &mut String, model: &ParseDone<'_>) {
-    for (index, entry) in model.metadata().enumerate() {
+fn append_kv_output(
+    output: &mut String,
+    loader: &mut Loader,
+    count: u32,
+    scratch: &mut ParityScratch,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for index in 0..count {
+        scratch.key.clear();
+        let mut descriptor = None;
+        loader
+            .process_event(WithMetadataDescriptor::new(
+                index,
+                |key: &[u8], value: MetadataDescriptor| {
+                    scratch.key.extend_from_slice(key);
+                    descriptor = Some(value);
+                },
+            ))?
+            .ok_or("missing metadata descriptor")?;
+        let descriptor = descriptor.ok_or("metadata callback did not run")?;
         write!(output, "kv.{index}.key=").unwrap();
-        append_hex(output, entry.key());
+        append_hex(output, &scratch.key);
         output.push('\n');
-        writeln!(output, "kv.{index}.type={}", entry.value_type()).unwrap();
+        writeln!(
+            output,
+            "kv.{index}.type={}",
+            metadata_wire_type(descriptor.kind())
+        )
+        .unwrap();
         write!(output, "kv.{index}.value=").unwrap();
-        let value = canonical_kv_value(entry.value_type(), entry.value());
-        append_hex(output, &value);
+        read_metadata_value(loader, descriptor, scratch)?;
+        append_hex(output, &scratch.value);
         output.push('\n');
+    }
+    Ok(())
+}
+
+fn read_metadata_value(
+    loader: &mut Loader,
+    descriptor: MetadataDescriptor,
+    scratch: &mut ParityScratch,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use emel_gguf::event::MetadataKind;
+
+    scratch.value.clear();
+    let key = scratch.key.as_slice();
+    match descriptor.kind() {
+        MetadataKind::Uint8 => scratch
+            .value
+            .extend_from_slice(&u8::try_from(read_unsigned(loader, key)?)?.to_le_bytes()),
+        MetadataKind::Int8 => scratch
+            .value
+            .extend_from_slice(&i8::try_from(read_signed(loader, key)?)?.to_le_bytes()),
+        MetadataKind::Uint16 => scratch
+            .value
+            .extend_from_slice(&u16::try_from(read_unsigned(loader, key)?)?.to_le_bytes()),
+        MetadataKind::Int16 => scratch
+            .value
+            .extend_from_slice(&i16::try_from(read_signed(loader, key)?)?.to_le_bytes()),
+        MetadataKind::Uint32 => scratch
+            .value
+            .extend_from_slice(&u32::try_from(read_unsigned(loader, key)?)?.to_le_bytes()),
+        MetadataKind::Int32 => scratch
+            .value
+            .extend_from_slice(&i32::try_from(read_signed(loader, key)?)?.to_le_bytes()),
+        MetadataKind::Float32 => scratch.value.extend_from_slice(
+            &loader
+                .process_event(ReadF32::new(key))?
+                .ok_or("missing")?
+                .to_le_bytes(),
+        ),
+        MetadataKind::Bool => scratch.value.push(u8::from(
+            loader.process_event(ReadBool::new(key))?.ok_or("missing")?,
+        )),
+        MetadataKind::String => {
+            loader
+                .process_event(WithString::new(key, |value: &[u8]| {
+                    append_u64(
+                        &mut scratch.value,
+                        u64::try_from(value.len()).expect("metadata string length fits u64"),
+                    );
+                    scratch.value.extend_from_slice(value);
+                }))?
+                .ok_or("missing")?;
+        }
+        MetadataKind::Array => read_array(loader, key, descriptor, &mut scratch.value)?,
+        MetadataKind::Uint64 => scratch
+            .value
+            .extend_from_slice(&read_unsigned(loader, key)?.to_le_bytes()),
+        MetadataKind::Int64 => scratch
+            .value
+            .extend_from_slice(&read_signed(loader, key)?.to_le_bytes()),
+        MetadataKind::Float64 => scratch.value.extend_from_slice(
+            &loader
+                .process_event(ReadF64::new(key))?
+                .ok_or("missing")?
+                .to_le_bytes(),
+        ),
+    }
+    Ok(())
+}
+
+const fn metadata_wire_type(kind: emel_gguf::event::MetadataKind) -> u32 {
+    use emel_gguf::event::MetadataKind;
+    match kind {
+        MetadataKind::Uint8 => 0,
+        MetadataKind::Int8 => 1,
+        MetadataKind::Uint16 => 2,
+        MetadataKind::Int16 => 3,
+        MetadataKind::Uint32 => 4,
+        MetadataKind::Int32 => 5,
+        MetadataKind::Float32 => 6,
+        MetadataKind::Bool => TYPE_BOOL,
+        MetadataKind::String => TYPE_STRING,
+        MetadataKind::Array => TYPE_ARRAY,
+        MetadataKind::Uint64 => 10,
+        MetadataKind::Int64 => 11,
+        MetadataKind::Float64 => 12,
     }
 }
 
-fn canonical_kv_value(value_type: u32, serialized: &[u8]) -> Vec<u8> {
-    let mut value = serialized.to_vec();
-    if value_type == TYPE_BOOL {
-        value[0] = u8::from(value[0] != 0);
+fn read_unsigned(loader: &mut Loader, key: &[u8]) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(loader
+        .process_event(ReadUnsigned::new(key))?
+        .ok_or("missing")?)
+}
+
+fn read_signed(loader: &mut Loader, key: &[u8]) -> Result<i64, Box<dyn std::error::Error>> {
+    Ok(loader
+        .process_event(ReadSigned::new(key))?
+        .ok_or("missing")?)
+}
+
+fn read_array(
+    loader: &mut Loader,
+    key: &[u8],
+    descriptor: MetadataDescriptor,
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let kind = descriptor
+        .array_element_kind()
+        .ok_or("missing array kind")?;
+    let expected_count = descriptor.array_length().ok_or("missing array length")?;
+    match kind {
+        ElementKind::Uint8 => read_byte_array(loader, key, value)?,
+        ElementKind::Int8 => read_integer_array(loader, key, kind, 1, 1, true, value)?,
+        ElementKind::Uint16 => read_integer_array(loader, key, kind, 2, 2, false, value)?,
+        ElementKind::Int16 => read_integer_array(loader, key, kind, 3, 2, true, value)?,
+        ElementKind::Uint32 => read_integer_array(loader, key, kind, 4, 4, false, value)?,
+        ElementKind::Int32 => read_integer_array(loader, key, kind, 5, 4, true, value)?,
+        ElementKind::Float32 => read_f32_array(loader, key, value)?,
+        ElementKind::Bool => read_bool_array(loader, key, value)?,
+        ElementKind::String => read_string_array(loader, key, value)?,
+        ElementKind::Uint64 => read_integer_array(loader, key, kind, 10, 8, false, value)?,
+        ElementKind::Int64 => read_integer_array(loader, key, kind, 11, 8, true, value)?,
+        ElementKind::Float64 => read_f64_array(loader, key, value)?,
     }
-    if value_type == TYPE_ARRAY && value.len() >= 12 {
-        let element_type = u32::from_le_bytes(value[..4].try_into().expect("array type"));
-        if element_type == TYPE_BOOL {
-            for element in &mut value[12..] {
-                *element = u8::from(*element != 0);
+    let actual_count = u64::from_le_bytes(value[4..12].try_into()?);
+    if actual_count != expected_count {
+        return Err("array descriptor count differs from typed query".into());
+    }
+    Ok(())
+}
+
+fn read_byte_array(
+    loader: &mut Loader,
+    key: &[u8],
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = loader
+        .process_event(ReadArrayLength::new(key, ElementKind::Uint8))?
+        .ok_or("missing")?;
+    append_u32(value, 0);
+    append_u64(value, count);
+    loader
+        .process_event(WithByteArray::new(key, |payload: &[u8]| {
+            value.extend_from_slice(payload);
+        }))?
+        .ok_or("missing")?;
+    Ok(())
+}
+
+fn read_f32_array(
+    loader: &mut Loader,
+    key: &[u8],
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = loader
+        .process_event(ReadArrayLength::new(key, ElementKind::Float32))?
+        .ok_or("missing")?;
+    append_u32(value, 6);
+    append_u64(value, count);
+    for index in 0..count {
+        let item = loader
+            .process_event(ReadF32ArrayElement::new(key, index))?
+            .ok_or("missing")?;
+        value.extend_from_slice(&item.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn read_f64_array(
+    loader: &mut Loader,
+    key: &[u8],
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = loader
+        .process_event(ReadArrayLength::new(key, ElementKind::Float64))?
+        .ok_or("missing")?;
+    append_u32(value, 12);
+    append_u64(value, count);
+    for index in 0..count {
+        let item = loader
+            .process_event(ReadF64ArrayElement::new(key, index))?
+            .ok_or("missing")?;
+        value.extend_from_slice(&item.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn read_integer_array(
+    loader: &mut Loader,
+    key: &[u8],
+    kind: ElementKind,
+    wire_type: u32,
+    width: u32,
+    signed: bool,
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = loader
+        .process_event(ReadArrayLength::new(key, kind))?
+        .ok_or("missing")?;
+    append_u32(value, wire_type);
+    append_u64(value, count);
+    for index in 0..count {
+        if signed {
+            let item = loader
+                .process_event(ReadSignedArrayElement::new(key, index))?
+                .ok_or("missing")?;
+            match width {
+                1 => value.extend_from_slice(&i8::try_from(item)?.to_le_bytes()),
+                2 => value.extend_from_slice(&i16::try_from(item)?.to_le_bytes()),
+                4 => value.extend_from_slice(&i32::try_from(item)?.to_le_bytes()),
+                8 => value.extend_from_slice(&item.to_le_bytes()),
+                _ => return Err("invalid signed integer width".into()),
+            }
+        } else {
+            let item = loader
+                .process_event(ReadUnsignedArrayElement::new(key, index))?
+                .ok_or("missing")?;
+            match width {
+                1 => value.extend_from_slice(&u8::try_from(item)?.to_le_bytes()),
+                2 => value.extend_from_slice(&u16::try_from(item)?.to_le_bytes()),
+                4 => value.extend_from_slice(&u32::try_from(item)?.to_le_bytes()),
+                8 => value.extend_from_slice(&item.to_le_bytes()),
+                _ => return Err("invalid unsigned integer width".into()),
             }
         }
     }
-    value
+    Ok(())
 }
 
-fn append_tensor_output(output: &mut String, model: &ParseDone<'_>) {
-    for (index, tensor) in model.tensors().enumerate() {
+fn read_bool_array(
+    loader: &mut Loader,
+    key: &[u8],
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = loader
+        .process_event(ReadArrayLength::new(key, ElementKind::Bool))?
+        .ok_or("missing")?;
+    append_u32(value, TYPE_BOOL);
+    append_u64(value, count);
+    for index in 0..count {
+        value.push(u8::from(
+            loader
+                .process_event(ReadBoolArrayElement::new(key, index))?
+                .ok_or("missing")?,
+        ));
+    }
+    Ok(())
+}
+
+fn read_string_array(
+    loader: &mut Loader,
+    key: &[u8],
+    value: &mut Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = loader
+        .process_event(ReadArrayLength::new(key, ElementKind::String))?
+        .ok_or("missing")?;
+    append_u32(value, TYPE_STRING);
+    append_u64(value, count);
+    loader
+        .process_event(VisitStringArray::new(key, |_index: u32, item: &[u8]| {
+            append_u64(
+                value,
+                u64::try_from(item.len()).expect("string-array item length fits u64"),
+            );
+            value.extend_from_slice(item);
+        }))?
+        .ok_or("missing")?;
+    Ok(())
+}
+
+fn append_tensor_output(
+    output: &mut String,
+    loader: &mut Loader,
+    count: u32,
+    scratch: &mut ParityScratch,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for index in 0..count {
+        scratch.tensor_name.clear();
+        let mut observed = None;
+        loader
+            .process_event(WithTensor::new(
+                index,
+                |name: &[u8], tensor: TensorDescriptor, data: &[u8]| {
+                    // The actor owns these borrows. Copy only into preallocated caller storage,
+                    // do not re-enter the loader, and retain neither borrow after this callback.
+                    scratch.tensor_name.extend_from_slice(name);
+                    observed = Some((tensor, fnv1a64(data)));
+                },
+            ))?
+            .ok_or("missing tensor")?;
+        let (tensor, hash) = observed.ok_or("tensor callback did not run")?;
         write!(output, "tensor.{index}.name=").unwrap();
-        append_hex(output, tensor.name());
+        append_hex(output, &scratch.tensor_name);
         output.push('\n');
-        writeln!(output, "tensor.{index}.type={}", tensor.tensor_type()).unwrap();
+        writeln!(
+            output,
+            "tensor.{index}.type={}",
+            tensor.tensor_type().wire_code()
+        )
+        .unwrap();
         let dimensions = tensor.dimensions();
         writeln!(
             output,
@@ -148,13 +493,18 @@ fn append_tensor_output(output: &mut String, model: &ParseDone<'_>) {
         .unwrap();
         writeln!(output, "tensor.{index}.offset={}", tensor.data_offset()).unwrap();
         writeln!(output, "tensor.{index}.size={}", tensor.data_size()).unwrap();
-        writeln!(
-            output,
-            "tensor.{index}.hash={:016x}",
-            fnv1a64(tensor.data())
-        )
-        .unwrap();
+        writeln!(output, "tensor.{index}.hash={hash:016x}").unwrap();
     }
+    Ok(())
+}
+
+fn parity_output_capacity(source_bytes: usize, metadata_count: u32, tensor_count: u32) -> usize {
+    let record_count =
+        usize::try_from(metadata_count.saturating_add(tensor_count)).unwrap_or(usize::MAX);
+    source_bytes
+        .saturating_mul(3)
+        .saturating_add(record_count.saturating_mul(256))
+        .saturating_add(4096)
 }
 
 fn append_hex(output: &mut String, bytes: &[u8]) {
@@ -200,7 +550,7 @@ fn append_scalar_kv(bytes: &mut Vec<u8>, key: &[u8], value_type: u32, value: &[u
 
 fn metadata_fixture() -> Vec<u8> {
     let mut bytes = Vec::new();
-    append_header(&mut bytes, VERSION, 0, 16);
+    append_header(&mut bytes, VERSION, 0, 25);
     append_scalar_kv(&mut bytes, b"u8", 0, &[0xa5]);
     append_scalar_kv(&mut bytes, b"i8", 1, &[0x85]);
     append_scalar_kv(&mut bytes, b"u16", 2, &0xa55a_u16.to_le_bytes());
@@ -219,12 +569,65 @@ fn metadata_fixture() -> Vec<u8> {
         &0xa55a_1234_5678_9abc_u64.to_le_bytes(),
     );
     append_scalar_kv(&mut bytes, b"i64", 11, &(-123_456_789_i64).to_le_bytes());
-    append_scalar_kv(&mut bytes, b"f64", 12, &2.5_f64.to_le_bytes());
+    append_scalar_kv(
+        &mut bytes,
+        b"f64",
+        12,
+        &f64::from_bits(0x3ff0_0000_0000_0001).to_le_bytes(),
+    );
+    append_array_kv(&mut bytes, b"array.u8", 0, &[1, 2, 3]);
+    append_array_kv(&mut bytes, b"array.i8", 1, &[0xff, 0x7f]);
+    append_array_kv(
+        &mut bytes,
+        b"array.u16",
+        2,
+        &[1_u16.to_le_bytes(), u16::MAX.to_le_bytes()].concat(),
+    );
+    append_array_kv(
+        &mut bytes,
+        b"array.i16",
+        3,
+        &[(-1_i16).to_le_bytes(), i16::MIN.to_le_bytes()].concat(),
+    );
     append_array_kv(
         &mut bytes,
         b"array.u32",
         4,
         &[1_u32.to_le_bytes(), 2_u32.to_le_bytes()].concat(),
+    );
+    append_array_kv(
+        &mut bytes,
+        b"array.i32",
+        5,
+        &[(-1_i32).to_le_bytes(), i32::MIN.to_le_bytes()].concat(),
+    );
+    append_array_kv(
+        &mut bytes,
+        b"array.f32",
+        6,
+        &[1.25_f32.to_le_bytes(), (-2.5_f32).to_le_bytes()].concat(),
+    );
+    append_array_kv(
+        &mut bytes,
+        b"array.f64",
+        12,
+        &[
+            f64::from_bits(0x4000_0000_0000_0001).to_le_bytes(),
+            f64::from_bits(0xc004_0000_0000_0001).to_le_bytes(),
+        ]
+        .concat(),
+    );
+    append_array_kv(
+        &mut bytes,
+        b"array.u64",
+        10,
+        &[1_u64.to_le_bytes(), u64::MAX.to_le_bytes()].concat(),
+    );
+    append_array_kv(
+        &mut bytes,
+        b"array.i64",
+        11,
+        &[(-1_i64).to_le_bytes(), i64::MIN.to_le_bytes()].concat(),
     );
     append_array_kv(&mut bytes, b"array.bool", TYPE_BOOL, &[0, 1]);
     let mut strings = Vec::new();
@@ -287,7 +690,8 @@ fn tensor_fixture() -> Vec<u8> {
     append_header(
         &mut bytes,
         VERSION,
-        u64::try_from(TENSOR_LAYOUTS.len()).expect("fixture count fits u64"),
+        u64::try_from(TENSOR_LAYOUTS.len() + PACKED_TENSOR_LAYOUTS.len())
+            .expect("fixture count fits u64"),
         0,
     );
     let mut offset = 0_u64;
@@ -299,8 +703,22 @@ fn tensor_fixture() -> Vec<u8> {
         append_u64(&mut bytes, offset);
         offset += u64::try_from(type_size.next_multiple_of(ALIGNMENT)).expect("size fits u64");
     }
+    for (tensor_type, dimensions, type_size) in PACKED_TENSOR_LAYOUTS {
+        append_string(&mut bytes, format!("tensor.{tensor_type}").as_bytes());
+        append_u32(&mut bytes, 2);
+        append_u64(&mut bytes, dimensions[0]);
+        append_u64(&mut bytes, dimensions[1]);
+        append_u32(&mut bytes, *tensor_type);
+        append_u64(&mut bytes, offset);
+        offset += u64::try_from(type_size.next_multiple_of(ALIGNMENT)).expect("size fits u64");
+    }
     pad(&mut bytes, ALIGNMENT);
     for (_, _, type_size) in TENSOR_LAYOUTS {
+        let start = bytes.len();
+        bytes.resize(start + type_size, u8::try_from(type_size % 251).unwrap());
+        pad(&mut bytes, ALIGNMENT);
+    }
+    for (_, _, type_size) in PACKED_TENSOR_LAYOUTS {
         let start = bytes.len();
         bytes.resize(start + type_size, u8::try_from(type_size % 251).unwrap());
         pad(&mut bytes, ALIGNMENT);
@@ -453,4 +871,69 @@ fn empty_file(version: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     append_header(&mut bytes, version, 0, 0);
     bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use allocation_counter::measure;
+
+    use super::*;
+
+    fn prepare_walk(bytes: &[u8]) -> (Loader, u32, u32, ParityScratch, String) {
+        let mut loader = Loader::new();
+        let probe = loader
+            .process_event(Probe::new(Arc::from(bytes)))
+            .expect("fixture probe");
+        let metadata_count = probe.metadata_count();
+        let tensor_count = probe.tensor_count();
+        let scratch = ParityScratch::new(
+            usize::try_from(probe.max_key_bytes()).expect("key capacity fits usize"),
+            usize::try_from(probe.max_value_bytes()).expect("value capacity fits usize"),
+            bytes.len(),
+        );
+        let output = String::with_capacity(parity_output_capacity(
+            bytes.len(),
+            metadata_count,
+            tensor_count,
+        ));
+        loader
+            .process_event(Bind::new(
+                Storage::exact(probe).expect("exact fixture storage"),
+            ))
+            .expect("bind fixture");
+        loader.process_event(Parse::new()).expect("parse fixture");
+        (loader, metadata_count, tensor_count, scratch, output)
+    }
+
+    #[test]
+    fn complete_generic_metadata_and_tensor_walk_does_not_allocate() {
+        let metadata = metadata_fixture();
+        let tensors = tensor_fixture();
+        let (mut metadata_loader, metadata_count, _, mut metadata_scratch, mut metadata_output) =
+            prepare_walk(&metadata);
+        let (mut tensor_loader, _, tensor_count, mut tensor_scratch, mut tensor_output) =
+            prepare_walk(&tensors);
+
+        let allocations = measure(|| {
+            append_kv_output(
+                &mut metadata_output,
+                &mut metadata_loader,
+                metadata_count,
+                &mut metadata_scratch,
+            )
+            .expect("walk every metadata descriptor and typed value");
+            append_tensor_output(
+                &mut tensor_output,
+                &mut tensor_loader,
+                tensor_count,
+                &mut tensor_scratch,
+            )
+            .expect("walk every tensor descriptor and data view");
+        });
+
+        assert_eq!(allocations.count_total, 0);
+        assert!(metadata_output.contains("kv.23.type=9"));
+        assert!(tensor_output.contains("tensor.0.name="));
+        assert!(tensor_output.contains("tensor.31.hash="));
+    }
 }

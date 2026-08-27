@@ -1,6 +1,7 @@
 //! Explicit loader strategy orchestration and synchronous child composition.
 
 #![allow(
+    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
     reason = "stateforward-sml generated state tokens intentionally derive PartialEq"
 )]
@@ -563,8 +564,8 @@ impl<R: ReadActor, S: StagedReadActor> IoLoaderStateMachineContext for Context<R
 
 fn span_contract_valid(span: TensorLoadSpan<'_>) -> bool {
     (span.byte_size > 0)
-        & (span.target_bytes >= span.byte_size)
-        & u64::try_from(span.target.len()).is_ok_and(|len| len >= span.byte_size)
+        && (span.target_bytes >= span.byte_size)
+        && u64::try_from(span.target.len()).is_ok_and(|len| len >= span.byte_size)
 }
 
 fn source_span_valid(span: TensorLoadSpan<'_>) -> bool {

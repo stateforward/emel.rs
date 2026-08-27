@@ -1,0 +1,17 @@
+kernel-quantized-parity/v4
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+scope=scalar_q4_0_q8_0_q5_k_q8_k_q2_k_row_aggregation_via_block_scalar_reference_q3_k_q4_k_q6_k_rows
+case=dot_q4_0_q8_0 status=ok output_bits=c1800000
+case=dot_q8_0_q8_0 status=ok output_bits=43400000
+case=dot_q5_k_q8_k_varied_qs status=ok output_bits=c484c000
+case=dot_q2_k_q8_k_row_aggregation_via_block_scalar_reference status=ok output_bits=c4bbd000
+case=dot_q3_k_q8_k_varied status=ok output_bits=c6457400
+case=dot_q4_k_q8_k_varied status=ok output_bits=c5a2e000
+case=dot_q6_k_q8_k_varied status=ok output_bits=44db8000
+source_kernel_detail_blob=c8a82643eabfe8f2d7883e655955f455794511b0
+source_sml_commit=49207123cd3f39767764bae774932cb48623f92f
+reference_tool_sha256=5537ec0ed3d97b9543f8ea48b38249ba0f62458a9ebc57c861bce6a1075dccee
+rust_observer_sha256=eb08441c27f84dbde1b0bec3b3ddf45eeef458d89d04791c00f0bf36e22a9278
+config=Release,cxx20,scalar-packed-q4_0-q8_0-q5_k-q8_k-q2_k-row-aggregation-block-scalar-reference-q3_k-q4_k-q6_k,public-rust-quant-api,reference-detail
+result=match

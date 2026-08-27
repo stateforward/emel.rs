@@ -1,5 +1,7 @@
 //! Static child-actor capabilities accepted by the tensor store.
 
+#![allow(clippy::assertions_on_constants)]
+
 use emel_io::{mmap, read, staged_read};
 
 /// Statically dispatched mapped-I/O capability.
@@ -253,5 +255,29 @@ where
         event: staged_read::event::StageWindow<'_>,
     ) -> Result<staged_read::event::StageWindowDone, staged_read::event::Error> {
         self.stager.stage_tensor(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Actors, Mapper, Reader, Stager};
+
+    #[test]
+    fn unavailable_unit_dependencies_fail_closed_and_static_flags_are_false() {
+        assert!(!<() as Mapper>::AVAILABLE);
+        assert!(!<() as Reader>::AVAILABLE);
+        assert!(!<() as Stager>::AVAILABLE);
+        let actors = Actors::new((), (), ());
+        assert!(!<Actors as Mapper>::AVAILABLE);
+        assert!(!<Actors as Reader>::AVAILABLE);
+        assert!(!<Actors as Stager>::AVAILABLE);
+        let _ = actors;
+    }
+
+    #[test]
+    fn production_actor_flags_are_true() {
+        assert!(<emel_io::mmap::Mapper as Mapper>::AVAILABLE);
+        assert!(<emel_io::read::Reader as Reader>::AVAILABLE);
+        assert!(<emel_io::staged_read::Stager as Stager>::AVAILABLE);
     }
 }

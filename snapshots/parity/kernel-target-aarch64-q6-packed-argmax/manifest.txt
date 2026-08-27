@@ -1,0 +1,41 @@
+kind=live_split_observer
+result=live_split_observer_match
+observer=split_pinned_cpp_aarch64_sm_and_public_target_router
+reference=../emel.cpp
+kernel-target-aarch64-q6-packed-argmax-live/v1
+source_repository=stateforward/emel.cpp
+source_commit=843a117386ef17dc5a50549bbfc821074c2141d6
+source_kernel_aarch64_guards_blob=c25714566ec9a02679daef85089544575123408e
+source_kernel_aarch64_actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+source_kernel_aarch64_sm_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+target_arch=aarch64
+scope=target_router_q6_packed_argmax_m5_k256_and_typed_rejection
+execution=split_pinned_aarch64_sm_and_public_target_router
+case=q6_packed_argmax_m5_k256 status=ok output_bits=440fbf8c index=4
+case=zero_count status=reject error=InvalidShape output_bits=7fc00001 index=-1
+case=invalid_shape status=reject error=InvalidShape output_bits=7fc00001 index=-1
+source_aarch64_guard_span=src/emel/kernel/aarch64/guards.hpp:673-681
+source_aarch64_action_span=src/emel/kernel/aarch64/actions.hpp:1736-1805
+source_aarch64_execution_span=src/emel/kernel/aarch64/actions.hpp:5546-5590
+source_aarch64_kernel_span=src/emel/kernel/aarch64/actions.hpp:4669-4855
+source_aarch64_transition_span=src/emel/kernel/aarch64/sm.hpp:473-478
+reference_execution=pinned_aarch64_sm_process_event
+rust_execution=public_target_aarch64_kernel_process_event
+guards_blob=c25714566ec9a02679daef85089544575123408e
+actions_blob=267d4f74e6e7498155c8535920322ffef2c02fb6
+state_machine_blob=865a9cc6ba6115382ed043c464f3d62bcd851357
+output_sha256=940899466ec3e09a6d0f40a44290083be8db2d5b2f45ab9d7da1e1d7cbfa3d55
+rust_module=crates/emel-kernels/src/aarch64/q6_packed.rs
+rust_router=crates/emel-kernels/src/aarch64/sm.rs
+rust_tests=crates/emel-kernels/tests/arch/target_aarch64_kernel.rs::router_dispatches_q6_packed_argmax
+scope=q6_k_x8_lhs_packed_q8_k_rhs_argmax_f32_destination_m5_k256
+positive_cases=q6_packed_argmax_m5_k256_exact_output_bits_and_index
+rejection_cases=zero_count_k_zero_and_non_block_k_sentinel_preserving
+observer_diff=empty byte-for-byte match
+allocation_contract=zero allocations after construction (existing focused actor test)
+unsafe_contract=none
+dispatch_contract=run_to_completion_public_target_router
+live_artifacts=.artifacts/kernel-goal/q6-packed-argmax
+residuals=F16 neon, generic quantized mul_mat, prepared i8mm argmax, and x86 live target
+toolchain=rustc 1.98.0; cargo 1.98.0; pulp 0.22.3; stateforward-sml 49207123cd3f39767764bae774932cb48623f92f
+result=match

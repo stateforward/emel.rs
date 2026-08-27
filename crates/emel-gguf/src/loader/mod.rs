@@ -1,14 +1,15 @@
 //! Stateful GGUF loader and its parsed records.
 
 mod detail;
+pub mod metadata;
+pub mod query;
 mod sm;
+pub mod tensor;
 
 use core::fmt;
+use emel_tensor::dtype::SerializedType;
 
-use self::sm::{
-    BoundStorage, EventBindRuntime, GgufLoaderContext, GgufLoaderEvents, GgufLoaderStateMachine,
-    GgufLoaderStates,
-};
+use self::sm::{GgufLoaderContext, GgufLoaderEvents, GgufLoaderStateMachine, GgufLoaderStates};
 
 /// Storage requirements discovered by probing a GGUF image.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49,6 +50,10 @@ pub struct KvEntry {
     pub value_length: u32,
     /// Raw GGUF value-type tag.
     pub value_type: u32,
+    /// Exact sum of string payload bytes for a validated string array.
+    pub string_array_bytes: u64,
+    /// Whether parsing fully validated the serialized value.
+    pub validated: bool,
 }
 
 /// Metadata describing one tensor payload in the GGUF image.
@@ -58,8 +63,8 @@ pub struct TensorInfo {
     pub name_offset: u32,
     /// Tensor name length in bytes.
     pub name_length: u32,
-    /// Raw GGML tensor-type tag.
-    pub tensor_type: u32,
+    /// Validated serialized tensor representation.
+    pub tensor_type: SerializedType,
     /// Number of active entries in [`Self::dimensions`].
     pub dimension_count: u32,
     /// Tensor dimensions, with unused entries set to one.
@@ -72,68 +77,6 @@ pub struct TensorInfo {
     pub data_size: u64,
     /// Split-file index. The current loader supports the primary image only.
     pub file_index: u16,
-}
-
-/// A probed and parsed GGUF image.
-#[derive(Clone, Debug)]
-pub struct Gguf<'a> {
-    file_image: &'a [u8],
-    requirements: Requirements,
-    kv_arena: Vec<u8>,
-    kv_entries: Vec<KvEntry>,
-    tensors: Vec<TensorInfo>,
-}
-
-impl<'a> Gguf<'a> {
-    /// Returns the requirements computed during probing.
-    #[must_use]
-    pub const fn requirements(&self) -> Requirements {
-        self.requirements
-    }
-
-    /// Returns parsed metadata-entry locations.
-    #[must_use]
-    pub fn kv_entries(&self) -> &[KvEntry] {
-        &self.kv_entries
-    }
-
-    /// Returns parsed tensor descriptors.
-    #[must_use]
-    pub fn tensors(&self) -> &[TensorInfo] {
-        &self.tensors
-    }
-
-    /// Returns the raw key bytes for an entry.
-    #[must_use]
-    pub fn key(&self, entry: &KvEntry) -> Option<&[u8]> {
-        range(&self.kv_arena, entry.key_offset, entry.key_length)
-    }
-
-    /// Returns the serialized value bytes for an entry.
-    #[must_use]
-    pub fn value(&self, entry: &KvEntry) -> Option<&[u8]> {
-        range(&self.kv_arena, entry.value_offset, entry.value_length)
-    }
-
-    /// Returns a tensor name as raw bytes.
-    #[must_use]
-    pub fn tensor_name(&self, tensor: &TensorInfo) -> Option<&'a [u8]> {
-        range(self.file_image, tensor.name_offset, tensor.name_length)
-    }
-
-    /// Returns a tensor payload without copying it.
-    #[must_use]
-    pub fn tensor_data(&self, tensor: &TensorInfo) -> Option<&'a [u8]> {
-        let offset = usize::try_from(tensor.file_offset).ok()?;
-        let length = usize::try_from(tensor.data_size).ok()?;
-        self.file_image.get(offset..offset.checked_add(length)?)
-    }
-}
-
-fn range(bytes: &[u8], offset: u32, length: u32) -> Option<&[u8]> {
-    let start = usize::try_from(offset).ok()?;
-    let length = usize::try_from(length).ok()?;
-    bytes.get(start..start.checked_add(length)?)
 }
 
 /// Internal stable lifecycle states used for loader diagnostics.
@@ -249,70 +192,82 @@ impl Loader {
         Ok(self.machine.context().probed)
     }
 
-    /// Allocates exactly the storage required by the latest successful probe.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidRequest`] before a successful probe and
-    /// [`Error::Capacity`] if allocation fails.
-    pub fn bind(&mut self) -> Result<(), Error> {
-        let requirements = self.machine.context().probed;
-        self.bind_with_capacity(
-            requirements.required_kv_arena_bytes()?,
-            usize::try_from(requirements.kv_count).map_err(|_| Error::Capacity)?,
-            usize::try_from(requirements.tensor_count).map_err(|_| Error::Capacity)?,
-        )
-    }
-
-    /// Binds loader-owned storage with explicit capacities.
-    ///
-    /// This mirrors the C++ bind phase while retaining memory safely in Rust.
+    /// Moves caller-allocated storage into the loader.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidRequest`] in an invalid lifecycle state and
-    /// [`Error::Capacity`] for insufficient capacities or allocation failure.
-    pub fn bind_with_capacity(
+    /// [`Error::Capacity`] for insufficient capacities.
+    pub fn bind(
         &mut self,
-        kv_arena_bytes: usize,
-        kv_entry_capacity: usize,
-        tensor_capacity: usize,
-    ) -> Result<(), Error> {
-        let event = EventBindRuntime {
-            kv_arena_bytes,
-            kv_entry_capacity,
-            tensor_capacity,
-        };
+        storage: crate::event::Storage,
+    ) -> Result<(), (Error, crate::event::Storage)> {
+        let mut storage = Some(storage);
         self.machine
-            .process_event(GgufLoaderEvents::BindRequest(event))
-            .map_err(|_| Error::Internal)?;
-        self.machine.context().result()?;
-        let outcome = BoundStorage::allocate(event);
-        self.machine
-            .process_event(GgufLoaderEvents::BindResult(outcome))
-            .map_err(|_| Error::Internal)?;
-        self.machine.context().result()
+            .process_event(GgufLoaderEvents::BindRequest(&mut storage))
+            .map_err(|_| {
+                (
+                    Error::Internal,
+                    storage.take().expect("failed dispatch preserves storage"),
+                )
+            })?;
+        self.machine.context().result().map_err(|error| {
+            (
+                error,
+                storage.take().expect("rejected bind preserves storage"),
+            )
+        })
     }
 
     /// Parses an image into the latest bound storage.
-    ///
-    /// The returned structure owns its metadata records and borrows tensor
-    /// names and payloads directly from `file_image`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidRequest`] unless storage has been bound, or a
     /// format/capacity error discovered while parsing.
-    pub fn parse<'a>(&mut self, file_image: &'a [u8]) -> Result<Gguf<'a>, Error> {
+    pub fn parse(&mut self) -> Result<Requirements, Error> {
         self.machine
-            .process_event(GgufLoaderEvents::ParseRequest(file_image))
+            .process_event(GgufLoaderEvents::ParseRequest(()))
             .map_err(|_| Error::Internal)?;
         self.machine.context().result()?;
-        let outcome = self.machine.context_mut().execute_parse(file_image);
+        let outcome = self.machine.context_mut().execute_parse();
         self.machine
             .process_event(GgufLoaderEvents::ParseResult(outcome))
             .map_err(|_| Error::Internal)?;
         self.machine.context().result()?;
-        self.machine.context().parsed(file_image)
+        Ok(self.machine.context().probed)
+    }
+
+    pub(super) fn query<O: query::Operation>(&self, operation: &mut O) {
+        let parsed = *self.machine.state() == GgufLoaderStates::Parsed;
+        let context = self.machine.context();
+        query::process(
+            parsed,
+            context.bound.as_ref(),
+            context.probed.kv_count,
+            operation,
+        );
+    }
+
+    pub(super) fn with_metadata_descriptor<O: metadata::Operation>(&self, operation: &mut O) {
+        let parsed = *self.machine.state() == GgufLoaderStates::Parsed;
+        let context = self.machine.context();
+        metadata::process(
+            parsed,
+            context.bound.as_ref(),
+            context.probed.kv_count,
+            operation,
+        );
+    }
+
+    pub(super) fn with_tensor<O: tensor::Operation>(&self, operation: &mut O) {
+        let parsed = *self.machine.state() == GgufLoaderStates::Parsed;
+        let context = self.machine.context();
+        tensor::process(
+            parsed,
+            context.bound.as_ref(),
+            context.probed.tensor_count,
+            operation,
+        );
     }
 }

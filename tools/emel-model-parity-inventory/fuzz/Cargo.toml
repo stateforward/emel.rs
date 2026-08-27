@@ -1,0 +1,36 @@
+[package]
+name = "emel-model-parity-inventory-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+emel-model-parity-inventory = { path = ".." }
+
+[[bin]]
+name = "inventory_tsv"
+path = "fuzz_targets/inventory_tsv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clang_ast_stream"
+path = "fuzz_targets/clang_ast_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "schema_tsv"
+path = "fuzz_targets/schema_tsv.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
