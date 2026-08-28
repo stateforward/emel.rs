@@ -6,7 +6,7 @@
 /// A vocabulary index.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TokenId(pub u32);
-pub(crate) mod batcher;
+pub mod batcher;
 
 /// Exact tokenizer model and pre-tokenizer profile resolution.
 pub mod profile;
