@@ -533,6 +533,9 @@ dependencies = [
 name = "emel-speech"
 version = "0.1.0"
 dependencies = [
+ "emel-gguf",
+ "emel-model",
+ "emel-tensor",
  "stateforward-sml",
 ]
 

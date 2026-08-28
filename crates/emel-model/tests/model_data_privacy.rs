@@ -45,16 +45,34 @@ fn cargo_path(path: &Path) -> String {
 }
 
 #[test]
-fn model_data_schema_and_storage_are_not_public_api() {
+fn model_data_bridge_is_public_but_raw_storage_remains_private() {
+    let valid = check_project(
+        "public",
+        "use emel_model::bridge::Data;\n\
+         fn main() {\n\
+             let data = Data::try_new().unwrap();\n\
+             let _ = data.mimi_binding_input();\n\
+             let _ = data.architecture_name();\n\
+         }",
+    );
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+
     let invalid = check_project(
-        "private",
-        "use emel_model::data::{Data, Metadata, TensorRecord};\n\
-         fn main() { let _ = Data::try_new(); }",
+        "private-fields",
+        "use emel_model::bridge::Data;\n\
+         fn main() {\n\
+             let data = Data::try_new().unwrap();\n\
+             let _ = data.tensors;\n\
+         }",
     );
     assert!(!invalid.status.success());
     let stderr = String::from_utf8_lossy(&invalid.stderr);
     assert!(stderr.contains("private"), "{stderr}");
-    assert!(stderr.contains("data"), "{stderr}");
+    assert!(stderr.contains("tensors"), "{stderr}");
 }
 use emel_gguf as _;
 use emel_kernels as _;

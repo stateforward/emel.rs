@@ -10,6 +10,7 @@
 use std::collections::TryReserveError;
 use std::ops::{Deref, DerefMut};
 
+use emel_tensor::dtype::SerializedType;
 use emel_token::profile::event::{Model as TokenizerProfileModel, PreId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -174,6 +175,36 @@ pub struct TensorBinding {
     pub(crate) length: u64,
 }
 
+impl TensorBinding {
+    /// Creates an immutable reference to caller-owned tensor storage.
+    #[must_use]
+    pub const fn new(split_index: u16, offset: u64, length: u64) -> Self {
+        Self {
+            split_index,
+            offset,
+            length,
+        }
+    }
+
+    /// Returns the split-file index owning the tensor bytes.
+    #[must_use]
+    pub const fn split_index(self) -> u16 {
+        self.split_index
+    }
+
+    /// Returns the byte offset within the owning split file.
+    #[must_use]
+    pub const fn offset(self) -> u64 {
+        self.offset
+    }
+
+    /// Returns the number of bytes in the tensor's storage range.
+    #[must_use]
+    pub const fn length(self) -> u64 {
+        self.length
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TensorRecord {
     pub(crate) name_offset: u32,
@@ -186,6 +217,132 @@ pub struct TensorRecord {
     pub(crate) data_size: u64,
     pub(crate) data: Option<TensorBinding>,
     pub(crate) file_index: u16,
+}
+
+/// Immutable tensor metadata accepted by the model ownership bridge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TensorMetadata {
+    tensor_type: SerializedType,
+    dimension_count: u32,
+    dimensions: [u64; 4],
+    data_offset: u64,
+    file_offset: u64,
+    data_size: u64,
+    file_index: u16,
+    storage: Option<TensorBinding>,
+}
+
+/// Caller-supplied fields for one immutable tensor metadata value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TensorMetadataInput {
+    /// Serialized tensor representation.
+    pub tensor_type: SerializedType,
+    /// Number of active dimensions.
+    pub dimension_count: u32,
+    /// Tensor dimensions, with inactive entries set to one.
+    pub dimensions: [u64; 4],
+    /// Offset relative to the GGUF tensor-data section.
+    pub data_offset: u64,
+    /// Absolute offset in the owning model file.
+    pub file_offset: u64,
+    /// Unpadded tensor payload size.
+    pub data_size: u64,
+    /// Split-file index.
+    pub file_index: u16,
+    /// Optional model-owned resident storage range.
+    pub storage: Option<TensorBinding>,
+}
+
+impl TensorMetadata {
+    /// Creates metadata for one serialized tensor.
+    #[must_use]
+    pub const fn new(input: TensorMetadataInput) -> Self {
+        Self {
+            tensor_type: input.tensor_type,
+            dimension_count: input.dimension_count,
+            dimensions: input.dimensions,
+            data_offset: input.data_offset,
+            file_offset: input.file_offset,
+            data_size: input.data_size,
+            file_index: input.file_index,
+            storage: input.storage,
+        }
+    }
+
+    /// Returns the serialized tensor representation.
+    #[must_use]
+    pub const fn tensor_type(self) -> SerializedType {
+        self.tensor_type
+    }
+
+    /// Returns the active dimension count.
+    #[must_use]
+    pub const fn dimension_count(self) -> u32 {
+        self.dimension_count
+    }
+
+    /// Returns all four dimensions; inactive dimensions must be one.
+    #[must_use]
+    pub const fn dimensions(self) -> [u64; 4] {
+        self.dimensions
+    }
+
+    /// Returns the offset relative to the GGUF data section.
+    #[must_use]
+    pub const fn data_offset(self) -> u64 {
+        self.data_offset
+    }
+
+    /// Returns the offset in the owning model file.
+    #[must_use]
+    pub const fn file_offset(self) -> u64 {
+        self.file_offset
+    }
+
+    /// Returns the unpadded tensor payload size.
+    #[must_use]
+    pub const fn data_size(self) -> u64 {
+        self.data_size
+    }
+
+    /// Returns the split-file index.
+    #[must_use]
+    pub const fn file_index(self) -> u16 {
+        self.file_index
+    }
+
+    /// Returns the model-owned storage range, when the tensor is resident.
+    #[must_use]
+    pub const fn storage(self) -> Option<TensorBinding> {
+        self.storage
+    }
+}
+
+/// One borrowed tensor input copied into model-owned storage during setup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TensorInput<'a> {
+    name: &'a [u8],
+    metadata: TensorMetadata,
+}
+
+impl<'a> TensorInput<'a> {
+    /// Creates a tensor input from a caller-owned name and immutable metadata.
+    #[must_use]
+    pub const fn new(name: &'a [u8], metadata: TensorMetadata) -> Self {
+        Self { name, metadata }
+    }
+
+    /// Returns the caller-owned tensor name.
+    #[must_use]
+    pub const fn name(self) -> &'a [u8] {
+        self.name
+    }
+
+    /// Returns the tensor metadata.
+    #[must_use]
+    pub const fn metadata(self) -> TensorMetadata {
+        self.metadata
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -553,7 +710,54 @@ impl Default for MoshiLmHParams {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+/// Failure while validating the immutable Mimi metadata contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MimiHParamsError {
+    /// A required signed value is not positive.
+    NonPositive,
+    /// The frame rate is not finite and positive.
+    InvalidFrameRate,
+    /// The semantic codebook count must be smaller than the total count.
+    InvalidCodebookPartition,
+    /// The transformer dimension is not divisible by its head count.
+    InvalidHeadGeometry,
+    /// The rotary head dimension must be even.
+    OddHeadDimension,
+}
+
+impl std::fmt::Display for MimiHParamsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NonPositive => "Mimi metadata contains a non-positive value",
+            Self::InvalidFrameRate => "Mimi frame rate is not finite and positive",
+            Self::InvalidCodebookPartition => "Mimi codebook partition is invalid",
+            Self::InvalidHeadGeometry => "Mimi transformer head geometry is invalid",
+            Self::OddHeadDimension => "Mimi rotary head dimension is odd",
+        })
+    }
+}
+
+impl std::error::Error for MimiHParamsError {}
+
+/// Caller-owned values used to construct immutable Mimi metadata.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MimiHParamsInput {
+    pub sample_rate: i32,
+    pub frame_rate: f32,
+    pub n_q: i32,
+    pub card: i32,
+    pub dim: i32,
+    pub semantic_n_q: i32,
+    pub codebook_dim: i32,
+    pub transformer_num_layers: i32,
+    pub transformer_num_heads: i32,
+    pub transformer_context: i32,
+    pub transformer_max_period: i32,
+}
+
+/// Validated immutable Mimi metadata owned by a [`Data`] value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MimiHParams {
     pub(crate) sample_rate: i32,
     pub(crate) frame_rate: f32,
@@ -566,6 +770,167 @@ pub struct MimiHParams {
     pub(crate) transformer_num_heads: i32,
     pub(crate) transformer_context: i32,
     pub(crate) transformer_max_period: i32,
+}
+
+impl MimiHParams {
+    /// Validates and constructs Mimi metadata before actor dispatch.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when a required value, codebook partition, or
+    /// transformer geometry violates the Mimi contract.
+    pub fn try_new(input: MimiHParamsInput) -> Result<Self, MimiHParamsError> {
+        validate_mimi_values(input)?;
+        Ok(Self {
+            sample_rate: input.sample_rate,
+            frame_rate: input.frame_rate,
+            n_q: input.n_q,
+            card: input.card,
+            dim: input.dim,
+            semantic_n_q: input.semantic_n_q,
+            codebook_dim: input.codebook_dim,
+            transformer_num_layers: input.transformer_num_layers,
+            transformer_num_heads: input.transformer_num_heads,
+            transformer_context: input.transformer_context,
+            transformer_max_period: input.transformer_max_period,
+        })
+    }
+
+    /// Validates metadata held by a model owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when a required value, codebook partition, or
+    /// transformer geometry violates the Mimi contract.
+    pub fn validate(self) -> Result<(), MimiHParamsError> {
+        validate_mimi_values(MimiHParamsInput {
+            sample_rate: self.sample_rate,
+            frame_rate: self.frame_rate,
+            n_q: self.n_q,
+            card: self.card,
+            dim: self.dim,
+            semantic_n_q: self.semantic_n_q,
+            codebook_dim: self.codebook_dim,
+            transformer_num_layers: self.transformer_num_layers,
+            transformer_num_heads: self.transformer_num_heads,
+            transformer_context: self.transformer_context,
+            transformer_max_period: self.transformer_max_period,
+        })
+    }
+
+    /// Returns the sample rate in hertz.
+    #[must_use]
+    pub const fn sample_rate(self) -> i32 {
+        self.sample_rate
+    }
+
+    /// Returns the frame rate in frames per second.
+    #[must_use]
+    pub const fn frame_rate(self) -> f32 {
+        self.frame_rate
+    }
+
+    /// Returns the total number of residual-vector-quantizer levels.
+    #[must_use]
+    pub const fn n_q(self) -> i32 {
+        self.n_q
+    }
+
+    /// Returns the codebook cardinality.
+    #[must_use]
+    pub const fn card(self) -> i32 {
+        self.card
+    }
+
+    /// Returns the transformer embedding dimension.
+    #[must_use]
+    pub const fn dim(self) -> i32 {
+        self.dim
+    }
+
+    /// Returns the semantic codebook level count.
+    #[must_use]
+    pub const fn semantic_n_q(self) -> i32 {
+        self.semantic_n_q
+    }
+
+    /// Returns the codebook embedding dimension.
+    #[must_use]
+    pub const fn codebook_dim(self) -> i32 {
+        self.codebook_dim
+    }
+
+    /// Returns the transformer layer count.
+    #[must_use]
+    pub const fn transformer_num_layers(self) -> i32 {
+        self.transformer_num_layers
+    }
+
+    /// Returns the transformer head count.
+    #[must_use]
+    pub const fn transformer_num_heads(self) -> i32 {
+        self.transformer_num_heads
+    }
+
+    /// Returns the transformer context length.
+    #[must_use]
+    pub const fn transformer_context(self) -> i32 {
+        self.transformer_context
+    }
+
+    /// Returns the rotary period.
+    #[must_use]
+    pub const fn transformer_max_period(self) -> i32 {
+        self.transformer_max_period
+    }
+
+    /// Returns the exact number of samples in one frame when representable.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        reason = "finite positive integral f64 is range-checked before conversion"
+    )]
+    pub fn frame_samples(self) -> Option<u32> {
+        let samples = f64::from(self.sample_rate) / f64::from(self.frame_rate);
+        if !samples.is_finite() || samples <= 0.0 || samples.fract() != 0.0 {
+            return None;
+        }
+        if samples > f64::from(u32::MAX) {
+            return None;
+        }
+        Some(samples as u32)
+    }
+}
+
+fn validate_mimi_values(input: MimiHParamsInput) -> Result<(), MimiHParamsError> {
+    if input.sample_rate <= 0
+        || input.n_q <= 0
+        || input.card <= 0
+        || input.dim <= 0
+        || input.semantic_n_q <= 0
+        || input.codebook_dim <= 0
+        || input.transformer_num_layers <= 0
+        || input.transformer_num_heads <= 0
+        || input.transformer_context <= 0
+        || input.transformer_max_period <= 0
+    {
+        return Err(MimiHParamsError::NonPositive);
+    }
+    if !input.frame_rate.is_finite() || input.frame_rate <= 0.0 {
+        return Err(MimiHParamsError::InvalidFrameRate);
+    }
+    if input.semantic_n_q >= input.n_q {
+        return Err(MimiHParamsError::InvalidCodebookPartition);
+    }
+    if input.dim % input.transformer_num_heads != 0 {
+        return Err(MimiHParamsError::InvalidHeadGeometry);
+    }
+    if (input.dim / input.transformer_num_heads) % 2 != 0 {
+        return Err(MimiHParamsError::OddHeadDimension);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1055,6 +1420,141 @@ impl Metadata {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WeightsBinding;
 
+/// Failure while constructing model-owned Mimi metadata and tensor records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DataError {
+    /// A fixed model region cannot represent the supplied input.
+    Capacity,
+    /// The input contains more tensors than the model owner can store.
+    TooManyTensors,
+    /// Tensor names exceed the model-owned name arena.
+    NameCapacity,
+    /// A tensor metadata field is not representable by the model schema.
+    InvalidTensor,
+    /// Mimi metadata failed its typed validation contract.
+    InvalidMimiHParams(MimiHParamsError),
+}
+
+impl std::fmt::Display for DataError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Capacity => "model data allocation capacity is unavailable",
+            Self::TooManyTensors => "Mimi tensor count exceeds model capacity",
+            Self::NameCapacity => "Mimi tensor names exceed model capacity",
+            Self::InvalidTensor => "Mimi tensor metadata is invalid",
+            Self::InvalidMimiHParams(error) => return error.fmt(formatter),
+        })
+    }
+}
+
+impl std::error::Error for DataError {}
+
+/// Borrowed setup input used to create an immutable model-owned Mimi value.
+#[derive(Clone, Copy, Debug)]
+pub struct MimiDataInput<'a> {
+    /// Validated Mimi metadata.
+    pub hparams: MimiHParams,
+    /// Tensor names and metadata copied into the resulting [`Data`].
+    pub tensors: &'a [TensorInput<'a>],
+}
+
+/// Immutable model facts consumed by the speech-owned Mimi binding.
+#[derive(Clone, Copy, Debug)]
+pub struct MimiBindingInput<'a> {
+    data: &'a Data,
+}
+
+impl<'a> MimiBindingInput<'a> {
+    /// Returns the model architecture bytes.
+    #[must_use]
+    pub fn architecture_name(self) -> &'a [u8] {
+        architecture_name_view(self.data)
+    }
+
+    /// Returns the model family component.
+    #[must_use]
+    pub const fn component(self) -> MoshiComponent {
+        self.data.moshi_component_id
+    }
+
+    /// Returns the immutable Mimi metadata.
+    #[must_use]
+    pub const fn hparams(self) -> &'a MimiHParams {
+        &self.data.mimi
+    }
+
+    /// Returns the number of populated tensor records.
+    #[must_use]
+    pub const fn tensor_count(self) -> u32 {
+        self.data.n_tensors
+    }
+
+    /// Returns one immutable tensor view by populated ordinal.
+    #[must_use]
+    pub fn tensor(self, index: u32) -> Option<TensorView<'a>> {
+        let index = usize::try_from(index).ok()?;
+        if index >= usize::try_from(self.data.n_tensors).ok()? || index >= self.data.tensors.len() {
+            return None;
+        }
+        Some(TensorView {
+            data: self.data,
+            record: &self.data.tensors[index],
+        })
+    }
+
+    /// Returns the aggregate resident weight byte count.
+    #[must_use]
+    pub const fn weights_size(self) -> u64 {
+        self.data.weights_size
+    }
+
+    /// Returns the number of model file splits represented by the input.
+    #[must_use]
+    pub const fn weights_split_count(self) -> u16 {
+        self.data.weights_split_count
+    }
+}
+
+/// One immutable view over a model-owned tensor record.
+#[derive(Clone, Copy, Debug)]
+pub struct TensorView<'a> {
+    data: &'a Data,
+    record: &'a TensorRecord,
+}
+
+impl<'a> TensorView<'a> {
+    /// Returns the tensor's byte-oriented name.
+    #[must_use]
+    pub fn name(self) -> &'a [u8] {
+        tensor_name_view(self.data, self.record)
+    }
+
+    /// Returns validated typed metadata, or `None` for malformed stored fields.
+    #[must_use]
+    pub fn metadata(self) -> Option<TensorMetadata> {
+        let tensor_type = SerializedType::try_from(u32::try_from(self.record.r#type).ok()?).ok()?;
+        let dimension_count = u32::try_from(self.record.n_dims).ok()?;
+        if !(1..=4).contains(&dimension_count) {
+            return None;
+        }
+        let mut dimensions = [0_u64; 4];
+        for (index, dimension) in self.record.dims.iter().copied().enumerate() {
+            dimensions[index] = u64::try_from(dimension).ok()?;
+        }
+        Some(TensorMetadata::new(TensorMetadataInput {
+            tensor_type,
+            dimension_count,
+            dimensions,
+            data_offset: self.record.data_offset,
+            file_offset: self.record.file_offset,
+            data_size: self.record.data_size,
+            file_index: self.record.file_index,
+            storage: self.record.data,
+        }))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Data {
     pub(crate) n_layers: i32,
@@ -1077,7 +1577,13 @@ pub struct Data {
 }
 
 impl Data {
-    pub(crate) fn try_new() -> Result<Self, TryReserveError> {
+    /// Allocates an empty model owner during setup.
+    ///
+    /// # Errors
+    ///
+    /// Returns the allocator's typed reservation failure when a bounded model
+    /// region cannot be allocated.
+    pub fn try_new() -> Result<Self, TryReserveError> {
         let mut params = HParams::default();
         params.reset();
         let mut moshi_lm = MoshiLmHParams::default();
@@ -1103,6 +1609,74 @@ impl Data {
         })
     }
 
+    /// Copies validated Mimi metadata and tensor records into model-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed capacity, metadata, or tensor error. All allocations
+    /// happen before any future actor dispatch.
+    pub fn try_from_mimi(input: MimiDataInput<'_>) -> Result<Self, DataError> {
+        input
+            .hparams
+            .validate()
+            .map_err(DataError::InvalidMimiHParams)?;
+        let mut data = Self::try_new().map_err(|_| DataError::Capacity)?;
+        initialize_mimi_data(&mut data, input.hparams);
+        copy_mimi_tensors(&mut data, input.tensors)?;
+        Ok(data)
+    }
+
+    /// Returns the immutable model architecture bytes.
+    #[must_use]
+    pub fn architecture_name(&self) -> &[u8] {
+        architecture_name_view(self)
+    }
+
+    /// Returns the model-family component selected by model metadata.
+    #[must_use]
+    pub const fn component(&self) -> MoshiComponent {
+        self.moshi_component_id
+    }
+
+    /// Returns the immutable Mimi metadata when this model is a Mimi component.
+    #[must_use]
+    pub const fn mimi_hparams(&self) -> Option<&MimiHParams> {
+        match self.moshi_component_id {
+            MoshiComponent::Mimi => Some(&self.mimi),
+            MoshiComponent::None | MoshiComponent::Lm | MoshiComponent::Voice => None,
+        }
+    }
+
+    /// Returns the number of populated tensor records.
+    #[must_use]
+    pub const fn tensor_count(&self) -> u32 {
+        self.n_tensors
+    }
+
+    /// Returns one immutable tensor view by populated ordinal.
+    #[must_use]
+    pub fn tensor(&self, index: u32) -> Option<TensorView<'_>> {
+        self.mimi_binding_input().tensor(index)
+    }
+
+    /// Returns the aggregate resident weight byte count.
+    #[must_use]
+    pub const fn weights_size(&self) -> u64 {
+        self.weights_size
+    }
+
+    /// Returns the number of model file splits represented by the data.
+    #[must_use]
+    pub const fn weights_split_count(&self) -> u16 {
+        self.weights_split_count
+    }
+
+    /// Creates an immutable Mimi binding input view for a speech owner.
+    #[must_use]
+    pub const fn mimi_binding_input(&self) -> MimiBindingInput<'_> {
+        MimiBindingInput { data: self }
+    }
+
     pub(crate) fn reset(&mut self) {
         self.n_layers = 0;
         self.n_tensors = 0;
@@ -1122,6 +1696,117 @@ impl Data {
         self.moshi_lm.reset();
         self.mimi = MimiHParams::default();
     }
+}
+
+fn initialize_mimi_data(data: &mut Data, hparams: MimiHParams) {
+    data.architecture_name[..b"moshi".len()].copy_from_slice(b"moshi");
+    data.moshi_component_id = MoshiComponent::Mimi;
+    data.mimi = hparams;
+    data.params.n_embd = hparams.dim;
+    data.params.n_embd_out = hparams.dim;
+    data.params.n_layer = hparams.transformer_num_layers;
+    data.params.n_head = hparams.transformer_num_heads;
+    data.params.n_head_kv = hparams.transformer_num_heads;
+    data.params.n_ctx = hparams.transformer_context;
+    data.params.n_features = hparams.n_q;
+    data.params.rope_freq_base = {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "the common model parameter is source-defined as f32"
+        )]
+        {
+            hparams.transformer_max_period as f32
+        }
+    };
+}
+
+fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(), DataError> {
+    if tensors.len() > MAX_TENSORS {
+        return Err(DataError::TooManyTensors);
+    }
+    let name_bytes = tensors.iter().try_fold(0_usize, |used, tensor| {
+        used.checked_add(tensor.name.len())
+            .ok_or(DataError::NameCapacity)
+    })?;
+    if name_bytes > MAX_NAME_BYTES || name_bytes > u32::MAX as usize {
+        return Err(DataError::NameCapacity);
+    }
+    data.n_tensors = u32::try_from(tensors.len()).map_err(|_| DataError::TooManyTensors)?;
+    data.name_bytes_used = u32::try_from(name_bytes).map_err(|_| DataError::NameCapacity)?;
+
+    let mut name_offset = 0_usize;
+    let mut max_split = 0_u16;
+    let mut split_sizes = [0_u64; MAX_SPLIT_FILES];
+    for (index, input_tensor) in tensors.iter().copied().enumerate() {
+        let metadata = input_tensor.metadata;
+        let dimension_count =
+            i32::try_from(metadata.dimension_count()).map_err(|_| DataError::InvalidTensor)?;
+        let active_dimensions =
+            usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
+        if !(1..=4).contains(&dimension_count)
+            || metadata
+                .dimensions()
+                .iter()
+                .take(active_dimensions)
+                .any(|dimension| *dimension == 0 || *dimension > i64::MAX as u64)
+            || metadata.dimensions()[active_dimensions..]
+                .iter()
+                .any(|dimension| *dimension != 1)
+            || metadata.data_size() == 0
+            || metadata.storage().is_some_and(|storage| {
+                storage.length() != metadata.data_size()
+                    || storage.offset() != metadata.data_offset()
+                    || storage.split_index() != metadata.file_index()
+            })
+        {
+            return Err(DataError::InvalidTensor);
+        }
+        let mut dimensions = [0_i64; 4];
+        for (dimension_index, dimension) in metadata.dimensions().into_iter().enumerate() {
+            dimensions[dimension_index] =
+                i64::try_from(dimension).map_err(|_| DataError::InvalidTensor)?;
+        }
+        let name_end = name_offset
+            .checked_add(input_tensor.name.len())
+            .ok_or(DataError::NameCapacity)?;
+        data.name_storage[name_offset..name_end].copy_from_slice(input_tensor.name);
+        data.tensors[index] = TensorRecord {
+            name_offset: u32::try_from(name_offset).map_err(|_| DataError::NameCapacity)?,
+            name_length: u32::try_from(input_tensor.name.len())
+                .map_err(|_| DataError::NameCapacity)?,
+            r#type: i32::try_from(metadata.tensor_type().wire_code())
+                .map_err(|_| DataError::InvalidTensor)?,
+            n_dims: dimension_count,
+            dims: dimensions,
+            data_offset: metadata.data_offset(),
+            file_offset: metadata.file_offset(),
+            data_size: metadata.data_size(),
+            data: metadata.storage(),
+            file_index: metadata.file_index(),
+        };
+        if let Some(storage) = metadata.storage() {
+            let split = usize::from(storage.split_index());
+            if split >= MAX_SPLIT_FILES {
+                return Err(DataError::InvalidTensor);
+            }
+            let end = storage
+                .offset()
+                .checked_add(storage.length())
+                .ok_or(DataError::InvalidTensor)?;
+            split_sizes[split] = split_sizes[split].max(end);
+            max_split = max_split.max(storage.split_index());
+            data.weights_data = Some(WeightsBinding);
+        }
+        name_offset = name_end;
+    }
+    data.weights_split_count = max_split.saturating_add(1).max(1);
+    data.weights_split_sizes = split_sizes;
+    data.weights_size = split_sizes
+        .iter()
+        .take(usize::from(data.weights_split_count))
+        .try_fold(0_u64, |total, size| total.checked_add(*size))
+        .ok_or(DataError::Capacity)?;
+    Ok(())
 }
 
 pub fn tensor_name_view<'a>(model_data: &'a Data, tensor: &TensorRecord) -> &'a [u8] {
@@ -1205,6 +1890,66 @@ mod tests {
         assert_eq!(params.rope_pair_x1_offset, 1);
         assert_eq!(params.rope_pair_x1_half_rot_offset, 0);
         assert_eq!(MoshiLmHParams::default().text_padding_id, -1);
+    }
+
+    #[test]
+    fn mimi_public_input_validates_source_geometry_and_exposes_views() {
+        let hparams = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 32,
+            dim: 16,
+            semantic_n_q: 1,
+            codebook_dim: 8,
+            transformer_num_layers: 2,
+            transformer_num_heads: 2,
+            transformer_context: 8,
+            transformer_max_period: 1_000,
+        })
+        .unwrap();
+        assert_eq!(hparams.frame_samples(), Some(1_920));
+        assert!(matches!(
+            MimiHParams::try_new(MimiHParamsInput {
+                transformer_num_heads: 3,
+                ..MimiHParamsInput {
+                    sample_rate: 24_000,
+                    frame_rate: 12.5,
+                    n_q: 2,
+                    card: 32,
+                    dim: 16,
+                    semantic_n_q: 1,
+                    codebook_dim: 8,
+                    transformer_num_layers: 2,
+                    transformer_num_heads: 2,
+                    transformer_context: 8,
+                    transformer_max_period: 1_000,
+                }
+            }),
+            Err(MimiHParamsError::InvalidHeadGeometry)
+        ));
+        let metadata = TensorMetadata::new(TensorMetadataInput {
+            tensor_type: SerializedType::F32,
+            dimension_count: 2,
+            dimensions: [4, 8, 1, 1],
+            data_offset: 128,
+            file_offset: 256,
+            data_size: 128,
+            file_index: 0,
+            storage: Some(TensorBinding::new(0, 128, 128)),
+        });
+        let tensors = [TensorInput::new(b"mimi.encoder.weight", metadata)];
+        let data = Data::try_from_mimi(MimiDataInput {
+            hparams,
+            tensors: &tensors,
+        })
+        .unwrap();
+        let input = data.mimi_binding_input();
+        assert_eq!(input.architecture_name(), b"moshi");
+        assert_eq!(input.component(), MoshiComponent::Mimi);
+        assert_eq!(input.hparams().dim(), 16);
+        assert_eq!(input.tensor(0).unwrap().name(), b"mimi.encoder.weight");
+        assert_eq!(input.tensor(0).unwrap().metadata(), Some(metadata));
     }
 
     #[test]

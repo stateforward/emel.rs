@@ -19,5 +19,8 @@ pub(crate) mod predictor;
 pub(crate) mod tokenizer;
 pub(crate) mod transcriber;
 
+/// Public Mimi model-binding and prepared-runtime contracts.
+pub use codec::mimi::binding as mimi;
+
 #[cfg(test)]
 mod generator_port_tests;

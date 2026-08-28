@@ -11,4 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+emel-gguf = { workspace = true }
+emel-model = { workspace = true }
+emel-tensor = { workspace = true }
 sml = { workspace = true }

@@ -1,5 +1,6 @@
 //! Module for `codec/mimi` state machines.
-pub mod decoder;
-pub mod encoder;
-pub mod quantizer;
-pub mod sm;
+pub mod binding;
+mod decoder;
+mod encoder;
+mod quantizer;
+mod sm;

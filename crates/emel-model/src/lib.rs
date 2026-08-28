@@ -24,6 +24,15 @@ pub mod tensor;
 pub mod vocabulary;
 pub mod whisper;
 
+/// Safe immutable ownership bridge for speech model preparation.
+pub mod bridge {
+    pub use crate::data::{
+        Data, DataError, MimiBindingInput, MimiDataInput, MimiHParams, MimiHParamsError,
+        MimiHParamsInput, MoshiComponent, TensorBinding, TensorInput, TensorMetadata,
+        TensorMetadataInput, TensorView,
+    };
+}
+
 /// An immutable model identifier supplied by model metadata.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ModelId(pub Box<str>);
