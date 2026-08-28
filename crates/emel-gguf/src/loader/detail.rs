@@ -21,7 +21,6 @@ const TYPE_COUNT: u32 = 13;
 const GENERAL_ALIGNMENT: &[u8] = b"general.alignment";
 const MAX_STRING_LENGTH: u64 = 1024 * 1024 * 1024;
 const MAX_ARRAY_ELEMENTS: u64 = 1024 * 1024 * 1024;
-const MAX_TENSOR_NAME_LENGTH: usize = 64;
 const SEEN_NAME_WORDS: usize = 32;
 
 /// Allocation-free prefilter for exact duplicate-name validation.
@@ -327,7 +326,7 @@ pub(super) fn probe(file_image: &[u8]) -> Result<Requirements, Error> {
         let name = reader.string().ok_or(Error::ParseFailed)?;
         let duplicate = tensor_names.observe(name)
             && tensor_name_previously_seen(file_image, tensors_start, tensor_index, name)?;
-        if name.len() >= MAX_TENSOR_NAME_LENGTH || duplicate {
+        if duplicate {
             return Err(Error::ModelInvalid);
         }
         let dimension_count = reader.u32().ok_or(Error::ParseFailed)?;
@@ -458,7 +457,7 @@ pub(super) fn parse(
                 .and_then(|(start, length)| file_image.get(start..start.checked_add(length)?))
                 == Some(name)
         });
-        if name.len() >= MAX_TENSOR_NAME_LENGTH || duplicate_name {
+        if duplicate_name {
             return Err(Error::ModelInvalid);
         }
         let dimension_count = reader.u32().ok_or(Error::ParseFailed)?;

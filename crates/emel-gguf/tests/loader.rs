@@ -184,12 +184,16 @@ fn typed_metadata_fixture() -> Vec<u8> {
 }
 
 fn tensor_fixture() -> Vec<u8> {
+    tensor_fixture_with_name(b"weight")
+}
+
+fn tensor_fixture_with_name(name: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&MAGIC);
     append_u32(&mut bytes, VERSION);
     append_u64(&mut bytes, 1);
     append_u64(&mut bytes, 0);
-    append_string(&mut bytes, b"weight");
+    append_string(&mut bytes, name);
     append_u32(&mut bytes, 1);
     append_u64(&mut bytes, 4);
     append_u32(&mut bytes, 0);
@@ -947,6 +951,36 @@ fn tensor_queries_expose_only_semantic_data_from_the_bound_source() {
             |_name: &[u8], _descriptor: TensorDescriptor, _data: &[u8]| {},
         )),
         Ok(None)
+    );
+}
+
+#[test]
+fn public_loader_accepts_source_tensor_names_longer_than_64_bytes() {
+    const SOURCE_TENSOR_INDEX: u32 = 0;
+    const SOURCE_TENSOR_NAME_LENGTH: usize = 74;
+    let name = b"mimi.encoder_transformer.transformer.layers.1.self_attn.out_projs.0.weight";
+    assert_eq!(name.len(), SOURCE_TENSOR_NAME_LENGTH);
+    let file = tensor_fixture_with_name(name);
+    let mut loader = Loader::new();
+    let probe = loader
+        .process_event(Probe::new(source(&file)))
+        .expect("74-byte source tensor name is valid GGUF");
+    let storage = Storage::exact(probe).expect("probe requirements are sufficient");
+    loader
+        .process_event(Bind::new(storage))
+        .expect("bound storage matches probe requirements");
+    loader
+        .process_event(Parse::new())
+        .expect("bound source with a 74-byte name parses");
+
+    assert_eq!(
+        loader.process_event(WithTensor::new(
+            SOURCE_TENSOR_INDEX,
+            |borrowed_name: &[u8], _descriptor: TensorDescriptor, _data: &[u8]| {
+                borrowed_name == name
+            },
+        )),
+        Ok(Some(true))
     );
 }
 
