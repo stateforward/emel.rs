@@ -587,7 +587,7 @@ fn default_formatter(request: FormatRequest<'_>) -> Result<(), ConditionerError>
     raw_formatter(request)
 }
 pub(crate) mod conditioner;
-pub(crate) mod detokenizer;
+pub mod detokenizer;
 pub(crate) mod encoders;
 pub(crate) mod formatter;
 pub(crate) mod generator;
