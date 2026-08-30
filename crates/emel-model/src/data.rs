@@ -1,8 +1,11 @@
 //! Private, ownership-safe model data schema.
 //!
-//! This is the non-routing schema from the pinned `emel.cpp/src/emel/model/data.hpp`.
-//! Large fixed-capacity regions use exact-length boxed slices so construction is fallible and
-//! never materializes the complete model on the stack.
+//! This is the non-routing schema from the pinned `emel.cpp/src/emel/model/data.hpp`
+//! at commit `843a117386ef17dc5a50549bbfc821074c2141d6`. Large fixed-capacity
+//! regions use exact-length boxed slices so construction is fallible and never
+//! materializes the complete model on the stack. Tensor payloads, when supplied
+//! during construction, are copied into model-owned immutable storage; no raw
+//! pointer or loader-private record crosses this API boundary.
 
 // These layouts intentionally preserve the pinned schema's independent boolean fields and names.
 #![allow(clippy::struct_excessive_bools, clippy::struct_field_names)]
@@ -192,7 +195,10 @@ impl TensorBinding {
         self.split_index
     }
 
-    /// Returns the byte offset within the owning split file.
+    /// Returns the absolute byte offset within the owning source file.
+    ///
+    /// This is distinct from [`TensorMetadata::data_offset`], which is
+    /// relative to the GGUF tensor-data section.
     #[must_use]
     pub const fn offset(self) -> u64 {
         self.offset
@@ -205,7 +211,7 @@ impl TensorBinding {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TensorRecord {
     pub(crate) name_offset: u32,
     pub(crate) name_length: u32,
@@ -216,6 +222,7 @@ pub struct TensorRecord {
     pub(crate) file_offset: u64,
     pub(crate) data_size: u64,
     pub(crate) data: Option<TensorBinding>,
+    pub(crate) bytes: Option<Box<[u8]>>,
     pub(crate) file_index: u16,
 }
 
@@ -323,13 +330,36 @@ impl TensorMetadata {
 pub struct TensorInput<'a> {
     name: &'a [u8],
     metadata: TensorMetadata,
+    bytes: Option<&'a [u8]>,
 }
 
 impl<'a> TensorInput<'a> {
-    /// Creates a tensor input from a caller-owned name and immutable metadata.
+    /// Creates a tensor input without resident payload bytes.
+    ///
+    /// This form is valid only for non-resident metadata (`storage == None`).
+    /// Resident model data must use [`Self::with_bytes`] so the payload is
+    /// available to the ownership bridge.
     #[must_use]
     pub const fn new(name: &'a [u8], metadata: TensorMetadata) -> Self {
-        Self { name, metadata }
+        Self {
+            name,
+            metadata: TensorMetadata {
+                storage: None,
+                ..metadata
+            },
+            bytes: None,
+        }
+    }
+
+    /// Creates a tensor input whose payload is copied into model-owned storage
+    /// during [`Data::try_from_mimi`].
+    #[must_use]
+    pub const fn with_bytes(name: &'a [u8], metadata: TensorMetadata, bytes: &'a [u8]) -> Self {
+        Self {
+            name,
+            metadata,
+            bytes: Some(bytes),
+        }
     }
 
     /// Returns the caller-owned tensor name.
@@ -342,6 +372,12 @@ impl<'a> TensorInput<'a> {
     #[must_use]
     pub const fn metadata(self) -> TensorMetadata {
         self.metadata
+    }
+
+    /// Returns the optional caller-owned payload copied during construction.
+    #[must_use]
+    pub const fn bytes(self) -> Option<&'a [u8]> {
+        self.bytes
     }
 }
 
@@ -1432,6 +1468,8 @@ pub enum DataError {
     NameCapacity,
     /// A tensor metadata field is not representable by the model schema.
     InvalidTensor,
+    /// The public GGUF tensor observer returned a typed query failure.
+    GgufQuery(emel_gguf::event::QueryError),
     /// Mimi metadata failed its typed validation contract.
     InvalidMimiHParams(MimiHParamsError),
 }
@@ -1443,6 +1481,7 @@ impl std::fmt::Display for DataError {
             Self::TooManyTensors => "Mimi tensor count exceeds model capacity",
             Self::NameCapacity => "Mimi tensor names exceed model capacity",
             Self::InvalidTensor => "Mimi tensor metadata is invalid",
+            Self::GgufQuery(_) => "GGUF tensor query failed",
             Self::InvalidMimiHParams(error) => return error.fmt(formatter),
         })
     }
@@ -1503,6 +1542,20 @@ impl<'a> MimiBindingInput<'a> {
         })
     }
 
+    /// Returns the first immutable tensor view with the given byte-oriented name.
+    #[must_use]
+    pub fn tensor_named(self, name: &[u8]) -> Option<TensorView<'a>> {
+        self.data
+            .tensors
+            .iter()
+            .take(usize::try_from(self.data.n_tensors).ok()?)
+            .find(|record| tensor_name_view(self.data, record) == name)
+            .map(|record| TensorView {
+                data: self.data,
+                record,
+            })
+    }
+
     /// Returns the aggregate resident weight byte count.
     #[must_use]
     pub const fn weights_size(self) -> u64 {
@@ -1553,6 +1606,23 @@ impl<'a> TensorView<'a> {
             storage: self.record.data,
         }))
     }
+
+    /// Returns an immutable view of model-owned tensor bytes, when resident.
+    ///
+    /// The view is borrowed from [`Data`] and cannot outlive the model owner.
+    /// Payload length is checked during construction, so a present view always
+    /// contains exactly the metadata-declared tensor byte count.
+    #[must_use]
+    pub fn byte_view(self) -> Option<&'a [u8]> {
+        let bytes = self.record.bytes.as_deref()?;
+        (u64::try_from(bytes.len()).ok()? == self.record.data_size).then_some(bytes)
+    }
+
+    /// Returns the immutable tensor payload when resident.
+    #[must_use]
+    pub fn bytes(self) -> Option<&'a [u8]> {
+        self.byte_view()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1577,6 +1647,106 @@ pub struct Data {
 }
 
 impl Data {
+    /// Builds model-owned tensor records from a parsed public GGUF actor.
+    ///
+    /// This is the maintained GGUF-to-model storage path; callers must provide
+    /// metadata whose hparams correspond to the parsed image.
+    ///
+    /// Every tensor name, descriptor, and payload is observed through
+    /// `Loader::process_event(WithTensor)`. Payloads are copied before this
+    /// function returns, so the resulting model remains valid after the GGUF
+    /// source owner is dropped. The GGUF descriptor's `data_offset` remains
+    /// relative to its data section; `file_offset` is computed from the
+    /// observed payload address only after checking source geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed GGUF query, capacity, or tensor validation error.
+    pub fn try_from_gguf_mimi(
+        loader: &mut emel_gguf::Loader,
+        parsed: emel_gguf::event::ParseDone,
+        hparams: MimiHParams,
+    ) -> Result<Self, DataError> {
+        hparams.validate().map_err(DataError::InvalidMimiHParams)?;
+        let count =
+            usize::try_from(parsed.tensor_count()).map_err(|_| DataError::TooManyTensors)?;
+        if count == 0 || count > MAX_TENSORS {
+            return Err(DataError::TooManyTensors);
+        }
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(count)
+            .map_err(|_| DataError::Capacity)?;
+        for index in 0..parsed.tensor_count() {
+            let mut observed = None;
+            let result = loader.process_event(emel_gguf::event::WithTensor::new(
+                index,
+                |name: &[u8], descriptor: emel_gguf::event::TensorDescriptor, bytes: &[u8]| {
+                    observed = Some((name.to_vec(), descriptor, bytes.to_vec()));
+                },
+            ));
+            result
+                .map_err(DataError::GgufQuery)?
+                .ok_or(DataError::InvalidTensor)?;
+            let (name, descriptor, bytes) = observed.ok_or(DataError::InvalidTensor)?;
+            let descriptor_size = descriptor.data_size();
+            if descriptor_size == 0 || u64::try_from(bytes.len()).ok() != Some(descriptor_size) {
+                return Err(DataError::InvalidTensor);
+            }
+            let dimensions = descriptor.dimensions();
+            let dimension_count = descriptor.dimension_count();
+            if !(1..=4).contains(&dimension_count)
+                || dimensions
+                    [..usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?]
+                    .iter()
+                    .any(|dimension| *dimension == 0 || *dimension > i64::MAX as u64)
+                || dimensions
+                    [usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?..]
+                    .iter()
+                    .any(|dimension| *dimension != 1)
+            {
+                return Err(DataError::InvalidTensor);
+            }
+            if descriptor.alignment() == 0
+                || descriptor.data_offset() % u64::from(descriptor.alignment()) != 0
+                || descriptor
+                    .data_section_offset()
+                    .checked_add(descriptor.data_offset())
+                    != Some(descriptor.file_offset())
+            {
+                return Err(DataError::InvalidTensor);
+            }
+            // WithTensor exposes a borrowed payload; the bridge copies it
+            // below before the loader and its source owner can be dropped.
+            owned.push((
+                name,
+                TensorMetadata::new(TensorMetadataInput {
+                    tensor_type: descriptor.tensor_type(),
+                    dimension_count,
+                    dimensions,
+                    data_offset: descriptor.data_offset(),
+                    file_offset: descriptor.file_offset(),
+                    data_size: descriptor_size,
+                    file_index: descriptor.file_index(),
+                    storage: Some(TensorBinding::new(
+                        descriptor.file_index(),
+                        descriptor.file_offset(),
+                        descriptor_size,
+                    )),
+                }),
+                bytes,
+            ));
+        }
+        let tensors: Vec<_> = owned
+            .iter()
+            .map(|(name, metadata, bytes)| TensorInput::with_bytes(name, *metadata, bytes))
+            .collect();
+        Self::try_from_mimi(MimiDataInput {
+            hparams,
+            tensors: &tensors,
+        })
+    }
+
     /// Allocates an empty model owner during setup.
     ///
     /// # Errors
@@ -1659,6 +1829,12 @@ impl Data {
         self.mimi_binding_input().tensor(index)
     }
 
+    /// Returns the first immutable tensor view with the given byte-oriented name.
+    #[must_use]
+    pub fn tensor_named(&self, name: &[u8]) -> Option<TensorView<'_>> {
+        self.mimi_binding_input().tensor_named(name)
+    }
+
     /// Returns the aggregate resident weight byte count.
     #[must_use]
     pub const fn weights_size(&self) -> u64 {
@@ -1720,6 +1896,10 @@ fn initialize_mimi_data(data: &mut Data, hparams: MimiHParams) {
     };
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "fixed-capacity source tensor copy validates every field"
+)]
 fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(), DataError> {
     if tensors.len() > MAX_TENSORS {
         return Err(DataError::TooManyTensors);
@@ -1755,8 +1935,13 @@ fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(),
             || metadata.data_size() == 0
             || metadata.storage().is_some_and(|storage| {
                 storage.length() != metadata.data_size()
-                    || storage.offset() != metadata.data_offset()
+                    || storage.offset() != metadata.file_offset()
                     || storage.split_index() != metadata.file_index()
+            })
+            || metadata.storage().is_some_and(|_| {
+                input_tensor.bytes().is_none_or(|payload| {
+                    u64::try_from(payload.len()).ok() != Some(metadata.data_size())
+                })
             })
         {
             return Err(DataError::InvalidTensor);
@@ -1770,6 +1955,17 @@ fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(),
             .checked_add(input_tensor.name.len())
             .ok_or(DataError::NameCapacity)?;
         data.name_storage[name_offset..name_end].copy_from_slice(input_tensor.name);
+        let bytes = input_tensor
+            .bytes()
+            .map(copy_tensor_bytes)
+            .transpose()
+            .map_err(|_| DataError::Capacity)?;
+        if bytes
+            .as_deref()
+            .is_some_and(|payload| u64::try_from(payload.len()).ok() != Some(metadata.data_size()))
+        {
+            return Err(DataError::InvalidTensor);
+        }
         data.tensors[index] = TensorRecord {
             name_offset: u32::try_from(name_offset).map_err(|_| DataError::NameCapacity)?,
             name_length: u32::try_from(input_tensor.name.len())
@@ -1782,6 +1978,7 @@ fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(),
             file_offset: metadata.file_offset(),
             data_size: metadata.data_size(),
             data: metadata.storage(),
+            bytes,
             file_index: metadata.file_index(),
         };
         if let Some(storage) = metadata.storage() {
@@ -1872,6 +2069,13 @@ fn try_boxed_slice<T: Clone + Default>(length: usize) -> Result<Box<[T]>, TryRes
     Ok(values.into_boxed_slice())
 }
 
+fn copy_tensor_bytes(bytes: &[u8]) -> Result<Box<[u8]>, TryReserveError> {
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(bytes.len())?;
+    owned.extend_from_slice(bytes);
+    Ok(owned.into_boxed_slice())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1879,6 +2083,56 @@ mod tests {
     use std::fmt::Write as _;
     use std::hint::black_box;
     use std::time::Instant;
+
+    #[test]
+    fn gguf_mimi_bridge_copies_payload_before_source_drop() {
+        use emel_gguf::Loader;
+        use emel_gguf::event::{Bind, Parse, Probe, Storage};
+        use std::sync::Arc;
+
+        let mut source = b"GGUF".to_vec();
+        source.extend_from_slice(&3_u32.to_le_bytes());
+        source.extend_from_slice(&1_u64.to_le_bytes());
+        source.extend_from_slice(&0_u64.to_le_bytes());
+        source.extend_from_slice(&6_u64.to_le_bytes());
+        source.extend_from_slice(b"weight");
+        source.extend_from_slice(&1_u32.to_le_bytes());
+        source.extend_from_slice(&32_u64.to_le_bytes());
+        source.extend_from_slice(&0_u32.to_le_bytes());
+        source.extend_from_slice(&0_u64.to_le_bytes());
+        source.resize(source.len().next_multiple_of(32), 0);
+        source.extend_from_slice(&[7_u8; 128]);
+        let source = Arc::<[u8]>::from(source);
+        let mut loader = Loader::new();
+        let probe = loader
+            .process_event(Probe::new(Arc::clone(&source)))
+            .unwrap();
+        loader
+            .process_event(Bind::new(Storage::exact(probe).unwrap()))
+            .unwrap();
+        let parsed = loader.process_event(Parse::new()).unwrap();
+        let hparams = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 32,
+            dim: 16,
+            semantic_n_q: 1,
+            codebook_dim: 8,
+            transformer_num_layers: 2,
+            transformer_num_heads: 2,
+            transformer_context: 8,
+            transformer_max_period: 1_000,
+        })
+        .unwrap();
+        let data = Data::try_from_gguf_mimi(&mut loader, parsed, hparams).unwrap();
+        drop(loader);
+        drop(source);
+        let view = data.tensor_named(b"weight").unwrap();
+        assert_eq!(view.metadata().unwrap().data_offset(), 0);
+        assert_eq!(view.metadata().unwrap().file_offset(), 64);
+        assert_eq!(view.byte_view(), Some(&[7_u8; 128][..]));
+    }
 
     #[test]
     fn nested_defaults_match_source_sentinels_and_strides() {
@@ -1936,9 +2190,13 @@ mod tests {
             file_offset: 256,
             data_size: 128,
             file_index: 0,
-            storage: Some(TensorBinding::new(0, 128, 128)),
+            storage: Some(TensorBinding::new(0, 256, 128)),
         });
-        let tensors = [TensorInput::new(b"mimi.encoder.weight", metadata)];
+        let tensors = [TensorInput::with_bytes(
+            b"mimi.encoder.weight",
+            metadata,
+            &[7; 128],
+        )];
         let data = Data::try_from_mimi(MimiDataInput {
             hparams,
             tensors: &tensors,
@@ -1949,7 +2207,49 @@ mod tests {
         assert_eq!(input.component(), MoshiComponent::Mimi);
         assert_eq!(input.hparams().dim(), 16);
         assert_eq!(input.tensor(0).unwrap().name(), b"mimi.encoder.weight");
-        assert_eq!(input.tensor(0).unwrap().metadata(), Some(metadata));
+        let view = input.tensor(0).unwrap();
+        assert_eq!(view.metadata(), Some(metadata));
+        assert_eq!(view.byte_view(), Some(&[7; 128][..]));
+        assert_eq!(
+            input.tensor_named(b"mimi.encoder.weight").unwrap().name(),
+            view.name()
+        );
+    }
+
+    #[test]
+    fn tensor_payload_length_is_checked_before_model_ownership() {
+        let hparams = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 32,
+            dim: 16,
+            semantic_n_q: 1,
+            codebook_dim: 8,
+            transformer_num_layers: 2,
+            transformer_num_heads: 2,
+            transformer_context: 8,
+            transformer_max_period: 1_000,
+        })
+        .unwrap();
+        let metadata = TensorMetadata::new(TensorMetadataInput {
+            tensor_type: SerializedType::F32,
+            dimension_count: 1,
+            dimensions: [4, 1, 1, 1],
+            data_offset: 0,
+            file_offset: 0,
+            data_size: 16,
+            file_index: 0,
+            storage: None,
+        });
+        let tensors = [TensorInput::with_bytes(b"tensor", metadata, &[0; 15])];
+        assert_eq!(
+            Data::try_from_mimi(MimiDataInput {
+                hparams,
+                tensors: &tensors
+            }),
+            Err(DataError::InvalidTensor)
+        );
     }
 
     #[test]

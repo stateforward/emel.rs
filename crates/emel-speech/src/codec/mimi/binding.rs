@@ -580,7 +580,7 @@ fn validate_tensor_metadata(
     if metadata.data_size() == 0 || storage.length() != metadata.data_size() {
         return Err(BindingError::TensorStorageMismatch(index));
     }
-    if storage.offset() != metadata.data_offset() || storage.split_index() != metadata.file_index()
+    if storage.offset() != metadata.file_offset() || storage.split_index() != metadata.file_index()
     {
         return Err(BindingError::TensorStorageMismatch(index));
     }
@@ -669,7 +669,7 @@ fn tensor_mismatch(
         return Some(TensorMismatch::Storage);
     }
     if storage.split_index() != descriptor.file_index()
-        || storage.offset() != descriptor.data_offset()
+        || storage.offset() != descriptor.file_offset()
         || storage.length() != descriptor.data_size()
     {
         return Some(TensorMismatch::Storage);

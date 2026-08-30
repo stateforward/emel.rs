@@ -492,6 +492,8 @@ pub(super) fn parse(
             dimensions,
             data_offset,
             file_offset: 0,
+            data_section_offset: 0,
+            alignment,
             data_size,
             file_index: 0,
         };
@@ -501,6 +503,11 @@ pub(super) fn parse(
         reader.align_to(alignment)?;
     }
     let data_section_offset = u64::try_from(reader.offset).map_err(|_| Error::Capacity)?;
+    for tensor in tensors.iter().take(tensor_count) {
+        if tensor.data_offset % u64::from(alignment) != 0 {
+            return Err(Error::ParseFailed);
+        }
+    }
     let required_size = data_section_offset
         .checked_add(expected_tensor_offset)
         .ok_or(Error::Capacity)?;
@@ -508,6 +515,7 @@ pub(super) fn parse(
         return Err(Error::ParseFailed);
     }
     for tensor in tensors.iter_mut().take(tensor_count) {
+        tensor.data_section_offset = data_section_offset;
         tensor.file_offset = data_section_offset
             .checked_add(tensor.data_offset)
             .ok_or(Error::Capacity)?;

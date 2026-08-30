@@ -73,6 +73,10 @@ pub struct TensorInfo {
     pub data_offset: u64,
     /// Absolute tensor offset in the original file image.
     pub file_offset: u64,
+    /// Absolute offset of the GGUF tensor-data section.
+    pub data_section_offset: u64,
+    /// Effective tensor-data alignment.
+    pub alignment: u32,
     /// Unpadded tensor payload size.
     pub data_size: u64,
     /// Split-file index. The current loader supports the primary image only.

@@ -164,6 +164,9 @@ impl TensorQueryStateMachineContext for TensorContext {
             tensor.dimension_count,
             tensor.dimensions,
             tensor.data_offset,
+            tensor.data_section_offset,
+            tensor.file_offset,
+            tensor.alignment,
             tensor.data_size,
             tensor.file_index,
         );

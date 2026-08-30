@@ -633,16 +633,26 @@ pub struct TensorDescriptor {
     dimension_count: u32,
     dimensions: [u64; 4],
     data_offset: u64,
+    data_section_offset: u64,
+    file_offset: u64,
+    alignment: u32,
     data_size: u64,
     file_index: u16,
 }
 
 impl TensorDescriptor {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "descriptor mirrors the serialized GGUF fields"
+    )]
     pub(crate) const fn new(
         tensor_type: SerializedType,
         dimension_count: u32,
         dimensions: [u64; 4],
         data_offset: u64,
+        data_section_offset: u64,
+        file_offset: u64,
+        alignment: u32,
         data_size: u64,
         file_index: u16,
     ) -> Self {
@@ -651,6 +661,9 @@ impl TensorDescriptor {
             dimension_count,
             dimensions,
             data_offset,
+            data_section_offset,
+            file_offset,
+            alignment,
             data_size,
             file_index,
         }
@@ -678,6 +691,24 @@ impl TensorDescriptor {
     #[must_use]
     pub const fn data_offset(self) -> u64 {
         self.data_offset
+    }
+
+    /// Returns the absolute GGUF tensor-data section offset.
+    #[must_use]
+    pub const fn data_section_offset(self) -> u64 {
+        self.data_section_offset
+    }
+
+    /// Returns the absolute tensor offset in the source file.
+    #[must_use]
+    pub const fn file_offset(self) -> u64 {
+        self.file_offset
+    }
+
+    /// Returns the effective tensor-data alignment.
+    #[must_use]
+    pub const fn alignment(self) -> u32 {
+        self.alignment
     }
 
     /// Returns the unpadded tensor payload size.
