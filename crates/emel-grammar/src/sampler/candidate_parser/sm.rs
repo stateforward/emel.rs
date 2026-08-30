@@ -88,7 +88,8 @@ impl SamplerEventSampleRuntime {
 // rows matching the pinned deciding/parsed/parse_failed topology.
 sml! {
     GbnfSamplerCandidateParser {
-        "parsed"_s <= *"deciding"_s + completion<SamplerEventSampleRuntime> [has_apply_text] / consume_text,
+        *"deciding"_s + event<SamplerEventSampleRuntime>,
+        "parsed"_s <= "deciding"_s + completion<SamplerEventSampleRuntime> [has_apply_text] / consume_text,
         "parsed"_s <= "deciding"_s + completion<SamplerEventSampleRuntime> [has_empty_apply_text] / consume_empty,
         "parse_failed"_s <= "deciding"_s + completion<SamplerEventSampleRuntime> [parse_failed] / dispatch_parse_failed,
         "unexpected_event"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
@@ -192,7 +193,6 @@ impl GbnfSamplerCandidateParserStateMachineContext for GbnfSamplerCandidateParse
 }
 
 /// Synchronous actor around the generated candidate-parser machine.
-#[derive(Debug)]
 pub struct GbnfSamplerCandidateParserActor {
     machine: GbnfSamplerCandidateParserStateMachine<GbnfSamplerCandidateParserContext>,
 }
@@ -228,12 +228,10 @@ impl GbnfSamplerCandidateParserActor {
     pub fn classify(&mut self, candidate_kind: CandidateKind) -> CandidateParserOutcome {
         self.process_event(SamplerEventSampleRuntime::new(candidate_kind))
     }
-
-    /// Processes an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> CandidateParserOutcome {
-        let _ = self
-            .machine
-            .process_event(GbnfSamplerCandidateParserEvents::UnexpectedEvent);
+        let _ = self.machine.context_mut().unexpected();
+        self.machine
+            .set_state(GbnfSamplerCandidateParserStates::UnexpectedEvent);
         self.machine.context().result
     }
 
