@@ -1,5 +1,10 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned, bounded text tokenizer state machine.
+//!
+//! The machine follows the maintained tokenizer contract: binding selects the
+//! preprocessor and encoder children, tokenization preprocesses one request,
+//! emits the optional prefix, processes bounded fragments, emits the suffix,
+//! and publishes a synchronous result.  Child calls are function-pointer
+//! callbacks so the actor remains allocation-free and single-writer.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -14,78 +19,248 @@
     missing_docs
 )]
 
+use core::cell::RefCell;
 use sml::sml;
 
-// --- machine TextTokenizer from emel.cpp/src/emel/text/tokenizer/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventBindRuntime;
+/// Maximum number of fragments retained for one request.
+pub const MAX_FRAGMENTS: usize = 1024;
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventTokenizeRuntime;
+/// Supported preprocessor variants.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PreprocessorKind { Spm = 0, Bpe = 1, Wpm = 2, Ugm = 3, Rwkv = 4, Plamo2 = 5, #[default] Fallback = 6 }
+
+/// Supported encoder variants.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EncoderKind { Spm = 0, Bpe = 1, Wpm = 2, Ugm = 3, Rwkv = 4, Plamo2 = 5, #[default] Fallback = 6 }
+
+/// Public tokenizer error. Numeric values mirror `text/tokenizer/errors.hpp`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(i32)]
+pub enum TokenizerError {
+    #[default] None = 0,
+    InvalidRequest = 1,
+    ModelInvalid = 2,
+    BackendError = 4,
+    /// Internal sequencing failure; public result maps it to invalid request.
+    Unexpected = 8,
+}
+impl TokenizerError {
+    #[must_use]
+    pub const fn code(self) -> i32 { self as i32 }
+}
+
+/// A fragment returned by a preprocessor child.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Fragment {
+    pub kind: FragmentKind,
+    pub start: usize,
+    pub end: usize,
+    pub token: i32,
+}
+
+/// Fragment kind used by the tokenizer state machine.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum FragmentKind { #[default] RawText = 0, Token = 1 }
+
+/// Vocabulary information needed by prefix/suffix handling and fallback
+/// child implementations. Implementations must return stable token slices.
+pub trait VocabularyView {
+    fn token_count(&self) -> usize { 0 }
+    fn token(&self, _index: usize) -> Option<&[u8]> { None }
+    fn bos_id(&self) -> i32 { -1 }
+    fn eos_id(&self) -> i32 { -1 }
+    fn sep_id(&self) -> i32 { -1 }
+    fn add_bos(&self) -> bool { false }
+    fn add_eos(&self) -> bool { false }
+    fn add_sep(&self) -> bool { false }
+}
+
+/// Result returned by a bounded child callback.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ChildResult {
+    pub accepted: bool,
+    pub error: TokenizerError,
+    pub count: usize,
+}
+
+/// Synchronous preprocessor child contract.
+pub type PreprocessCallback = fn(&dyn VocabularyView, &[u8], bool, &mut [Fragment]) -> ChildResult;
+/// Synchronous encoder child contract.
+pub type EncodeCallback = fn(&dyn VocabularyView, &[u8], bool, &mut [i32]) -> ChildResult;
+/// Synchronous child bind contract.
+pub type BindCallback = fn(&dyn VocabularyView, u8) -> TokenizerError;
+
+/// Completion payload for a successful bind.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TokenizerBindDone;
+/// Completion payload for a failed bind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenizerBindError { pub error: TokenizerError }
+/// Completion payload for successful tokenization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenizerDone { pub token_count: usize }
+/// Completion payload for failed tokenization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenizerErrorEvent { pub error: TokenizerError }
+
+/// Compatibility aliases matching the C++ event names.
+pub type BindingDone = TokenizerBindDone;
+pub type BindingError = TokenizerBindError;
+pub type EventsTokenizerDone = TokenizerDone;
+pub type EventsTokenizerError = TokenizerErrorEvent;
+
+pub type BindDoneCallback = fn(TokenizerBindDone) -> bool;
+pub type BindErrorCallback = fn(TokenizerBindError) -> bool;
+pub type TokenizeDoneCallback = fn(TokenizerDone) -> bool;
+pub type TokenizeErrorCallback = fn(TokenizerErrorEvent) -> bool;
+
+/// Caller-owned bind request.
+#[derive(Clone, Copy)]
+pub struct BindRequest<'event> {
+    pub vocab: &'event dyn VocabularyView,
+    pub preprocessor_variant: PreprocessorKind,
+    pub encoder_variant: EncoderKind,
+    pub bind_preprocessor: Option<BindCallback>,
+    pub bind_encoder: Option<BindCallback>,
+    pub dispatch_done: Option<BindDoneCallback>,
+    pub dispatch_error: Option<BindErrorCallback>,
+}
+impl<'event> BindRequest<'event> {
+    #[must_use]
+    pub const fn new(vocab: &'event dyn VocabularyView, preprocessor_variant: PreprocessorKind, encoder_variant: EncoderKind, dispatch_done: BindDoneCallback, dispatch_error: BindErrorCallback) -> Self {
+        Self { vocab, preprocessor_variant, encoder_variant, bind_preprocessor: None, bind_encoder: None, dispatch_done: Some(dispatch_done), dispatch_error: Some(dispatch_error) }
+    }
+    #[must_use]
+    pub const fn with_callbacks(vocab: &'event dyn VocabularyView, preprocessor_variant: PreprocessorKind, encoder_variant: EncoderKind, bind_preprocessor: Option<BindCallback>, bind_encoder: Option<BindCallback>, dispatch_done: Option<BindDoneCallback>, dispatch_error: Option<BindErrorCallback>) -> Self {
+        Self { vocab, preprocessor_variant, encoder_variant, bind_preprocessor, bind_encoder, dispatch_done, dispatch_error }
+    }
+}
+impl core::fmt::Debug for BindRequest<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.debug_struct("BindRequest").field("preprocessor_variant", &self.preprocessor_variant).field("encoder_variant", &self.encoder_variant).finish_non_exhaustive() }
+}
+
+/// Caller-owned tokenization request.
+#[derive(Clone, Copy)]
+pub struct TokenizeRequest<'event> {
+    pub vocab: &'event dyn VocabularyView,
+    pub text: &'event [u8],
+    pub add_special: bool,
+    pub parse_special: bool,
+    pub token_ids: &'event RefCell<&'event mut [i32]>,
+    pub preprocess: Option<PreprocessCallback>,
+    pub encode: Option<EncodeCallback>,
+    pub dispatch_done: Option<TokenizeDoneCallback>,
+    pub dispatch_error: Option<TokenizeErrorCallback>,
+}
+impl<'event> TokenizeRequest<'event> {
+    #[must_use]
+    pub const fn new(vocab: &'event dyn VocabularyView, text: &'event [u8], token_ids: &'event RefCell<&'event mut [i32]>, dispatch_done: TokenizeDoneCallback, dispatch_error: TokenizeErrorCallback) -> Self {
+        Self { vocab, text, add_special: false, parse_special: false, token_ids, preprocess: None, encode: None, dispatch_done: Some(dispatch_done), dispatch_error: Some(dispatch_error) }
+    }
+    #[must_use]
+    pub const fn with_callbacks(vocab: &'event dyn VocabularyView, text: &'event [u8], token_ids: &'event RefCell<&'event mut [i32]>, add_special: bool, parse_special: bool, preprocess: Option<PreprocessCallback>, encode: Option<EncodeCallback>, dispatch_done: Option<TokenizeDoneCallback>, dispatch_error: Option<TokenizeErrorCallback>) -> Self {
+        Self { vocab, text, add_special, parse_special, token_ids, preprocess, encode, dispatch_done, dispatch_error }
+    }
+}
+impl core::fmt::Debug for TokenizeRequest<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.debug_struct("TokenizeRequest").field("text_length", &self.text.len()).field("add_special", &self.add_special).field("parse_special", &self.parse_special).field("token_capacity", &self.token_ids.borrow().len()).finish_non_exhaustive() }
+}
+
+/// Runtime bind event. The alias remains usable without spelling its lifetime.
+#[derive(Clone, Copy, Debug)]
+pub struct EventBindRuntime<'event> { pub request: BindRequest<'event>, pub context: &'event RefCell<BindContext> }
+/// Runtime tokenization event.
+#[derive(Clone, Copy, Debug)]
+pub struct EventTokenizeRuntime<'event> { pub request: TokenizeRequest<'event>, pub context: &'event RefCell<TokenizeContext> }
+
+/// Bind operation context.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BindContext { pub err: TokenizerError, pub result: bool }
+/// Tokenization operation context. Fragment and output accounting is bounded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TokenizeContext {
+    pub fragments: [Fragment; MAX_FRAGMENTS],
+    pub fragment_count: usize,
+    pub fragment_index: usize,
+    pub preprocessed: bool,
+    pub preprocess_accepted: bool,
+    pub preprocess_err_code: TokenizerError,
+    pub encode_accepted: bool,
+    pub encode_err_code: TokenizerError,
+    pub encode_token_count: usize,
+    pub token_count: usize,
+    pub err: TokenizerError,
+    pub result: bool,
+    pub unexpected: bool,
+}
+impl Default for TokenizeContext {
+    fn default() -> Self { Self { fragments: [Fragment::default(); MAX_FRAGMENTS], fragment_count: 0, fragment_index: 0, preprocessed: false, preprocess_accepted: false, preprocess_err_code: TokenizerError::None, encode_accepted: false, encode_err_code: TokenizerError::None, encode_token_count: 0, token_count: 0, err: TokenizerError::None, result: false, unexpected: false } }
+}
 
 sml! {
-    TextTokenizer {
-        "binding_preprocessor"_s <= *"uninitialized"_s + event<EventBindRuntime> [can_bind] / begin_bind_from_uninitialized,
-        "errored"_s <= "uninitialized"_s + event<EventBindRuntime> / reject_bind_from_uninitialized,
-        "errored"_s <= "uninitialized"_s + event<EventTokenizeRuntime> / reject_invalid_from_uninitialized,
-        "binding_preprocessor"_s <= "idle"_s + event<EventBindRuntime> [can_bind] / begin_bind_from_idle,
-        "errored"_s <= "idle"_s + event<EventBindRuntime> / reject_bind_from_idle,
-        "preprocessing"_s <= "idle"_s + event<EventTokenizeRuntime> [can_tokenize] / begin_tokenize_from_idle,
-        "errored"_s <= "idle"_s + event<EventTokenizeRuntime> / reject_invalid_from_idle,
-        "binding_preprocessor"_s <= "done"_s + event<EventBindRuntime> [can_bind] / begin_bind_from_done,
-        "errored"_s <= "done"_s + event<EventBindRuntime> / reject_bind_from_done,
-        "preprocessing"_s <= "done"_s + event<EventTokenizeRuntime> [can_tokenize] / begin_tokenize_from_done,
-        "errored"_s <= "done"_s + event<EventTokenizeRuntime> / reject_invalid_from_done,
-        "binding_preprocessor"_s <= "errored"_s + event<EventBindRuntime> [can_bind] / begin_bind_from_errored,
-        "errored"_s <= "errored"_s + event<EventBindRuntime> / reject_bind_from_errored,
-        "preprocessing"_s <= "errored"_s + event<EventTokenizeRuntime> [can_tokenize] / begin_tokenize_from_errored,
-        "errored"_s <= "errored"_s + event<EventTokenizeRuntime> / reject_invalid_from_errored,
-        "binding_preprocessor"_s <= "unexpected"_s + event<EventBindRuntime> [can_bind] / begin_bind_from_unexpected,
-        "unexpected"_s <= "unexpected"_s + event<EventBindRuntime> / reject_bind_from_unexpected,
-        "preprocessing"_s <= "unexpected"_s + event<EventTokenizeRuntime> [can_tokenize] / begin_tokenize_from_unexpected,
-        "unexpected"_s <= "unexpected"_s + event<EventTokenizeRuntime> / reject_invalid_from_unexpected,
-        "binding_preprocessor_decision"_s <= "binding_preprocessor"_s + completion<EventBindRuntime> / bind_preprocessor,
-        "binding_encoder"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime> [bind_preprocessor_error_none],
-        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime> [bind_preprocessor_error_invalid_request],
-        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime> [bind_preprocessor_error_model_invalid],
-        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime> [bind_preprocessor_error_backend_error],
-        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime> [bind_preprocessor_error_unknown],
-        "binding_encoder_decision"_s <= "binding_encoder"_s + completion<EventBindRuntime> / bind_encoder,
-        "idle"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime> [bind_encoder_error_none] / mark_bind_success,
-        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime> [bind_encoder_error_invalid_request],
-        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime> [bind_encoder_error_model_invalid],
-        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime> [bind_encoder_error_backend_error],
-        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime> [bind_encoder_error_unknown],
-        "preprocess_decision"_s <= "preprocessing"_s + completion<EventTokenizeRuntime> / dispatch_preprocess,
-        "errored"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime> [preprocess_rejected_no_error] / set_backend_error,
-        "errored"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime> [preprocess_reported_error] / set_error_from_preprocess,
-        "errored"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime> [preprocess_fragment_count_invalid] / set_invalid_request_error_from_preprocess_decision,
-        "prefix_decision"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime> [preprocess_success],
-        "encoding_ready"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime> [bos_ready] / append_bos,
-        "errored"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime> [bos_no_capacity] / set_invalid_request_error_from_prefix_decision,
-        "errored"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime> [bos_invalid_id] / set_invalid_id_error_from_prefix_decision,
-        "encoding_ready"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime> [no_prefix],
-        "suffix_decision"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime> [no_more_fragments],
-        "errored"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime> [more_fragments_no_capacity] / set_invalid_request_error_from_encoding_ready,
-        "errored"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime> [more_fragments_token_invalid] / set_invalid_request_error_from_encoding_ready,
-        "encoding_token_fragment"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime> [more_fragments_token_valid],
-        "encoding_raw_fragment"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime> [more_fragments_raw],
-        "encoding_ready"_s <= "encoding_token_fragment"_s + completion<EventTokenizeRuntime> / append_fragment_token,
-        "encoding_raw_decision"_s <= "encoding_raw_fragment"_s + completion<EventTokenizeRuntime> / dispatch_encode_raw_fragment,
-        "errored"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime> [encode_rejected_no_error] / set_invalid_id_error_from_encoding_raw_decision,
-        "errored"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime> [encode_reported_error] / set_error_from_encode,
-        "errored"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime> [encode_count_invalid] / set_invalid_request_error_from_encoding_raw_decision,
-        "encoding_ready"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime> [encode_success] / commit_encoded_fragment,
-        "finalizing"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [sep_ready] / append_sep,
-        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [sep_no_capacity] / set_invalid_request_error_from_suffix_decision,
-        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [sep_invalid_id] / set_invalid_id_error_from_suffix_decision,
-        "finalizing"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [eos_ready] / append_eos,
-        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [eos_no_capacity] / set_invalid_request_error_from_suffix_decision,
-        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [eos_invalid_id] / set_invalid_id_error_from_suffix_decision,
-        "finalizing"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime> [no_suffix],
-        "done"_s <= "finalizing"_s + completion<EventTokenizeRuntime> / finalize,
+    TextTokenizer<'event> {
+        "binding_preprocessor"_s <= *"uninitialized"_s + event<EventBindRuntime<'event>> [can_bind] / begin_bind_from_uninitialized,
+        "errored"_s <= "uninitialized"_s + event<EventBindRuntime<'event>> / reject_bind_from_uninitialized,
+        "errored"_s <= "uninitialized"_s + event<EventTokenizeRuntime<'event>> / reject_invalid_from_uninitialized,
+        "binding_preprocessor"_s <= "idle"_s + event<EventBindRuntime<'event>> [can_bind] / begin_bind_from_idle,
+        "errored"_s <= "idle"_s + event<EventBindRuntime<'event>> / reject_bind_from_idle,
+        "preprocessing"_s <= "idle"_s + event<EventTokenizeRuntime<'event>> [can_tokenize] / begin_tokenize_from_idle,
+        "errored"_s <= "idle"_s + event<EventTokenizeRuntime<'event>> / reject_invalid_from_idle,
+        "binding_preprocessor"_s <= "done"_s + event<EventBindRuntime<'event>> [can_bind] / begin_bind_from_done,
+        "errored"_s <= "done"_s + event<EventBindRuntime<'event>> / reject_bind_from_done,
+        "preprocessing"_s <= "done"_s + event<EventTokenizeRuntime<'event>> [can_tokenize] / begin_tokenize_from_done,
+        "errored"_s <= "done"_s + event<EventTokenizeRuntime<'event>> / reject_invalid_from_done,
+        "binding_preprocessor"_s <= "errored"_s + event<EventBindRuntime<'event>> [can_bind] / begin_bind_from_errored,
+        "errored"_s <= "errored"_s + event<EventBindRuntime<'event>> / reject_bind_from_errored,
+        "preprocessing"_s <= "errored"_s + event<EventTokenizeRuntime<'event>> [can_tokenize] / begin_tokenize_from_errored,
+        "errored"_s <= "errored"_s + event<EventTokenizeRuntime<'event>> / reject_invalid_from_errored,
+        "binding_preprocessor"_s <= "unexpected"_s + event<EventBindRuntime<'event>> [can_bind] / begin_bind_from_unexpected,
+        "unexpected"_s <= "unexpected"_s + event<EventBindRuntime<'event>> / reject_bind_from_unexpected,
+        "preprocessing"_s <= "unexpected"_s + event<EventTokenizeRuntime<'event>> [can_tokenize] / begin_tokenize_from_unexpected,
+        "unexpected"_s <= "unexpected"_s + event<EventTokenizeRuntime<'event>> / reject_invalid_from_unexpected,
+        "binding_preprocessor_decision"_s <= "binding_preprocessor"_s + completion<EventBindRuntime<'event>> / bind_preprocessor,
+        "binding_encoder"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime<'event>> [bind_preprocessor_error_none],
+        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime<'event>> [bind_preprocessor_error_invalid_request],
+        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime<'event>> [bind_preprocessor_error_model_invalid],
+        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime<'event>> [bind_preprocessor_error_backend_error],
+        "errored"_s <= "binding_preprocessor_decision"_s + completion<EventBindRuntime<'event>> [bind_preprocessor_error_unknown],
+        "binding_encoder_decision"_s <= "binding_encoder"_s + completion<EventBindRuntime<'event>> / bind_encoder,
+        "idle"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime<'event>> [bind_encoder_error_none] / mark_bind_success,
+        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime<'event>> [bind_encoder_error_invalid_request],
+        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime<'event>> [bind_encoder_error_model_invalid],
+        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime<'event>> [bind_encoder_error_backend_error],
+        "errored"_s <= "binding_encoder_decision"_s + completion<EventBindRuntime<'event>> [bind_encoder_error_unknown],
+        "preprocess_decision"_s <= "preprocessing"_s + completion<EventTokenizeRuntime<'event>> / dispatch_preprocess,
+        "errored"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime<'event>> [preprocess_rejected_no_error] / set_backend_error,
+        "errored"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime<'event>> [preprocess_reported_error] / set_error_from_preprocess,
+        "errored"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime<'event>> [preprocess_fragment_count_invalid] / set_invalid_request_error_from_preprocess_decision,
+        "prefix_decision"_s <= "preprocess_decision"_s + completion<EventTokenizeRuntime<'event>> [preprocess_success],
+        "encoding_ready"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime<'event>> [bos_ready] / append_bos,
+        "errored"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime<'event>> [bos_no_capacity] / set_invalid_request_error_from_prefix_decision,
+        "errored"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime<'event>> [bos_invalid_id] / set_invalid_id_error_from_prefix_decision,
+        "encoding_ready"_s <= "prefix_decision"_s + completion<EventTokenizeRuntime<'event>> [no_prefix],
+        "suffix_decision"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime<'event>> [no_more_fragments],
+        "errored"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime<'event>> [more_fragments_no_capacity] / set_invalid_request_error_from_encoding_ready,
+        "errored"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime<'event>> [more_fragments_token_invalid] / set_invalid_request_error_from_encoding_ready,
+        "encoding_token_fragment"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime<'event>> [more_fragments_token_valid],
+        "encoding_raw_fragment"_s <= "encoding_ready"_s + completion<EventTokenizeRuntime<'event>> [more_fragments_raw],
+        "encoding_ready"_s <= "encoding_token_fragment"_s + completion<EventTokenizeRuntime<'event>> / append_fragment_token,
+        "encoding_raw_decision"_s <= "encoding_raw_fragment"_s + completion<EventTokenizeRuntime<'event>> / dispatch_encode_raw_fragment,
+        "errored"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime<'event>> [encode_rejected_no_error] / set_invalid_id_error_from_encoding_raw_decision,
+        "errored"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime<'event>> [encode_reported_error] / set_error_from_encode,
+        "errored"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime<'event>> [encode_count_invalid] / set_invalid_request_error_from_encoding_raw_decision,
+        "encoding_ready"_s <= "encoding_raw_decision"_s + completion<EventTokenizeRuntime<'event>> [encode_success] / commit_encoded_fragment,
+        "finalizing"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [sep_ready] / append_sep,
+        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [sep_no_capacity] / set_invalid_request_error_from_suffix_decision,
+        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [sep_invalid_id] / set_invalid_id_error_from_suffix_decision,
+        "finalizing"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [eos_ready] / append_eos,
+        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [eos_no_capacity] / set_invalid_request_error_from_suffix_decision,
+        "errored"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [eos_invalid_id] / set_invalid_id_error_from_suffix_decision,
+        "finalizing"_s <= "suffix_decision"_s + completion<EventTokenizeRuntime<'event>> [no_suffix],
+        "done"_s <= "finalizing"_s + completion<EventTokenizeRuntime<'event>> / finalize,
         "unexpected"_s <= "uninitialized"_s + unexpected_event<_> / on_unexpected_from_uninitialized,
         "unexpected"_s <= "binding_preprocessor"_s + unexpected_event<_> / on_unexpected_from_binding_preprocessor,
         "unexpected"_s <= "binding_preprocessor_decision"_s + unexpected_event<_> / on_unexpected_from_binding_preprocessor_decision,
@@ -107,517 +282,145 @@ sml! {
     }
 }
 
-/// Context for `TextTokenizer` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
-pub struct TextTokenizerContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+/// Persistent binding context owned by the tokenizer actor.
+#[derive(Debug)]
+pub struct TextTokenizerContext<'event> {
+    pub vocab: Option<&'event dyn VocabularyView>,
+    pub preprocess_kind: PreprocessorKind,
+    pub model_kind: EncoderKind,
+    pub is_bound: bool,
+    pub last_error: TokenizerError,
+    pub unexpected: bool,
+}
+impl<'event> Default for TextTokenizerContext<'event> {
+    fn default() -> Self { Self { vocab: None, preprocess_kind: PreprocessorKind::Fallback, model_kind: EncoderKind::Fallback, is_bound: false, last_error: TokenizerError::None, unexpected: false } }
 }
 
-impl TextTokenizerStateMachineContext for TextTokenizerContext {
-    fn append_bos(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::append_bos
-        todo!("TODO: port action `append_bos` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn append_eos(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::append_eos
-        todo!("TODO: port action `append_eos` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn append_fragment_token(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::append_fragment_token
-        todo!(
-            "TODO: port action `append_fragment_token` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn append_sep(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::append_sep
-        todo!("TODO: port action `append_sep` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn begin_bind_from_done(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn begin_bind_from_errored(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn begin_bind_from_idle(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn begin_bind_from_unexpected(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn begin_bind_from_uninitialized(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn begin_tokenize_from_done(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_tokenize
-        todo!(
-            "TODO: port action `begin_tokenize` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn begin_tokenize_from_errored(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_tokenize
-        todo!(
-            "TODO: port action `begin_tokenize` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn begin_tokenize_from_idle(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_tokenize
-        todo!(
-            "TODO: port action `begin_tokenize` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn begin_tokenize_from_unexpected(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::begin_tokenize
-        todo!(
-            "TODO: port action `begin_tokenize` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn bind_encoder(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::bind_encoder
-        todo!("TODO: port action `bind_encoder` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn bind_encoder_error_backend_error(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_encoder_error_backend_error
-        todo!(
-            "TODO: port guard `bind_encoder_error_backend_error` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_encoder_error_invalid_request(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_encoder_error_invalid_request
-        todo!(
-            "TODO: port guard `bind_encoder_error_invalid_request` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_encoder_error_model_invalid(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_encoder_error_model_invalid
-        todo!(
-            "TODO: port guard `bind_encoder_error_model_invalid` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_encoder_error_none(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_encoder_error_none
-        todo!(
-            "TODO: port guard `bind_encoder_error_none` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_encoder_error_unknown(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_encoder_error_unknown
-        todo!(
-            "TODO: port guard `bind_encoder_error_unknown` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_preprocessor(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::bind_preprocessor
-        todo!(
-            "TODO: port action `bind_preprocessor` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn bind_preprocessor_error_backend_error(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_preprocessor_error_backend_error
-        todo!(
-            "TODO: port guard `bind_preprocessor_error_backend_error` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_preprocessor_error_invalid_request(
-        &self,
-        _event: &EventBindRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_preprocessor_error_invalid_request
-        todo!(
-            "TODO: port guard `bind_preprocessor_error_invalid_request` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_preprocessor_error_model_invalid(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_preprocessor_error_model_invalid
-        todo!(
-            "TODO: port guard `bind_preprocessor_error_model_invalid` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_preprocessor_error_none(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_preprocessor_error_none
-        todo!(
-            "TODO: port guard `bind_preprocessor_error_none` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bind_preprocessor_error_unknown(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bind_preprocessor_error_unknown
-        todo!(
-            "TODO: port guard `bind_preprocessor_error_unknown` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn bos_invalid_id(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bos_invalid_id
-        todo!("TODO: port guard `bos_invalid_id` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn bos_no_capacity(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bos_no_capacity
-        todo!("TODO: port guard `bos_no_capacity` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn bos_ready(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::bos_ready
-        todo!("TODO: port guard `bos_ready` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn can_bind(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::can_bind
-        todo!("TODO: port guard `can_bind` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn can_tokenize(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::can_tokenize
-        todo!("TODO: port guard `can_tokenize` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn commit_encoded_fragment(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::commit_encoded_fragment
-        todo!(
-            "TODO: port action `commit_encoded_fragment` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn dispatch_encode_raw_fragment(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::dispatch_encode_raw_fragment
-        todo!(
-            "TODO: port action `dispatch_encode_raw_fragment` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn dispatch_preprocess(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::dispatch_preprocess
-        todo!(
-            "TODO: port action `dispatch_preprocess` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn encode_count_invalid(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::encode_count_invalid
-        todo!(
-            "TODO: port guard `encode_count_invalid` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn encode_rejected_no_error(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::encode_rejected_no_error
-        todo!(
-            "TODO: port guard `encode_rejected_no_error` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn encode_reported_error(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::encode_reported_error
-        todo!(
-            "TODO: port guard `encode_reported_error` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn encode_success(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::encode_success
-        todo!("TODO: port guard `encode_success` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn eos_invalid_id(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::eos_invalid_id
-        todo!("TODO: port guard `eos_invalid_id` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn eos_no_capacity(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::eos_no_capacity
-        todo!("TODO: port guard `eos_no_capacity` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn eos_ready(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::eos_ready
-        todo!("TODO: port guard `eos_ready` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn finalize(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::finalize
-        todo!("TODO: port action `finalize` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn mark_bind_success(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::mark_bind_success
-        todo!(
-            "TODO: port action `mark_bind_success` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn more_fragments_no_capacity(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::more_fragments_no_capacity
-        todo!(
-            "TODO: port guard `more_fragments_no_capacity` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn more_fragments_raw(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::more_fragments_raw
-        todo!(
-            "TODO: port guard `more_fragments_raw` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn more_fragments_token_invalid(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::more_fragments_token_invalid
-        todo!(
-            "TODO: port guard `more_fragments_token_invalid` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn more_fragments_token_valid(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::more_fragments_token_valid
-        todo!(
-            "TODO: port guard `more_fragments_token_valid` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn no_more_fragments(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::no_more_fragments
-        todo!(
-            "TODO: port guard `no_more_fragments` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn no_prefix(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::no_prefix
-        todo!("TODO: port guard `no_prefix` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn no_suffix(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::no_suffix
-        todo!("TODO: port guard `no_suffix` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn on_unexpected_from_binding_encoder(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_binding_encoder_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_binding_preprocessor(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_binding_preprocessor_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_encoding_raw_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_encoding_raw_fragment(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_encoding_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_encoding_token_fragment(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_finalizing(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_idle(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_prefix_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_preprocess_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_preprocessing(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_suffix_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn on_unexpected_from_uninitialized(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn preprocess_fragment_count_invalid(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::preprocess_fragment_count_invalid
-        todo!(
-            "TODO: port guard `preprocess_fragment_count_invalid` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn preprocess_rejected_no_error(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::preprocess_rejected_no_error
-        todo!(
-            "TODO: port guard `preprocess_rejected_no_error` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn preprocess_reported_error(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::preprocess_reported_error
-        todo!(
-            "TODO: port guard `preprocess_reported_error` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn preprocess_success(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::preprocess_success
-        todo!(
-            "TODO: port guard `preprocess_success` from emel.cpp/src/emel/text/tokenizer/guards.hpp"
-        )
-    }
-    fn reject_bind_from_done(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn reject_bind_from_errored(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn reject_bind_from_idle(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn reject_bind_from_unexpected(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn reject_bind_from_uninitialized(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/tokenizer/actions.hpp")
-    }
-    fn reject_invalid_from_done(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn reject_invalid_from_errored(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn reject_invalid_from_idle(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn reject_invalid_from_unexpected(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn reject_invalid_from_uninitialized(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn sep_invalid_id(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::sep_invalid_id
-        todo!("TODO: port guard `sep_invalid_id` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn sep_no_capacity(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::sep_no_capacity
-        todo!("TODO: port guard `sep_no_capacity` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn sep_ready(&self, _event: &EventTokenizeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/guards.hpp::sep_ready
-        todo!("TODO: port guard `sep_ready` from emel.cpp/src/emel/text/tokenizer/guards.hpp")
-    }
-    fn set_backend_error(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_backend_error
-        todo!(
-            "TODO: port action `set_backend_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_error_from_encode(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_error_from_encode
-        todo!(
-            "TODO: port action `set_error_from_encode` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_error_from_preprocess(&mut self, _event: &EventTokenizeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_error_from_preprocess
-        todo!(
-            "TODO: port action `set_error_from_preprocess` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_id_error_from_encoding_raw_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_id_error
-        todo!(
-            "TODO: port action `set_invalid_id_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_id_error_from_prefix_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_id_error
-        todo!(
-            "TODO: port action `set_invalid_id_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_id_error_from_suffix_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_id_error
-        todo!(
-            "TODO: port action `set_invalid_id_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_request_error_from_encoding_raw_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_request_error
-        todo!(
-            "TODO: port action `set_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_request_error_from_encoding_ready(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_request_error
-        todo!(
-            "TODO: port action `set_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_request_error_from_prefix_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_request_error
-        todo!(
-            "TODO: port action `set_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_request_error_from_preprocess_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_request_error
-        todo!(
-            "TODO: port action `set_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
-    fn set_invalid_request_error_from_suffix_decision(
-        &mut self,
-        _event: &EventTokenizeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/actions.hpp::set_invalid_request_error
-        todo!(
-            "TODO: port action `set_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/actions.hpp"
-        )
-    }
+fn set_token_error(event: &EventTokenizeRuntime<'_>, error: TokenizerError) { let mut c = event.context.borrow_mut(); c.err = error; c.result = false; c.token_count = 0; }
+fn set_bind_error(event: &EventBindRuntime<'_>, error: TokenizerError) { let mut c = event.context.borrow_mut(); c.err = error; c.result = false; }
+fn valid_token_id(id: i32) -> bool { id >= 0 }
+fn child_error(error: TokenizerError) -> bool { error != TokenizerError::None }
+
+impl<'event> TextTokenizerStateMachineContext for TextTokenizerContext<'event> {
+    fn begin_bind_from_uninitialized(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.begin_bind(e) }
+    fn begin_bind_from_idle(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.begin_bind(e) }
+    fn begin_bind_from_done(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.begin_bind(e) }
+    fn begin_bind_from_errored(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.begin_bind(e) }
+    fn begin_bind_from_unexpected(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.begin_bind(e) }
+    fn begin_tokenize_from_idle(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
+    fn begin_tokenize_from_done(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
+    fn begin_tokenize_from_errored(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
+    fn begin_tokenize_from_unexpected(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
+    fn can_bind(&self, e: &EventBindRuntime<'event>) -> Result<bool, ()> { Ok(e.request.vocab.token_count() > 0) }
+    fn can_tokenize(&self, e: &EventTokenizeRuntime<'event>) -> Result<bool, ()> { Ok(self.is_bound && self.vocab.is_some_and(|v| core::ptr::eq(v, e.request.vocab)) && !e.request.token_ids.borrow().is_empty()) }
+    fn bind_preprocessor(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { let error = e.request.bind_preprocessor.map_or(TokenizerError::None, |f| f(e.request.vocab, e.request.preprocessor_variant as u8)); e.context.borrow_mut().err = error; Ok(()) }
+    fn bind_encoder(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { let error = e.request.bind_encoder.map_or(TokenizerError::None, |f| f(e.request.vocab, e.request.encoder_variant as u8)); e.context.borrow_mut().err = error; Ok(()) }
+    fn mark_bind_success(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.is_bound = true; self.last_error = TokenizerError::None; e.context.borrow_mut().result = true; Ok(()) }
+    fn reject_bind_from_uninitialized(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.reject_bind(e) }
+    fn reject_bind_from_idle(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.reject_bind(e) }
+    fn reject_bind_from_done(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.reject_bind(e) }
+    fn reject_bind_from_errored(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.reject_bind(e) }
+    fn reject_bind_from_unexpected(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { self.reject_bind(e) }
+    fn reject_invalid_from_uninitialized(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.reject_invalid(e) }
+    fn reject_invalid_from_idle(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.reject_invalid(e) }
+    fn reject_invalid_from_done(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.reject_invalid(e) }
+    fn reject_invalid_from_errored(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.reject_invalid(e) }
+    fn reject_invalid_from_unexpected(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.reject_invalid(e) }
+    fn dispatch_preprocess(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { let mut c = e.context.borrow_mut(); let out = &mut c.fragments[..]; let r = e.request.preprocess.map_or_else(|| { if e.request.text.is_empty() { ChildResult { accepted: true, ..ChildResult::default() } } else { out[0] = Fragment { kind: FragmentKind::RawText, start: 0, end: e.request.text.len(), token: -1 }; ChildResult { accepted: true, count: 1, ..ChildResult::default() } } }, |f| f(e.request.vocab, e.request.text, e.request.parse_special, out)); c.preprocess_accepted = r.accepted; c.preprocess_err_code = r.error; c.fragment_count = r.count; c.fragment_index = 0; c.preprocessed = r.accepted; Ok(()) }
+    fn dispatch_encode_raw_fragment(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { let mut c = e.context.borrow_mut(); let f = c.fragments[c.fragment_index]; let bytes = if f.end <= e.request.text.len() && f.start <= f.end { &e.request.text[f.start..f.end] } else { c.encode_err_code = TokenizerError::InvalidRequest; return Ok(()) }; let mut output = e.request.token_ids.borrow_mut(); let remaining = output.len().saturating_sub(c.token_count); let r = e.request.encode.map_or_else(|| fallback_encode(e.request.vocab, bytes, c.preprocessed, &mut output[c.token_count..c.token_count + remaining]), |cb| cb(e.request.vocab, bytes, c.preprocessed, &mut output[c.token_count..c.token_count + remaining])); c.encode_accepted = r.accepted; c.encode_err_code = r.error; c.encode_token_count = r.count; Ok(()) }
+    fn append_bos(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.append_id(e, e.request.vocab.bos_id()) }
+    fn append_sep(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.append_id(e, e.request.vocab.sep_id()) }
+    fn append_eos(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.append_id(e, e.request.vocab.eos_id()) }
+    fn append_fragment_token(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { let mut c=e.context.borrow_mut(); let id=c.fragments[c.fragment_index].token; let mut out=e.request.token_ids.borrow_mut(); out[c.token_count]=id; c.token_count+=1; c.fragment_index+=1; Ok(()) }
+    fn commit_encoded_fragment(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { let mut c=e.context.borrow_mut(); c.token_count += c.encode_token_count; c.fragment_index += 1; Ok(()) }
+    fn finalize(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { e.context.borrow_mut().result=true; self.last_error=TokenizerError::None; Ok(()) }
+    fn set_backend_error(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::BackendError);Ok(())}
+    fn set_error_from_preprocess(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{let x=e.context.borrow().preprocess_err_code;set_token_error(e,if x==TokenizerError::None{TokenizerError::BackendError}else{x});Ok(())}
+    fn set_error_from_encode(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{let x=e.context.borrow().encode_err_code;set_token_error(e,if x==TokenizerError::None{TokenizerError::BackendError}else{x});Ok(())}
+    fn set_invalid_request_error_from_preprocess_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn set_invalid_request_error_from_prefix_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn set_invalid_request_error_from_encoding_ready(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn set_invalid_request_error_from_encoding_raw_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn set_invalid_request_error_from_suffix_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn set_invalid_id_error_from_prefix_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::ModelInvalid);Ok(())}
+    fn set_invalid_id_error_from_encoding_raw_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::ModelInvalid);Ok(())}
+    fn set_invalid_id_error_from_suffix_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::ModelInvalid);Ok(())}
+    fn reject_bind_from_unexpected(&mut self,e:&EventBindRuntime<'event>)->Result<(),()>{self.reject_bind(e)}
+    fn reject_invalid_from_unexpected(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{self.reject_invalid(e)}
+    fn bind_preprocessor_error_none(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::None)}
+    fn bind_preprocessor_error_invalid_request(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::InvalidRequest)}
+    fn bind_preprocessor_error_model_invalid(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::ModelInvalid)}
+    fn bind_preprocessor_error_backend_error(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::BackendError)}
+    fn bind_preprocessor_error_unknown(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(child_error(e.context.borrow().err)&&!matches!(e.context.borrow().err,TokenizerError::InvalidRequest|TokenizerError::ModelInvalid|TokenizerError::BackendError))}
+    fn bind_encoder_error_none(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{self.bind_preprocessor_error_none(e)}
+    fn bind_encoder_error_invalid_request(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{self.bind_preprocessor_error_invalid_request(e)}
+    fn bind_encoder_error_model_invalid(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{self.bind_preprocessor_error_model_invalid(e)}
+    fn bind_encoder_error_backend_error(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{self.bind_preprocessor_error_backend_error(e)}
+    fn bind_encoder_error_unknown(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{self.bind_preprocessor_error_unknown(e)}
+    fn preprocess_rejected_no_error(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(!c.preprocess_accepted&&c.preprocess_err_code==TokenizerError::None)}
+    fn preprocess_reported_error(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().preprocess_err_code!=TokenizerError::None)}
+    fn preprocess_fragment_count_invalid(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().fragment_count>MAX_FRAGMENTS)}
+    fn preprocess_success(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(c.preprocess_accepted&&c.preprocess_err_code==TokenizerError::None&&c.fragment_count<=MAX_FRAGMENTS)}
+    fn bos_ready(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&e.request.vocab.add_bos()&&valid_token_id(e.request.vocab.bos_id())&&e.context.borrow().token_count<e.request.token_ids.borrow().len())}
+    fn bos_no_capacity(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&e.request.vocab.add_bos()&&valid_token_id(e.request.vocab.bos_id())&&e.context.borrow().token_count>=e.request.token_ids.borrow().len())}
+    fn bos_invalid_id(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&e.request.vocab.add_bos()&&!valid_token_id(e.request.vocab.bos_id()))}
+    fn no_prefix(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(!e.request.add_special||!e.request.vocab.add_bos())}
+    fn no_more_fragments(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().fragment_index>=e.context.borrow().fragment_count)}
+    fn more_fragments_no_capacity(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().fragment_index<e.context.borrow().fragment_count&&e.context.borrow().token_count>=e.request.token_ids.borrow().len())}
+    fn more_fragments_token_valid(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(c.fragment_index<c.fragment_count&&c.fragments[c.fragment_index].kind==FragmentKind::Token&&c.fragments[c.fragment_index].token>=0)}
+    fn more_fragments_token_invalid(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(c.fragment_index<c.fragment_count&&c.fragments[c.fragment_index].kind==FragmentKind::Token&&c.fragments[c.fragment_index].token<0)}
+    fn more_fragments_raw(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(c.fragment_index<c.fragment_count&&c.fragments[c.fragment_index].kind==FragmentKind::RawText)}
+    fn encode_rejected_no_error(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(!c.encode_accepted&&c.encode_err_code==TokenizerError::None)}
+    fn encode_reported_error(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().encode_err_code!=TokenizerError::None)}
+    fn encode_count_invalid(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{let c=e.context.borrow();Ok(c.encode_accepted&&c.encode_err_code==TokenizerError::None&&c.encode_token_count>e.request.token_ids.borrow().len().saturating_sub(c.token_count))}
+    fn encode_success(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok({let c=e.context.borrow();c.encode_accepted&&c.encode_err_code==TokenizerError::None&&c.encode_token_count<=e.request.token_ids.borrow().len().saturating_sub(c.token_count)})}
+    fn sep_ready(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&self.model_kind==EncoderKind::Wpm&&e.request.vocab.add_sep()&&valid_token_id(e.request.vocab.sep_id())&&e.context.borrow().token_count<e.request.token_ids.borrow().len())}
+    fn sep_no_capacity(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&self.model_kind==EncoderKind::Wpm&&e.request.vocab.add_sep()&&valid_token_id(e.request.vocab.sep_id())&&e.context.borrow().token_count>=e.request.token_ids.borrow().len())}
+    fn sep_invalid_id(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&self.model_kind==EncoderKind::Wpm&&e.request.vocab.add_sep()&&!valid_token_id(e.request.vocab.sep_id()))}
+    fn eos_ready(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&self.model_kind!=EncoderKind::Wpm&&e.request.vocab.add_eos()&&valid_token_id(e.request.vocab.eos_id())&&e.context.borrow().token_count<e.request.token_ids.borrow().len())}
+    fn eos_no_capacity(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&self.model_kind!=EncoderKind::Wpm&&e.request.vocab.add_eos()&&valid_token_id(e.request.vocab.eos_id())&&e.context.borrow().token_count>=e.request.token_ids.borrow().len())}
+    fn eos_invalid_id(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(e.request.add_special&&self.model_kind!=EncoderKind::Wpm&&e.request.vocab.add_eos()&&!valid_token_id(e.request.vocab.eos_id()))}
+    fn no_suffix(&self,e:&EventTokenizeRuntime<'event>)->Result<bool,()>{Ok(!((e.request.add_special&&self.model_kind==EncoderKind::Wpm&&e.request.vocab.add_sep())||(e.request.add_special&&self.model_kind!=EncoderKind::Wpm&&e.request.vocab.add_eos())))}
+    fn begin_bind(&mut self,e:&EventBindRuntime<'event>)->Result<(),()>{self.vocab=Some(e.request.vocab);self.preprocess_kind=e.request.preprocessor_variant;self.model_kind=e.request.encoder_variant;self.is_bound=false;self.last_error=TokenizerError::None;e.context.borrow_mut().err=TokenizerError::None;Ok(())}
+    fn begin_tokenize(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{let mut c=e.context.borrow_mut();*c=TokenizeContext::default();self.last_error=TokenizerError::None;Ok(())}
+    fn reject_bind(&mut self,e:&EventBindRuntime<'event>)->Result<(),()>{self.is_bound=false;self.last_error=TokenizerError::InvalidRequest;set_bind_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn reject_invalid(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{self.last_error=TokenizerError::InvalidRequest;set_token_error(e,TokenizerError::InvalidRequest);Ok(())}
+    fn append_id(&mut self,e:&EventTokenizeRuntime<'event>,id:i32)->Result<(),()>{let mut c=e.context.borrow_mut();let mut o=e.request.token_ids.borrow_mut();o[c.token_count]=id;c.token_count+=1;Ok(())}
+    fn on_unexpected_from_binding_encoder_decision(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_binding_encoder(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_binding_preprocessor_decision(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_binding_preprocessor(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_done(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_errored(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_idle(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_prefix_decision(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_preprocess_decision(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_preprocessing(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_suffix_decision(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_unexpected(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_uninitialized(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_encoding_ready(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_encoding_token_fragment(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_encoding_raw_fragment(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_encoding_raw_decision(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn on_unexpected_from_finalizing(&mut self)->Result<(),()>{self.mark_unexpected()}
+    fn mark_unexpected(&mut self)->Result<(),()>{self.unexpected=true;self.is_bound=false;self.last_error=TokenizerError::Unexpected;Ok(())}
 }
+
+fn fallback_encode(vocab:&dyn VocabularyView,text:&[u8],_:bool,out:&mut [i32])->ChildResult { let mut count=0; for b in text.iter().copied(){ let mut found=-1; for i in 0..vocab.token_count(){ if vocab.token(i)==Some(core::slice::from_ref(&b)){found=i as i32;break;} } if found<0{return ChildResult{accepted:true,error:TokenizerError::BackendError,count}} if count>=out.len(){return ChildResult{accepted:true,error:TokenizerError::InvalidRequest,count}} out[count]=found;count+=1; } ChildResult{accepted:true,error:TokenizerError::None,count} }
+
+/// Single-writer synchronous tokenizer actor.
+pub struct TextTokenizer<'event> { machine: TextTokenizerStateMachine<'event, TextTokenizerContext<'event>> }
+impl<'event> Default for TextTokenizer<'event> { fn default()->Self{Self::new()} }
+impl<'event> TextTokenizer<'event> {
+    #[must_use] pub fn new()->Self{Self{machine:TextTokenizerStateMachine::new(TextTokenizerContext::default())}}
+    pub fn process_bind(&mut self,request:BindRequest<'event>)->Result<TokenizerBindDone,TokenizerBindError>{let ctx=RefCell::new(BindContext::default());let event=EventBindRuntime{request,context:&ctx};if self.machine.process_event(TextTokenizerEvents::EventBindRuntime(event)).is_err(){self.machine.set_state(TextTokenizerStates::Unexpected);return Err(TokenizerBindError{error:TokenizerError::Unexpected});}let c=*ctx.borrow();if c.result&&self.machine.is(&TextTokenizerStates::Idle){if let Some(cb)=request.dispatch_done{let _=cb(TokenizerBindDone);}Ok(TokenizerBindDone)}else{let e=TokenizerBindError{error:if c.err==TokenizerError::None{TokenizerError::BackendError}else{c.err}};if let Some(cb)=request.dispatch_error{let _=cb(e);}Err(e)}}
+    pub fn process_tokenize(&mut self,request:TokenizeRequest<'event>)->Result<TokenizerDone,TokenizerErrorEvent>{let ctx=RefCell::new(TokenizeContext::default());let event=EventTokenizeRuntime{request,context:&ctx};if self.machine.process_event(TextTokenizerEvents::EventTokenizeRuntime(event)).is_err(){self.machine.set_state(TextTokenizerStates::Unexpected);}let c=*ctx.borrow();if c.result&&self.machine.is(&TextTokenizerStates::Done){let d=TokenizerDone{token_count:c.token_count};if let Some(cb)=request.dispatch_done{let _=cb(d);}Ok(d)}else{let e=TokenizerErrorEvent{error:if self.machine.context().unexpected{TokenizerError::Unexpected}else if c.err==TokenizerError::None{TokenizerError::BackendError}else{c.err}};if let Some(cb)=request.dispatch_error{let _=cb(e);}Err(e)}}
+    pub fn process_unexpected(&mut self)->bool{self.machine.context_mut().unexpected=true;self.machine.set_state(TextTokenizerStates::Unexpected);false}
+    #[must_use] pub fn state(&self)->&TextTokenizerStates{self.machine.state()}
+    #[must_use] pub fn is(&self,state:&TextTokenizerStates)->bool{self.machine.is(state)}
+    #[must_use] pub fn context(&self)->&TextTokenizerContext<'event>{self.machine.context()}
+    #[must_use] pub fn last_error(&self)->TokenizerError{self.machine.context().last_error}
+}
+/// Compatibility actor alias.
+pub type TextTokenizerActor<'event> = TextTokenizer<'event>;
