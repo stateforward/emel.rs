@@ -245,16 +245,16 @@ sml! {
     TextGeneratorMatmul<'dispatch> {
         "state_ready"_s <= *"state_ready"_s + event<EventConfigureKernelKind> / effect_configure_kernel_kind,
         "state_serial_result_decision"_s <= "state_ready"_s + event<EventExecuteSerial<'dispatch>> / effect_execute_serial,
-        "state_ready"_s <= "state_serial_result_decision"_s + completion<EventExecuteSerial<'dispatch>> [guard_serial_accepted] / effect_accept_serial_execution,
-        "state_ready"_s <= "state_serial_result_decision"_s + completion<EventExecuteSerial<'dispatch>> [guard_serial_rejected] / effect_reject_serial_execution,
+        "state_ready"_s <= "state_serial_result_decision"_s + completion<EventExecuteSerial>(EventExecuteSerial<'dispatch>) [guard_serial_accepted] / effect_accept_serial_execution,
+        "state_ready"_s <= "state_serial_result_decision"_s + completion<EventExecuteSerial>(EventExecuteSerial<'dispatch>) [guard_serial_rejected] / effect_reject_serial_execution,
         "state_parallel_result_decision"_s <= "state_ready"_s + event<EventExecuteParallel<'dispatch>> [guard_parallel_x8_ready] / effect_execute_parallel_x8,
         "state_parallel_result_decision"_s <= "state_ready"_s + event<EventExecuteParallel<'dispatch>> [guard_parallel_x4_ready] / effect_execute_parallel_x4,
         "state_parallel_result_decision"_s <= "state_ready"_s + event<EventExecuteParallel<'dispatch>> [guard_parallel_unit_ready] / effect_execute_parallel_unit,
         "state_ready"_s <= "state_ready"_s + event<EventExecuteParallel<'dispatch>> [guard_parallel_unavailable] / effect_reject_parallel_execution_from_state_ready,
-        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel<'dispatch>> [guard_parallel_submission_failed] / effect_reject_parallel_execution_from_state_parallel_result_decision,
-        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel<'dispatch>> [guard_parallel_join_failed] / effect_reject_parallel_execution_from_state_parallel_result_decision,
-        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel<'dispatch>> [guard_parallel_lane_rejected] / effect_reject_parallel_execution_from_state_parallel_result_decision,
-        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel<'dispatch>> [guard_parallel_all_lanes_accepted] / effect_accept_parallel_execution,
+        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel>(EventExecuteParallel<'dispatch>) [guard_parallel_submission_failed] / effect_reject_parallel_execution_from_state_parallel_result_decision,
+        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel>(EventExecuteParallel<'dispatch>) [guard_parallel_join_failed] / effect_reject_parallel_execution_from_state_parallel_result_decision,
+        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel>(EventExecuteParallel<'dispatch>) [guard_parallel_lane_rejected] / effect_reject_parallel_execution_from_state_parallel_result_decision,
+        "state_ready"_s <= "state_parallel_result_decision"_s + completion<EventExecuteParallel>(EventExecuteParallel<'dispatch>) [guard_parallel_all_lanes_accepted] / effect_accept_parallel_execution,
         "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected_from_state_ready,
         "state_ready"_s <= "state_serial_result_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_serial_result_decision,
         "state_ready"_s <= "state_parallel_result_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_parallel_result_decision,
@@ -340,13 +340,15 @@ impl TextGeneratorMatmulContext {
             let mut begin_group = 0usize;
             for lane in 0..lane_count {
                 let lane_groups = groups_per_lane + usize::from(lane < extra_groups);
-                let row_begin = begin_group * group_rows.max(1);
-                let row_end = (begin_group + lane_groups) * group_rows.max(1);
-                let slice = RowSlice { row_begin, row_count: row_end.min(event.request.rows) - row_begin };
-                let accepted = callback(&event.request, slice, lane);
-                result.all_lanes_accepted &= accepted;
-                if accepted {
-                    self.lane_kernels[lane].counters.operations = self.lane_kernels[lane].counters.operations.saturating_add(1);
+    fn effect_reject_parallel_scheduler_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::Backend;
+        let mut out = event.out.borrow_mut();
+        out.err = self.err;
+        out.failed_lane = NO_FAILED_LANE;
+        Ok(())
+    }
+PUT 471.=471:
+    machine: TextGeneratorDecodeWavefrontStateMachine<TextGeneratorDecodeWavefrontContext>,
                     self.lane_kernels[lane].counters.rows = self.lane_kernels[lane].counters.rows.saturating_add(slice.row_count as u64);
                 }
                 begin_group += lane_groups;

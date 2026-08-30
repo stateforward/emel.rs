@@ -340,7 +340,7 @@ impl TextGeneratorDecodeWavefrontStateMachineContext for TextGeneratorDecodeWave
         event.out.borrow_mut().err = self.err;
         Ok(())
     }
-    fn effect_reject_parallel_scheduler(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+    fn effect_reject_parallel_scheduler_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
         self.err = DecodeWavefrontError::Backend;
         let mut out = event.out.borrow_mut();
         out.err = self.err;
@@ -468,7 +468,7 @@ fn parallel_lane_rejected(event: &EventRun<'_>, index: usize) -> bool {
 
 /// Public single-writer synchronous actor.
 pub struct TextGeneratorDecodeWavefrontActor<'event> {
-    machine: TextGeneratorDecodeWavefrontStateMachine<'event, TextGeneratorDecodeWavefrontContext>,
+    machine: TextGeneratorDecodeWavefrontStateMachine<TextGeneratorDecodeWavefrontContext>,
 }
 
 impl<'event> Default for TextGeneratorDecodeWavefrontActor<'event> {
