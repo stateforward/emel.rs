@@ -62,8 +62,7 @@ impl TermInput {
 }
 
 /// Private completion event corresponding to pinned `parse_rules`.
-/// The copied token is retained in the context before dispatch, matching the
-/// shared C++ parse-rules context without changing other parser modules.
+/// The token is copied into the context before generated dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RuleParserEventParseRules;
 
@@ -114,8 +113,8 @@ impl GbnfRuleParserTermParserContext {
         self.error = None;
     }
 
-    fn token_is(&self, kind: TokenKind, event_data: &RuleParserEventParseRules) -> bool {
-        self.error.is_none() && event_data.input.has_token && event_data.input.token == kind
+    fn token_is(&self, kind: TokenKind) -> bool {
+        self.error.is_none() && self.has_token && self.token == kind
     }
 
     fn consume(&mut self, kind: TermKind) -> Result<(), ()> {
@@ -134,55 +133,55 @@ impl GbnfRuleParserTermParserContext {
 impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserContext {
     // Source mapping: actions.hpp::consume_kind<term_kind::...>; actions only
     // write the selected result.
-    fn consume_alternation(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Alternation) }
-    fn consume_character_class(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::CharacterClass) }
-    fn consume_close_group(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::CloseGroup) }
-    fn consume_dot(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Dot) }
-    fn consume_newline(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Newline) }
-    fn consume_open_group(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::OpenGroup) }
-    fn consume_quantifier(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Quantifier) }
-    fn consume_rule_reference(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::RuleReference) }
-    fn consume_string_literal(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::StringLiteral) }
+    fn consume_alternation(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Alternation) }
+    fn consume_character_class(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::CharacterClass) }
+    fn consume_close_group(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::CloseGroup) }
+    fn consume_dot(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Dot) }
+    fn consume_newline(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Newline) }
+    fn consume_open_group(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::OpenGroup) }
+    fn consume_quantifier(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Quantifier) }
+    fn consume_rule_reference(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::RuleReference) }
+    fn consume_string_literal(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::StringLiteral) }
 
     // Source mapping: actions.hpp::dispatch_parse_failed.
-    fn dispatch_parse_failed(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
         self.result = TermKind::Unknown;
         self.error = Some(TermParserError::ParseFailed);
         Ok(())
     }
 
-    // Source mapping: actions.hpp::on_unexpected, origin-explicit per row.
-    fn on_unexpected_from_deciding(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parse_failed(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parsed(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.unexpected() }
+    // Source mapping: actions.hpp::on_unexpected; wildcard unexpected events
+    // carry no payload in the generated callback API.
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
 
     // Source mapping: guards.hpp::token_is and guards.hpp::parse_failed.
-    fn parse_failed(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
-        Ok(!self.token_string_literal(event_data)?
-            && !self.token_character_class(event_data)?
-            && !self.token_rule_reference(event_data)?
-            && !self.token_dot(event_data)?
-            && !self.token_open_group(event_data)?
-            && !self.token_close_group(event_data)?
-            && !self.token_quantifier(event_data)?
-            && !self.token_alternation(event_data)?
-            && !self.token_newline(event_data)?)
+    fn parse_failed(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(!self.token_string_literal()?
+            && !self.token_character_class()?
+            && !self.token_rule_reference()?
+            && !self.token_dot()?
+            && !self.token_open_group()?
+            && !self.token_close_group()?
+            && !self.token_quantifier()?
+            && !self.token_alternation()?
+            && !self.token_newline()?)
     }
-    fn token_alternation(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Alternation, event_data)) }
-    fn token_character_class(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CharacterClass, event_data)) }
-    fn token_close_group(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CloseGroup, event_data)) }
-    fn token_dot(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Dot, event_data)) }
-    fn token_newline(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Newline, event_data)) }
-    fn token_open_group(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::OpenGroup, event_data)) }
-    fn token_quantifier(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Quantifier, event_data)) }
-    fn token_rule_reference(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::RuleReference, event_data)) }
-    fn token_string_literal(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::StringLiteral, event_data)) }
+    fn token_alternation(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Alternation)) }
+    fn token_character_class(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CharacterClass)) }
+    fn token_close_group(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CloseGroup)) }
+    fn token_dot(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Dot)) }
+    fn token_newline(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Newline)) }
+    fn token_open_group(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::OpenGroup)) }
+    fn token_quantifier(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Quantifier)) }
+    fn token_rule_reference(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::RuleReference)) }
+    fn token_string_literal(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::StringLiteral)) }
 }
 
 
 /// Synchronous bounded term-token classifier actor.
-#[derive(Debug)]
 pub struct TermParser {
     machine: GbnfRuleParserTermParserStateMachine<GbnfRuleParserTermParserContext>,
 }
@@ -212,7 +211,7 @@ impl TermParser {
 
     /// Records an unsupported event as an explicit internal error.
     pub fn process_unexpected_event(&mut self) -> Result<TermKind, TermParserError> {
-        self.machine.context_mut().unexpected()?;
+        self.machine.context_mut().unexpected();
         self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
         Err(TermParserError::InternalError)
     }
@@ -266,6 +265,5 @@ mod tests {
     fn unexpected_event_is_explicit_internal_error() {
         let mut parser = TermParser::new();
         assert_eq!(parser.process_unexpected_event(), Err(TermParserError::InternalError));
-        assert!(parser.is(GbnfRuleParserTermParserStates::UnexpectedEvent));
+        assert_eq!(parser.context().error, Some(TermParserError::InternalError));
     }
-}
