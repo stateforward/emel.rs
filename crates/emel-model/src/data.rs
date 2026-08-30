@@ -1673,41 +1673,90 @@ impl Data {
         if count == 0 || count > MAX_TENSORS {
             return Err(DataError::TooManyTensors);
         }
-        let mut owned = Vec::new();
-        owned
+        // Observe descriptor and view lengths before allocating callback-owned
+        // storage. `WithTensor` borrows source views only for synchronous
+        // dispatch, so each copy buffer is ready before its callback runs.
+        let mut descriptors = Vec::new();
+        descriptors
             .try_reserve_exact(count)
             .map_err(|_| DataError::Capacity)?;
+        descriptors.resize_with(count, || None);
         for index in 0..parsed.tensor_count() {
-            let mut observed = None;
+            let slot = &mut descriptors
+                [usize::try_from(index).map_err(|_| DataError::TooManyTensors)?];
             let result = loader.process_event(emel_gguf::event::WithTensor::new(
                 index,
                 |name: &[u8], descriptor: emel_gguf::event::TensorDescriptor, bytes: &[u8]| {
-                    observed = Some((name.to_vec(), descriptor, bytes.to_vec()));
+                    *slot = Some((descriptor, name.len(), bytes.len()));
                 },
             ));
             result
                 .map_err(DataError::GgufQuery)?
                 .ok_or(DataError::InvalidTensor)?;
-            let (name, descriptor, bytes) = observed.ok_or(DataError::InvalidTensor)?;
-            let descriptor_size = descriptor.data_size();
-            if descriptor_size == 0 || u64::try_from(bytes.len()).ok() != Some(descriptor_size) {
+        }
+
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(count)
+            .map_err(|_| DataError::Capacity)?;
+        for index in 0..parsed.tensor_count() {
+            let slot = descriptors
+                [usize::try_from(index).map_err(|_| DataError::TooManyTensors)?]
+                .ok_or(DataError::InvalidTensor)?;
+            let (descriptor, name_capacity, bytes_capacity) = slot;
+            if name_capacity > MAX_NAME_BYTES || bytes_capacity == 0 {
                 return Err(DataError::InvalidTensor);
             }
-            let dimensions = descriptor.dimensions();
-            let dimension_count = descriptor.dimension_count();
-            if !(1..=4).contains(&dimension_count)
-                || dimensions
-                    [..usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?]
-                    .iter()
-                    .any(|dimension| *dimension == 0 || *dimension > i64::MAX as u64)
-                || dimensions
-                    [usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?..]
-                    .iter()
-                    .any(|dimension| *dimension != 1)
+            // Reservations and initialization happen before dispatch; the
+            // callback itself only copies borrowed bytes into these buffers.
+            let mut name = Vec::new();
+            name.try_reserve_exact(name_capacity)
+                .map_err(|_| DataError::Capacity)?;
+            name.resize(name_capacity, 0);
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(bytes_capacity)
+                .map_err(|_| DataError::Capacity)?;
+            bytes.resize(bytes_capacity, 0);
+            let observed = loader.process_event(emel_gguf::event::WithTensor::new(
+                index,
+                |borrowed_name: &[u8],
+                 observed_descriptor: emel_gguf::event::TensorDescriptor,
+                 borrowed_bytes: &[u8]| {
+                    if observed_descriptor == descriptor
+                        && borrowed_name.len() == name.len()
+                        && borrowed_bytes.len() == bytes.len()
+                    {
+                        name.copy_from_slice(borrowed_name);
+                        bytes.copy_from_slice(borrowed_bytes);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            ));
+            if !observed
+                .map_err(DataError::GgufQuery)?
+                .ok_or(DataError::InvalidTensor)?
             {
                 return Err(DataError::InvalidTensor);
             }
-            if descriptor.alignment() == 0
+            let descriptor_size = descriptor.data_size();
+            let dimensions = descriptor.dimensions();
+            let dimension_count = descriptor.dimension_count();
+            let active =
+                usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
+            if descriptor_size == 0
+                || u64::try_from(bytes.len()).ok() != Some(descriptor_size)
+                || !(1..=4).contains(&dimension_count)
+            {
+                return Err(DataError::InvalidTensor);
+            }
+            if dimensions[..active]
+                .iter()
+                .any(|dimension| *dimension == 0 || *dimension > i64::MAX as u64)
+                || dimensions[active..].iter().any(|dimension| *dimension != 1)
+                || descriptor.alignment() == 0
                 || descriptor.data_offset() % u64::from(descriptor.alignment()) != 0
                 || descriptor
                     .data_section_offset()
@@ -1716,14 +1765,20 @@ impl Data {
             {
                 return Err(DataError::InvalidTensor);
             }
-            // WithTensor exposes a borrowed payload; the bridge copies it
-            // below before the loader and its source owner can be dropped.
-            owned.push((
+            owned.push((name, descriptor, bytes));
+        }
+        let mut tensors = Vec::new();
+        tensors
+            .try_reserve_exact(count)
+            .map_err(|_| DataError::Capacity)?;
+        for (name, descriptor, bytes) in &owned {
+            let descriptor_size = descriptor.data_size();
+            tensors.push(TensorInput::with_bytes(
                 name,
                 TensorMetadata::new(TensorMetadataInput {
                     tensor_type: descriptor.tensor_type(),
-                    dimension_count,
-                    dimensions,
+                    dimension_count: descriptor.dimension_count(),
+                    dimensions: descriptor.dimensions(),
                     data_offset: descriptor.data_offset(),
                     file_offset: descriptor.file_offset(),
                     data_size: descriptor_size,
@@ -1737,10 +1792,6 @@ impl Data {
                 bytes,
             ));
         }
-        let tensors: Vec<_> = owned
-            .iter()
-            .map(|(name, metadata, bytes)| TensorInput::with_bytes(name, *metadata, bytes))
-            .collect();
         Self::try_from_mimi(MimiDataInput {
             hparams,
             tensors: &tensors,
@@ -2141,6 +2192,80 @@ mod tests {
         assert_eq!(view.metadata().unwrap().data_offset(), 0);
         assert_eq!(view.metadata().unwrap().file_offset(), 64);
         assert_eq!(view.byte_view(), Some(&[7_u8; 128][..]));
+    }
+
+    #[test]
+    fn gguf_public_callback_copy_is_allocation_free_after_setup() {
+        use emel_gguf::Loader;
+        use emel_gguf::event::{Bind, Parse, Probe, Storage, WithTensor};
+        use std::sync::Arc;
+
+        let mut source = b"GGUF".to_vec();
+        source.extend_from_slice(&3_u32.to_le_bytes());
+        source.extend_from_slice(&1_u64.to_le_bytes());
+        source.extend_from_slice(&0_u64.to_le_bytes());
+        source.extend_from_slice(&6_u64.to_le_bytes());
+        source.extend_from_slice(b"weight");
+        source.extend_from_slice(&1_u32.to_le_bytes());
+        source.extend_from_slice(&32_u64.to_le_bytes());
+        source.extend_from_slice(&0_u32.to_le_bytes());
+        source.extend_from_slice(&0_u64.to_le_bytes());
+        source.resize(source.len().next_multiple_of(32), 0);
+        source.extend_from_slice(&[7_u8; 128]);
+        let source = Arc::<[u8]>::from(source);
+        let mut loader = Loader::new();
+        let probe = loader
+            .process_event(Probe::new(Arc::clone(&source)))
+            .unwrap();
+        loader
+            .process_event(Bind::new(Storage::exact(probe).unwrap()))
+            .unwrap();
+        let parsed = loader.process_event(Parse::new()).unwrap();
+        let (name_length, descriptor, bytes_length) = loader
+            .process_event(WithTensor::new(
+                0,
+                |name: &[u8], descriptor, bytes: &[u8]| {
+                    (name.len(), descriptor, bytes.len())
+                },
+            ))
+            .unwrap()
+            .unwrap();
+        let mut name = vec![0_u8; name_length];
+        let mut bytes = vec![0_u8; bytes_length];
+        let allocation = measure(|| {
+            let result = loader.process_event(WithTensor::new(
+                0,
+                |borrowed_name: &[u8], observed_descriptor, borrowed_bytes: &[u8]| {
+                    assert_eq!(observed_descriptor, descriptor);
+                    name.copy_from_slice(borrowed_name);
+                    bytes.copy_from_slice(borrowed_bytes);
+                    true
+                },
+            ));
+            assert_eq!(result, Ok(Some(true)));
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(name, b"weight");
+        assert_eq!(bytes, vec![7_u8; 128]);
+
+        let hparams = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 32,
+            dim: 16,
+            semantic_n_q: 1,
+            codebook_dim: 8,
+            transformer_num_layers: 2,
+            transformer_num_heads: 2,
+            transformer_context: 8,
+            transformer_max_period: 1_000,
+        })
+        .unwrap();
+        let data = Data::try_from_gguf_mimi(&mut loader, parsed, hparams).unwrap();
+        drop(loader);
+        drop(source);
+        assert_eq!(data.tensor_named(b"weight").unwrap().byte_view(), Some(&[7_u8; 128][..]));
     }
 
     #[test]
