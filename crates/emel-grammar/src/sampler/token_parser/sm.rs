@@ -202,7 +202,6 @@ impl GbnfSamplerTokenParserStateMachineContext for GbnfSamplerTokenParserContext
 }
 
 /// Synchronous bounded actor around the generated token-parser machine.
-#[derive(Debug)]
 pub struct GbnfSamplerTokenParserActor {
     machine: GbnfSamplerTokenParserStateMachine<GbnfSamplerTokenParserContext>,
 }
@@ -234,10 +233,8 @@ impl GbnfSamplerTokenParserActor {
 
     /// Dispatches an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> Result<TokenKind, TokenParserError> {
-        if self.machine.process_event(GbnfSamplerTokenParserEvents::UnexpectedEvent).is_err() {
-            self.machine.context_mut().error = TokenParserError::InternalError;
-            self.machine.context_mut().token_kind = TokenKind::Unknown;
-        }
+        let _ = self.machine.context_mut().unexpected();
+        self.machine.set_state(GbnfSamplerTokenParserStates::UnexpectedEvent);
         self.outcome()
     }
 
