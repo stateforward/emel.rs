@@ -1,5 +1,8 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Bounded graph-processor validation phase state machine.
+//!
+//! Source mapping: `emel.cpp/src/emel/graph/processor/validate_step/{sm,context,events,actions,guards,errors}.hpp`.
+//! The request is copied into the actor context before synchronous dispatch; callbacks receive
+//! only that borrowed copied request and may not retain or re-enter the actor.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -16,10 +19,94 @@
 
 use sml::sml;
 
-// --- machine GraphProcessorValidateStep from emel.cpp/src/emel/graph/processor/validate_step/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct ProcessorEventExecuteStep;
+/// Processor error values matching the pinned C++ processor errors.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProcessorError {
+    #[default]
+    None,
+    InvalidRequest,
+    KernelFailed,
+    InternalError,
+    Untracked,
+    /// A callback supplied a non-zero error value.
+    Callback(i32),
+}
+
+/// Outcome retained by the validation phase.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PhaseOutcome {
+    #[default]
+    Unknown = 0,
+    Done = 1,
+    Failed = 2,
+}
+
+/// Callback used by the validation phase.
+///
+/// The callback receives a borrowed copied request and writes its error value to `err_out`.
+/// Returning `false` with a zero error is treated as `ProcessorError::KernelFailed`, matching
+/// the source action's `kernel_failed` fallback.
+pub type ValidateFn = fn(&ProcessorExecuteRequest, &mut i32) -> bool;
+
+/// Copied, bounded execution request fields needed by processor phases.
+///
+/// Pointer-bearing C++ handles are represented by bounded opaque integer handles. They are
+/// carried for source-shape compatibility but are never dereferenced by this child actor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessorExecuteRequest {
+    pub step_plan: u64,
+    pub output_out: u64,
+    pub lifecycle: u64,
+    pub tensor_machine: u64,
+    pub step_index: i32,
+    pub step_size: i32,
+    pub kv_tokens: i32,
+    pub memory_sm: u64,
+    pub memory_view: u64,
+    pub expected_outputs: i32,
+    pub compute_ctx: u64,
+    pub positions: u64,
+    pub positions_count: i32,
+    pub seq_masks: u64,
+    pub seq_mask_words: i32,
+    pub seq_masks_count: i32,
+    pub seq_primary_ids: u64,
+    pub seq_primary_ids_count: i32,
+    pub validate: Option<ValidateFn>,
+}
+
+/// Internal copied event corresponding to C++ `processor::event::execute_step`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProcessorEventExecuteStep {
+    pub request: ProcessorExecuteRequest,
+    /// Error retained by an earlier processor phase in the shared C++ execute context.
+    pub err: ProcessorError,
+}
+
+impl ProcessorEventExecuteStep {
+    /// Creates an event from a copied execution request with no prior phase error.
+    #[must_use]
+    pub const fn new(request: ProcessorExecuteRequest) -> Self {
+        Self {
+            request,
+            err: ProcessorError::None,
+        }
+    }
+
+    /// Creates an event with a previously retained processor error.
+    #[must_use]
+    pub const fn with_error(request: ProcessorExecuteRequest, err: ProcessorError) -> Self {
+        Self { request, err }
+    }
+
+    /// Creates an event with the validation callback selected explicitly.
+    #[must_use]
+    pub const fn with_callback(mut request: ProcessorExecuteRequest, callback: ValidateFn) -> Self {
+        request.validate = Some(callback);
+        Self::new(request)
+    }
+}
 
 sml! {
     GraphProcessorValidateStep {
@@ -39,113 +126,262 @@ sml! {
     }
 }
 
-/// Context for `GraphProcessorValidateStep` (TODO: context.hpp / detail.hpp).
+/// Persistent bounded context for `GraphProcessorValidateStep`.
 #[derive(Debug, Default)]
 pub struct GraphProcessorValidateStepContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    /// Copied request retained while the completion event is dispatched.
+    pub request: ProcessorExecuteRequest,
+    /// Phase outcome retained for the processor root.
+    pub validate_outcome: PhaseOutcome,
+    /// Processor error retained for the processor root.
+    pub err: ProcessorError,
+    /// Callback return value retained between callback decision transitions.
+    pub phase_callback_ok: bool,
+    /// Callback error value retained between callback decision transitions.
+    pub phase_callback_err: i32,
+}
+
+impl GraphProcessorValidateStepContext {
+    /// Copies a request into the single-writer actor context and resets transient callback state.
+    pub fn set_request(&mut self, event: ProcessorEventExecuteStep) {
+        self.request = event.request;
+        self.validate_outcome = PhaseOutcome::Unknown;
+        self.err = event.err;
+        self.phase_callback_ok = false;
+        self.phase_callback_err = 0;
+    }
+
+    /// Returns the retained phase outcome.
+    #[must_use]
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.validate_outcome
+    }
+
+    /// Returns the retained processor error.
+    #[must_use]
+    pub const fn error(&self) -> ProcessorError {
+        self.err
+    }
 }
 
 impl GraphProcessorValidateStepStateMachineContext for GraphProcessorValidateStepContext {
     fn callback_error(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp::callback_error
-        todo!(
-            "TODO: port guard `callback_error` from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp"
-        )
+        Ok(self.phase_callback_err != 0)
     }
+
     fn callback_failed_without_error(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp::callback_failed_without_error
-        todo!(
-            "TODO: port guard `callback_failed_without_error` from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp"
-        )
+        Ok(!self.phase_callback_ok && self.phase_callback_err == 0)
     }
+
     fn callback_ok(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp::callback_ok
-        todo!(
-            "TODO: port guard `callback_ok` from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp"
-        )
+        Ok(self.phase_callback_ok && self.phase_callback_err == 0)
     }
+
     fn mark_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Done;
+        self.err = ProcessorError::None;
+        Ok(())
     }
+
     fn mark_failed_callback_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::mark_failed_callback_error
-        todo!(
-            "TODO: port action `mark_failed_callback_error` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::Callback(self.phase_callback_err);
+        Ok(())
     }
+
     fn mark_failed_callback_without_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::mark_failed_callback_without_error
-        todo!(
-            "TODO: port action `mark_failed_callback_without_error` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::KernelFailed;
+        Ok(())
     }
+
     fn mark_failed_existing_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::mark_failed_existing_error
-        todo!(
-            "TODO: port action `mark_failed_existing_error` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        Ok(())
     }
+
     fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::mark_failed_invalid_request
-        todo!(
-            "TODO: port action `mark_failed_invalid_request` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::InvalidRequest;
+        Ok(())
     }
+
     fn on_unexpected_from_callback_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::InternalError;
+        Ok(())
     }
+
     fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::InternalError;
+        Ok(())
     }
+
     fn on_unexpected_from_execute_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::InternalError;
+        Ok(())
     }
+
     fn on_unexpected_from_executed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::InternalError;
+        Ok(())
     }
+
     fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        self.validate_outcome = PhaseOutcome::Failed;
+        self.err = ProcessorError::InternalError;
+        Ok(())
     }
+
     fn phase_missing_callback(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp::phase_missing_callback
-        todo!(
-            "TODO: port guard `phase_missing_callback` from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp"
-        )
+        Ok(self.err == ProcessorError::None && self.request.validate.is_none())
     }
+
     fn phase_prefailed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp::phase_prefailed
-        todo!(
-            "TODO: port guard `phase_prefailed` from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp"
-        )
+        Ok(self.err != ProcessorError::None)
     }
+
     fn phase_request_callback(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp::phase_request_callback
-        todo!(
-            "TODO: port guard `phase_request_callback` from emel.cpp/src/emel/graph/processor/validate_step/guards.hpp"
-        )
+        Ok(self.err == ProcessorError::None && self.request.validate.is_some())
     }
+
     fn run_callback(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp::run_callback
-        todo!(
-            "TODO: port action `run_callback` from emel.cpp/src/emel/graph/processor/validate_step/actions.hpp"
-        )
+        let mut callback_err = 0;
+        let callback_ok = match self.request.validate {
+            Some(callback) => callback(&self.request, &mut callback_err),
+            None => return Err(()),
+        };
+        self.phase_callback_ok = callback_ok;
+        self.phase_callback_err = callback_err;
+        Ok(())
+    }
+}
+
+/// Synchronous single-writer validation-phase actor.
+pub struct Processor {
+    machine: GraphProcessorValidateStepStateMachine<GraphProcessorValidateStepContext>,
+}
+
+impl Default for Processor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Processor {
+    /// Creates an actor in generated `deciding` state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: GraphProcessorValidateStepStateMachine::new(
+                GraphProcessorValidateStepContext::default(),
+            ),
+        }
+    }
+
+    /// Copies and dispatches one execution event synchronously.
+    pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
+        self.machine.context_mut().set_request(event);
+        self.machine
+            .process_event(GraphProcessorValidateStepEvents::ProcessorEventExecuteStep)
+            .is_ok()
+    }
+
+    /// Records an explicit unexpected event and transitions to the generated unexpected state.
+    pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine
+            .process_event(GraphProcessorValidateStepEvents::UnexpectedEvent)
+            .is_ok()
+    }
+
+    /// Returns generated state inspection.
+    #[must_use]
+    pub fn state(&self) -> &GraphProcessorValidateStepStates {
+        self.machine.state()
+    }
+
+    /// Tests generated state identity.
+    #[must_use]
+    pub fn is(&self, state: GraphProcessorValidateStepStates) -> bool {
+        self.machine.is(&state)
+    }
+
+    /// Returns retained bounded context for outcome/error inspection.
+    #[must_use]
+    pub fn context(&self) -> &GraphProcessorValidateStepContext {
+        self.machine.context()
+    }
+}
+
+/// Short actor alias for validation-phase callers.
+pub type ValidateProcessor = Processor;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid(_request: &ProcessorExecuteRequest, err: &mut i32) -> bool {
+        *err = 0;
+        true
+    }
+
+    fn rejected(_request: &ProcessorExecuteRequest, err: &mut i32) -> bool {
+        *err = 0;
+        false
+    }
+
+    fn failed(_request: &ProcessorExecuteRequest, err: &mut i32) -> bool {
+        *err = 17;
+        false
+    }
+
+    #[test]
+    fn validates_and_retains_done_outcome() {
+        let request = ProcessorExecuteRequest {
+            validate: Some(valid),
+            ..ProcessorExecuteRequest::default()
+        };
+        let mut actor = Processor::new();
+        assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
+        assert_eq!(actor.context().outcome(), PhaseOutcome::Done);
+        assert_eq!(actor.context().error(), ProcessorError::None);
+        assert!(actor.is(GraphProcessorValidateStepStates::Executed));
+    }
+
+    #[test]
+    fn missing_and_failed_callbacks_are_typed() {
+        let mut actor = Processor::new();
+        assert!(actor.process_event(ProcessorEventExecuteStep::default()));
+        assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
+        assert_eq!(actor.context().error(), ProcessorError::InvalidRequest);
+        assert!(actor.is(GraphProcessorValidateStepStates::ExecuteFailed));
+
+        let request = ProcessorExecuteRequest {
+            validate: Some(rejected),
+            ..ProcessorExecuteRequest::default()
+        };
+        let mut actor = Processor::new();
+        assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
+        assert_eq!(actor.context().error(), ProcessorError::KernelFailed);
+    }
+
+    #[test]
+    fn callback_error_and_unexpected_event_are_internal_boundaries() {
+        let request = ProcessorExecuteRequest {
+            validate: Some(failed),
+            ..ProcessorExecuteRequest::default()
+        };
+        let mut actor = Processor::new();
+        assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
+        assert_eq!(actor.context().error(), ProcessorError::Callback(17));
+
+        let mut actor = Processor::new();
+        assert!(actor.process_unexpected_event());
+        assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
+        assert_eq!(actor.context().error(), ProcessorError::InternalError);
+        assert!(actor.is(GraphProcessorValidateStepStates::UnexpectedEvent));
     }
 }

@@ -162,7 +162,7 @@ pub struct GraphProcessorBindStepContext {
     /// Copied request used by the completion phases.
     pub request: ExecuteRequest,
     /// Existing processor error entering this phase or the phase error set by actions.
-    pub error: ProcessorError,
+    pub err: ProcessorError,
     /// Retained bind callback result.
     pub phase_callback_ok: bool,
     /// Retained callback error channel.
@@ -174,7 +174,7 @@ pub struct GraphProcessorBindStepContext {
 impl GraphProcessorBindStepContext {
     fn set_event(&mut self, event: ProcessorEventExecuteStep) {
         self.request = event.request;
-        self.error = event.initial_error;
+        self.err = event.initial_error;
         self.phase_callback_ok = false;
         self.phase_callback_err = 0;
         self.bind_outcome = PhaseOutcome::Unknown;
@@ -182,7 +182,7 @@ impl GraphProcessorBindStepContext {
 
     fn mark_unexpected(&mut self) {
         self.bind_outcome = PhaseOutcome::Failed;
-        self.error = ProcessorError::InternalError;
+        self.err = ProcessorError::InternalError;
     }
 }
 
@@ -205,21 +205,21 @@ impl GraphProcessorBindStepStateMachineContext for GraphProcessorBindStepContext
     // Source mapping: bind_step/actions.hpp::mark_done.
     fn mark_done(&mut self) -> Result<(), ()> {
         self.bind_outcome = PhaseOutcome::Done;
-        self.error = ProcessorError::None;
+        self.err = ProcessorError::None;
         Ok(())
     }
 
     // Source mapping: bind_step/actions.hpp::mark_failed_callback_error.
     fn mark_failed_callback_error(&mut self) -> Result<(), ()> {
         self.bind_outcome = PhaseOutcome::Failed;
-        self.error = ProcessorError::from_callback_error(self.phase_callback_err);
+        self.err = ProcessorError::from_callback_error(self.phase_callback_err);
         Ok(())
     }
 
     // Source mapping: bind_step/actions.hpp::mark_failed_callback_without_error.
     fn mark_failed_callback_without_error(&mut self) -> Result<(), ()> {
         self.bind_outcome = PhaseOutcome::Failed;
-        self.error = ProcessorError::KernelFailed;
+        self.err = ProcessorError::KernelFailed;
         Ok(())
     }
 
@@ -232,7 +232,7 @@ impl GraphProcessorBindStepStateMachineContext for GraphProcessorBindStepContext
     // Source mapping: bind_step/actions.hpp::mark_failed_invalid_request.
     fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
         self.bind_outcome = PhaseOutcome::Failed;
-        self.error = ProcessorError::InvalidRequest;
+        self.err = ProcessorError::InvalidRequest;
         Ok(())
     }
 
@@ -260,17 +260,17 @@ impl GraphProcessorBindStepStateMachineContext for GraphProcessorBindStepContext
 
     // Source mapping: bind_step/guards.hpp::phase_missing_callback.
     fn phase_missing_callback(&self) -> Result<bool, ()> {
-        Ok(self.error == ProcessorError::None && self.request.bind_inputs.is_none())
+        Ok(self.err == ProcessorError::None && self.request.bind_inputs.is_none())
     }
 
     // Source mapping: bind_step/guards.hpp::phase_prefailed.
     fn phase_prefailed(&self) -> Result<bool, ()> {
-        Ok(self.error != ProcessorError::None)
+        Ok(self.err != ProcessorError::None)
     }
 
     // Source mapping: bind_step/guards.hpp::phase_request_callback.
     fn phase_request_callback(&self) -> Result<bool, ()> {
-        Ok(self.error == ProcessorError::None && self.request.bind_inputs.is_some())
+        Ok(self.err == ProcessorError::None && self.request.bind_inputs.is_some())
     }
 
     // Source mapping: bind_step/actions.hpp::run_callback.
@@ -368,7 +368,7 @@ mod tests {
             initial_error: ProcessorError::None,
         }));
         assert_eq!(actor.context().bind_outcome, PhaseOutcome::Done);
-        assert_eq!(actor.context().error, ProcessorError::None);
+        assert_eq!(actor.context().err, ProcessorError::None);
         assert!(actor.is(&GraphProcessorBindStepStates::Executed));
     }
 
@@ -380,14 +380,14 @@ mod tests {
             initial_error: ProcessorError::None,
         }));
         assert_eq!(actor.context().bind_outcome, PhaseOutcome::Failed);
-        assert_eq!(actor.context().error, ProcessorError::InternalError);
+        assert_eq!(actor.context().err, ProcessorError::InternalError);
 
         let mut actor = BindStep::new();
         assert!(actor.process_event(ProcessorEventExecuteStep {
             request: ExecuteRequest { bind_inputs: Some(fails_without_error), ..ExecuteRequest::default() },
             initial_error: ProcessorError::None,
         }));
-        assert_eq!(actor.context().error, ProcessorError::KernelFailed);
+        assert_eq!(actor.context().err, ProcessorError::KernelFailed);
     }
 
     #[test]
@@ -395,7 +395,7 @@ mod tests {
         let mut actor = BindStep::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::default()));
         assert_eq!(actor.context().bind_outcome, PhaseOutcome::Failed);
-        assert_eq!(actor.context().error, ProcessorError::InvalidRequest);
+        assert_eq!(actor.context().err, ProcessorError::InvalidRequest);
 
         let mut actor = BindStep::new();
         assert!(actor.process_event(ProcessorEventExecuteStep {
@@ -403,6 +403,6 @@ mod tests {
             initial_error: ProcessorError::InternalError,
         }));
         assert_eq!(actor.context().bind_outcome, PhaseOutcome::Failed);
-        assert_eq!(actor.context().error, ProcessorError::InternalError);
+        assert_eq!(actor.context().err, ProcessorError::InternalError);
     }
 }
