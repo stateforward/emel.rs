@@ -1,5 +1,8 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned reserve-validation pass actor.
+//!
+//! The request is copied into bounded scalar fields before synchronous dispatch.  Pointer-like
+//! C++ inputs are represented only by presence bits; this child never dereferences or retains
+//! caller-owned resources.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -16,9 +19,66 @@
 
 use sml::sml;
 
-// --- machine GraphAssemblerReserveValidatePass from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
+/// Outcome of a reserve-validation phase.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PassOutcome {
+    #[default]
+    Unknown = 0,
+    Done = 1,
+    Failed = 2,
+}
+
+/// Error values matching the assembler error contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AssemblerError {
+    #[default]
+    None = 0,
+    InvalidRequest = 1,
+    Capacity = 2,
+    Internal = 4,
+    Untracked = 8,
+}
+
+/// Bounded copy of the scalar reserve request fields used by source guards.
+///
+/// `has_model_topology` and `has_output_out` preserve the source pointer-presence checks without
+/// exposing raw pointers or retaining caller-owned objects.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReserveGraphRequest {
+    pub has_model_topology: bool,
+    pub has_output_out: bool,
+    pub max_node_count: u32,
+    pub max_tensor_count: u32,
+    pub bytes_per_tensor: u64,
+    pub workspace_capacity_bytes: u64,
+}
+
+impl ReserveGraphRequest {
+    /// Creates a bounded request from source-equivalent scalar values.
+    #[must_use]
+    pub const fn new(
+        has_model_topology: bool,
+        has_output_out: bool,
+        max_node_count: u32,
+        max_tensor_count: u32,
+        bytes_per_tensor: u64,
+        workspace_capacity_bytes: u64,
+    ) -> Self {
+        Self {
+            has_model_topology,
+            has_output_out,
+            max_node_count,
+            max_tensor_count,
+            bytes_per_tensor,
+            workspace_capacity_bytes,
+        }
+    }
+}
+
+/// Runtime event shell retained by the existing generated machine name.
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub struct AssemblerEventReserveGraph;
 
 sml! {
@@ -34,61 +94,152 @@ sml! {
     }
 }
 
-/// Context for `GraphAssemblerReserveValidatePass` (TODO: context.hpp / detail.hpp).
+/// Context for `GraphAssemblerReserveValidatePass` containing only bounded copied state.
 #[derive(Debug, Default)]
 pub struct GraphAssemblerReserveValidatePassContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    /// Copied request consumed by guards.
+    pub request: ReserveGraphRequest,
+    /// Validation result consumed by the parent assembler.
+    pub validate_outcome: PassOutcome,
+    /// Error result consumed by the parent assembler.
+    pub err: AssemblerError,
+}
+
+impl GraphAssemblerReserveValidatePassContext {
+    /// Copies a request and resets transient phase state.
+    pub fn set_request(&mut self, request: ReserveGraphRequest) {
+        self.request = request;
+        self.validate_outcome = PassOutcome::Unknown;
+        self.err = AssemblerError::None;
+    }
+
+    /// Returns the retained phase outcome.
+    #[must_use]
+    pub const fn outcome(&self) -> PassOutcome {
+        self.validate_outcome
+    }
+
+    /// Returns the retained assembler error.
+    #[must_use]
+    pub const fn error(&self) -> AssemblerError {
+        self.err
+    }
 }
 
 impl GraphAssemblerReserveValidatePassStateMachineContext
     for GraphAssemblerReserveValidatePassContext
 {
     fn mark_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp"
-        )
+        self.validate_outcome = PassOutcome::Done;
+        self.err = AssemblerError::None;
+        Ok(())
     }
+
     fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp::mark_failed_invalid_request
-        todo!(
-            "TODO: port action `mark_failed_invalid_request` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp"
-        )
+        self.validate_outcome = PassOutcome::Failed;
+        self.err = AssemblerError::InvalidRequest;
+        Ok(())
     }
+
     fn on_unexpected_from_assemble_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp"
-        )
+        self.validate_outcome = PassOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
+
     fn on_unexpected_from_assembled(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp"
-        )
+        self.validate_outcome = PassOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
+
     fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp"
-        )
+        self.validate_outcome = PassOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
+
     fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/actions.hpp"
-        )
+        self.validate_outcome = PassOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
+
     fn phase_done(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/guards.hpp::phase_done
-        todo!(
-            "TODO: port guard `phase_done` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/guards.hpp"
-        )
+        Ok(self.err == AssemblerError::None
+            && self.request.has_model_topology
+            && self.request.has_output_out
+            && self.request.max_node_count != 0
+            && self.request.max_tensor_count != 0
+            && self.request.bytes_per_tensor != 0
+            && self.request.workspace_capacity_bytes != 0)
     }
+
     fn phase_invalid_request(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/guards.hpp::phase_invalid_request
-        todo!(
-            "TODO: port guard `phase_invalid_request` from emel.cpp/src/emel/graph/assembler/reserve_validate_pass/guards.hpp"
-        )
+        Ok(self.err == AssemblerError::None
+            && (!self.request.has_model_topology
+                || !self.request.has_output_out
+                || self.request.max_node_count == 0
+                || self.request.max_tensor_count == 0
+                || self.request.bytes_per_tensor == 0
+                || self.request.workspace_capacity_bytes == 0))
+    }
+}
+
+/// Single-writer synchronous reserve-validation actor.
+pub struct GraphAssemblerReserveValidatePass {
+    machine: GraphAssemblerReserveValidatePassStateMachine<
+        GraphAssemblerReserveValidatePassContext,
+    >,
+}
+
+impl Default for GraphAssemblerReserveValidatePass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphAssemblerReserveValidatePass {
+    /// Constructs an actor in generated `deciding` state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: GraphAssemblerReserveValidatePassStateMachine::new(
+                GraphAssemblerReserveValidatePassContext::default(),
+            ),
+        }
+    }
+
+    /// Copies a request and dispatches its completion synchronously.
+    pub fn process_event(&mut self, request: ReserveGraphRequest) -> bool {
+        self.machine.context_mut().set_request(request);
+        self.machine
+            .process_event(GraphAssemblerReserveValidatePassEvents::AssemblerEventReserveGraph)
+            .is_ok()
+    }
+
+    /// Dispatches an explicit unexpected event synchronously.
+    pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine
+            .process_event(GraphAssemblerReserveValidatePassEvents::UnexpectedEvent)
+            .is_ok()
+    }
+
+    /// Returns generated state inspection.
+    #[must_use]
+    pub fn state(&self) -> &GraphAssemblerReserveValidatePassStates {
+        self.machine.state()
+    }
+
+    /// Tests generated state identity.
+    #[must_use]
+    pub fn is(&self, state: GraphAssemblerReserveValidatePassStates) -> bool {
+        self.machine.is(state)
+    }
+
+    /// Returns retained bounded context.
+    #[must_use]
+    pub fn context(&self) -> &GraphAssemblerReserveValidatePassContext {
+        self.machine.context()
     }
 }
