@@ -1,7 +1,7 @@
 //! Feature-gated public entry point for the emel inference stack.
 
 #![forbid(unsafe_code)]
-#![allow(dead_code)]
+#![allow(dead_code, unused_crate_dependencies)]
 
 pub use emel_core as core;
 pub use emel_grammar as grammar;
@@ -32,5 +32,5 @@ pub use emel_text as text;
 #[cfg(feature = "token")]
 pub use emel_token as token;
 
-/// C++ `emel/sm.hpp` infrastructure scaffold (not a domain SM table).
-pub(crate) mod sm;
+/// Safe state-machine scheduling and RTC infrastructure.
+pub mod sm;
