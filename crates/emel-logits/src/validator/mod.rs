@@ -1,2 +1,4 @@
-//! Module for `validator` state machines.
-pub mod sm;
+//! Public, synchronous logits candidate validation.
+mod sm;
+
+pub use sm::{Build, BuildResult, Validator, ValidatorError};

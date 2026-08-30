@@ -12,4 +12,4 @@ pub struct Logit {
     pub value: f32,
 }
 pub(crate) mod sampler;
-pub(crate) mod validator;
+pub mod validator;
