@@ -232,11 +232,17 @@ impl EncodeContext {
 pub struct TextEncodersBpeContext {
     vocabulary_identity: usize,
     tables_ready: bool,
+    unexpected: bool,
     symbols: [Symbol; MAX_ENCODE_SYMBOLS],
 }
-impl Default for TextEncodersBpeContext { fn default() -> Self { Self { vocabulary_identity: 0, tables_ready: false, symbols: [Symbol::default(); MAX_ENCODE_SYMBOLS] } } }
+impl Default for TextEncodersBpeContext {
+    fn default() -> Self {
+        Self { vocabulary_identity: 0, tables_ready: false, unexpected: false, symbols: [Symbol::default(); MAX_ENCODE_SYMBOLS] }
+    }
+}
 impl TextEncodersBpeContext {
     fn clear(&mut self, identity: usize) { self.vocabulary_identity = identity; self.tables_ready = false; }
+    fn mark_unexpected(&mut self) { self.unexpected = true; }
     fn lookup(vocabulary: &dyn VocabularyView, needle: &[u8]) -> Option<i32> {
         (0..vocabulary.token_count().min(MAX_VOCAB_ENTRIES)).find_map(|i| vocabulary.token(i).filter(|token| *token == needle).and_then(|_| i32::try_from(i).ok()))
     }
@@ -309,7 +315,7 @@ impl TextEncodersBpeContext {
 }
 
 impl TextEncodersBpeStateMachineContext for TextEncodersBpeContext {
-    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reset(); event.encode_result_error.set(EncoderError::None); event.encode_result_token_count.set(0); Ok(()) }
+    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reset(); event.encode_result_error.set(EncoderError::None); event.encode_result_token_count.set(0); self.unexpected = false; Ok(()) }
     fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.begin_encode(event)?; self.clear(core::ptr::from_ref(event.request.vocabulary) as *const () as usize); Ok(()) }
     fn direct_word_token_available(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(Self::lookup(event.request.vocabulary, event.request.text).is_some()) }
     fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::Backend) }
@@ -325,11 +331,11 @@ impl TextEncodersBpeStateMachineContext for TextEncodersBpeContext {
     fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
     fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
     fn merge_symbol_capacity_exceeded(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.len() > MAX_ENCODE_SYMBOLS) }
-    fn merge_symbol_capacity_within_limit(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.len() <= MAX_ENCODE_SYMBOLS) }
-    fn not_preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.preprocessed) }
-    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::Unexpected); Ok(()) }
-    fn on_unexpected_events_encoding_done(&mut self, _: &EventsEncodingDone) -> Result<(), ()> { Ok(()) }
-    fn on_unexpected_events_encoding_error(&mut self, _: &EventsEncodingError) -> Result<(), ()> { Ok(()) }
+    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
+    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::Unexpected); self.mark_unexpected(); Ok(()) }
+    fn on_unexpected_events_encoding_done(&mut self, _: &EventsEncodingDone) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
+    fn on_unexpected_events_encoding_error(&mut self, _: &EventsEncodingError) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
+    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
     fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { Ok(()) }
     fn prepare_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let vocabulary = event.request.vocabulary; if vocabulary.token_count() > MAX_VOCAB_ENTRIES || vocabulary.merge_count() > MAX_VOCAB_MERGES { event.context.borrow_mut().error = EncoderError::ModelInvalid; } else { self.tables_ready = true; event.context.borrow_mut().error = EncoderError::None; } Ok(()) }
     fn preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.preprocessed) }
@@ -363,12 +369,26 @@ impl<'event> TextEncodersBpeActor<'event> {
     pub fn process_event(&mut self, request: EncodeRequest<'event>) -> Result<EncodingDone, EncodingError> {
         let result = RefCell::new(EncodeContext::default());
         let runtime = RuntimeEncodeRuntime { request, context: &result, encode_result_error: Cell::new(EncoderError::None), encode_result_token_count: Cell::new(0) };
-        if self.machine.process_event(TextEncodersBpeEvents::RuntimeEncodeRuntime(runtime)).is_err() { result.borrow_mut().reject(EncoderError::Unexpected); self.machine.set_state(TextEncodersBpeStates::Unexpected); }
+        if self.machine.process_event(TextEncodersBpeEvents::RuntimeEncodeRuntime(runtime)).is_err() {
+            result.borrow_mut().reject(EncoderError::Unexpected);
+            self.machine.set_state(TextEncodersBpeStates::Unexpected);
+        }
         let context = *result.borrow();
-        if context.unexpected || self.machine.context().vocabulary_identity == usize::MAX { let error = EncodingError { error: EncoderError::Unexpected }; if let Some(callback) = request.dispatch_error { let _ = callback(error); } return Err(error); }
-        if context.error == EncoderError::None { let done = EncodingDone { token_count: context.token_count }; if let Some(callback) = request.dispatch_done { let _ = callback(done); } Ok(done) } else { let error = EncodingError { error: context.error }; if let Some(callback) = request.dispatch_error { let _ = callback(error); } Err(error) }
+        if context.unexpected || self.machine.context().unexpected {
+            let error = EncodingError { error: EncoderError::Unexpected };
+            if let Some(callback) = request.dispatch_error { let _ = callback(error); }
+            return Err(error);
+        }
+        if context.error == EncoderError::None {
+            let done = EncodingDone { token_count: context.token_count };
+            if let Some(callback) = request.dispatch_done { let _ = callback(done); }
+            Ok(done)
+        } else {
+            let error = EncodingError { error: context.error };
+            if let Some(callback) = request.dispatch_error { let _ = callback(error); }
+            Err(error)
+        }
     }
-    pub fn process_unexpected(&mut self) -> bool { self.machine.set_state(TextEncodersBpeStates::Unexpected); false }
     #[must_use] pub fn state(&self) -> &TextEncodersBpeStates { self.machine.state() }
     #[must_use] pub fn is(&self, state: &TextEncodersBpeStates) -> bool { self.machine.is(state) }
     #[must_use] pub fn context(&self) -> &TextEncodersBpeContext { self.machine.context() }
