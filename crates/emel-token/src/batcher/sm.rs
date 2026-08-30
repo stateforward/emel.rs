@@ -347,8 +347,41 @@ sml! {
         "ready"_s <= "done_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "ready"_s <= "error_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "ready"_s <= "request_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "errored"_s <= "errored"_s + UnexpectedProbe,
         "ready"_s <= "ready"_s + unexpected<_> / unexpected,
+        "ready"_s <= "request_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "outputs_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "counts_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "capacity_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "vocab_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "seq_payload_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "seq_masks"_s + unexpected<_> / unexpected,
+        "ready"_s <= "seq_primary"_s + unexpected<_> / unexpected,
+        "ready"_s <= "seq_default"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_stride_three"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_stride_one"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_seed_probe"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_unseed_probe"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_seeded"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_unseeded"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_publish"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_mask_publish"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_count_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_count_publish"_s + unexpected<_> / unexpected,
+        "ready"_s <= "output_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "output_all"_s + unexpected<_> / unexpected,
+        "ready"_s <= "output_copy"_s + unexpected<_> / unexpected,
+        "ready"_s <= "output_last"_s + unexpected<_> / unexpected,
+        "ready"_s <= "count_outputs"_s + unexpected<_> / unexpected,
+        "ready"_s <= "outputs_total_publish"_s + unexpected<_> / unexpected,
+        "ready"_s <= "single_output_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "single_output_probe"_s + unexpected<_> / unexpected,
+        "ready"_s <= "continuity_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "continuity_probe"_s + unexpected<_> / unexpected,
+        "ready"_s <= "done_callback_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "error_callback_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "done"_s + unexpected<_> / unexpected,
+        "ready"_s <= "errored"_s + unexpected<_> / unexpected,
     }
 }
 
@@ -430,16 +463,13 @@ impl TokenBatcherStateMachine<Context> {
 
     pub(super) fn dispatch_unexpected(&mut self) -> Result<(), BatchError> {
         self.context_mut().unexpected = false;
-        if self
-            .process_event(TokenBatcherEvents::UnexpectedProbe)
-            .is_err()
-        {
-            return Err(BatchError::Internal);
+        if self.is_ready() {
+            self.context_mut().unexpected = true;
         }
         if self.context().unexpected {
             Err(BatchError::UnexpectedEvent)
         } else {
-            Ok(())
+            Err(BatchError::UnexpectedEvent)
         }
     }
 
@@ -478,7 +508,8 @@ impl TokenBatcherStateMachineContext for Context {
         let words = effective_mask_words(&event.request);
         let mask_n = n.checked_mul(words).unwrap_or(usize::MAX);
         let pos_n = positions_capacity(&event.request);
-        Ok(event.outputs.seq_primary_ids.len() >= n
+        Ok(position_stride(&event.request) >= 0
+            && event.outputs.seq_primary_ids.len() >= n
             && event.outputs.seq_masks.len() >= mask_n
             && event.outputs.positions.len() >= pos_n
             && event.outputs.output_mask.len() >= n)
@@ -507,6 +538,10 @@ impl TokenBatcherStateMachineContext for Context {
     fn seq_default_mode(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(!has_masks(&event.request) && !has_primary(&event.request))
     }
+    fn normalize_default(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        normalize_default(event);
+        Ok(())
+    }
     fn normalize_masks(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         normalize_masks(event);
         Ok(())
@@ -515,12 +550,23 @@ impl TokenBatcherStateMachineContext for Context {
         normalize_primary(event);
         Ok(())
     }
-    fn normalize_default(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        normalize_default(event);
-        Ok(())
-    }
     fn stride_three(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(position_stride(&event.request) == 3)
+    }
+    fn probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::None)
+    }
+    fn probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::Backend)
+    }
+    fn probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::InvalidRequest)
+    }
+    fn generation_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::None)
+    }
+    fn generation_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::InvalidRequest)
     }
     fn stride_one(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(position_stride(&event.request) == 1)
@@ -546,21 +592,6 @@ impl TokenBatcherStateMachineContext for Context {
     fn probe_unseeded(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         probe_unseeded(event);
         Ok(())
-    }
-    fn probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::None)
-    }
-    fn probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::Backend)
-    }
-    fn probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::InvalidRequest)
-    }
-    fn generation_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::None)
-    }
-    fn generation_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::InvalidRequest)
     }
     fn generate_seeded(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         generate_seeded(event);
@@ -744,8 +775,14 @@ impl TokenBatcherStateMachineContext for Context {
 }
 
 fn has_masks(r: &RequestView<'_>) -> bool {
-    r.seq_masks
-        .is_some_and(|values| values.len() >= r.token_ids.len())
+    r.seq_masks.is_some_and(|values| {
+        r.seq_mask_words > 0
+            && r.seq_mask_words <= SEQ_WORDS
+            && r.token_ids
+                .len()
+                .checked_mul(r.seq_mask_words)
+                .is_some_and(|required| values.len() >= required)
+    })
 }
 fn has_primary(r: &RequestView<'_>) -> bool {
     r.seq_primary_ids
@@ -788,10 +825,13 @@ fn mask_has(mask: &[u64], id: i32) -> bool {
         .ok()
         .is_some_and(|id| id / 64 < mask.len() && mask[id / 64] & (1u64 << (id % 64)) != 0)
 }
+fn explicit_masks_malformed(r: &RequestView<'_>) -> bool {
+    r.seq_masks.is_some_and(|values| {
+        values.len() >= r.token_ids.len() && (r.seq_mask_words == 0 || r.seq_mask_words > SEQ_WORDS)
+    })
+}
 fn seq_payload_valid(r: &RequestView<'_>) -> bool {
-    if (has_masks(r) && (r.seq_mask_words == 0 || r.seq_mask_words > SEQ_WORDS))
-        || position_stride(r) < 0
-    {
+    if explicit_masks_malformed(r) || position_stride(r) < 0 {
         return false;
     }
     let masks = has_masks(r);
@@ -888,11 +928,8 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
                 s.next_pos[id] = v;
                 s.seed_pos[id] = v;
             }
-            Err(PositionSeedError::Backend) => {
+            Err(PositionSeedError::Backend) | Err(PositionSeedError::InvalidRequest) => {
                 backend_error = true;
-            }
-            Err(PositionSeedError::InvalidRequest) => {
-                invalid = true;
             }
         }
     }
