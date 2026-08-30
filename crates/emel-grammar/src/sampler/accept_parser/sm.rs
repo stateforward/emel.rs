@@ -1,5 +1,8 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned, allocation-free GBNF sampler accept parser.
+//!
+//! This child machine mirrors the pinned
+//! `emel.cpp/src/emel/gbnf/sampler/accept_parser/{sm,events,guards,actions}.hpp`
+//! contract while keeping its event and result data bounded and owned.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -11,19 +14,95 @@
     clippy::missing_const_for_fn,
     dead_code,
     unused_imports,
-    missing_docs
+    missing_docs,
+    private_interfaces
 )]
 
 use sml::sml;
 
-// --- machine GbnfSamplerAcceptParser from emel.cpp/src/emel/gbnf/sampler/accept_parser/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct SamplerEventSampleRuntime;
+/// Sampler errors relevant to the accept-parser boundary.
+///
+/// The discriminants mirror `sampler::error` in the pinned source.  The
+/// parser itself turns every non-`None` event error into `ParseFailed`, as
+/// `actions.hpp::dispatch_parse_failed` does.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AcceptParserError {
+    /// No error was reported by the preceding sampler stage.
+    #[default]
+    None = 0,
+    /// The preceding sampler stage failed to parse its input.
+    ParseFailed = 1,
+    /// An event was delivered outside the supported machine contract.
+    InternalError = 2,
+    /// The caller supplied an invalid request.
+    InvalidRequest = 4,
+}
 
+/// Result values from the pinned accept-parser `accept_result` enum.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AcceptResult {
+    /// No acceptance decision has been produced.
+    #[default]
+    Unknown = 0,
+    /// The token ID is within the grammar's bounded rule/token range.
+    Accepted = 1,
+    /// The token ID is outside that range.
+    Rejected = 2,
+}
+
+/// Copied, bounded input for one accept-parser dispatch.
+///
+/// This is the relevant projection of the pinned `sample_runtime` event:
+/// `grammar.rule_count`, `ctx.current_token_id`, and `ctx.err`.  It contains
+/// no references or heap-backed payloads, so dispatch remains synchronous and
+/// allocation-free.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AcceptInput {
+    /// Number of grammar rules available for token acceptance.
+    pub grammar_rule_count: u32,
+    /// Candidate token ID, or a negative value when no token was selected.
+    pub current_token_id: i32,
+    /// Error carried into this parser from the preceding sampler stage.
+    pub error: AcceptParserError,
+}
+
+impl AcceptInput {
+    /// Creates an error-free accept/reject input.
+    #[must_use]
+    pub const fn new(grammar_rule_count: u32, current_token_id: i32) -> Self {
+        Self { grammar_rule_count, current_token_id, error: AcceptParserError::None }
+    }
+
+    /// Creates an input carrying a preceding sampler error.
+    #[must_use]
+    pub const fn failed(error: AcceptParserError) -> Self {
+        Self { grammar_rule_count: 0, current_token_id: -1, error }
+    }
+
+    /// Creates an explicitly invalid request input.
+    #[must_use]
+    pub const fn invalid() -> Self { Self::failed(AcceptParserError::InvalidRequest) }
+}
+
+/// Copied runtime event corresponding to `sampler::event::sample_runtime`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SamplerEventSampleRuntime {
+    /// Bounded input copied into the actor before dispatch.
+    pub input: AcceptInput,
+}
+
+impl From<AcceptInput> for SamplerEventSampleRuntime {
+    fn from(input: AcceptInput) -> Self { Self { input } }
+}
+
+// Source mapping: accept_parser/sm.hpp's deciding -> parsed, deciding ->
+// parse_failed, terminal states, and all three explicit unexpected-event rows.
 sml! {
     GbnfSamplerAcceptParser {
-        "parsed"_s <= *"deciding"_s + completion<SamplerEventSampleRuntime> [token_accepted_by_grammar] / consume_accepted,
+        *"deciding"_s + event<SamplerEventSampleRuntime>,
+        "parsed"_s <= "deciding"_s + completion<SamplerEventSampleRuntime> [token_accepted_by_grammar] / consume_accepted,
         "parsed"_s <= "deciding"_s + completion<SamplerEventSampleRuntime> [token_rejected_by_grammar] / consume_rejected,
         "parse_failed"_s <= "deciding"_s + completion<SamplerEventSampleRuntime> [parse_failed] / dispatch_parse_failed,
         "parse_failed"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
@@ -34,65 +113,199 @@ sml! {
     }
 }
 
-/// Context for `GbnfSamplerAcceptParser` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
+/// Context retained by the generated state machine.
+#[derive(Clone, Copy, Debug)]
 pub struct GbnfSamplerAcceptParserContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    /// Last copied grammar rule count.
+    pub grammar_rule_count: u32,
+    /// Last copied candidate token ID.
+    pub current_token_id: i32,
+    /// Error output corresponding to `sample_ctx::err`.
+    pub error: AcceptParserError,
+    /// Acceptance output corresponding to `sample_ctx::accept_result`.
+    pub accept_result: AcceptResult,
+}
+
+impl Default for GbnfSamplerAcceptParserContext {
+    fn default() -> Self {
+        Self {
+            grammar_rule_count: 0,
+            current_token_id: -1,
+            error: AcceptParserError::None,
+            accept_result: AcceptResult::Unknown,
+        }
+    }
+}
+
+impl GbnfSamplerAcceptParserContext {
+    fn set_input(&mut self, input: AcceptInput) {
+        self.grammar_rule_count = input.grammar_rule_count;
+        self.current_token_id = input.current_token_id;
+        self.error = input.error;
+        self.accept_result = AcceptResult::Unknown;
+    }
+
+    fn token_accepted(&self, input: &SamplerEventSampleRuntime) -> bool {
+        input.input.error == AcceptParserError::None
+            && input.input.current_token_id >= 0
+            && (input.input.current_token_id as u32) < input.input.grammar_rule_count
+    }
+
+    fn unexpected(&mut self) -> Result<(), ()> {
+        self.error = AcceptParserError::InternalError;
+        self.accept_result = AcceptResult::Unknown;
+        Ok(())
+    }
 }
 
 impl GbnfSamplerAcceptParserStateMachineContext for GbnfSamplerAcceptParserContext {
-    fn consume_accepted(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp::consume_accepted
-        todo!(
-            "TODO: port action `consume_accepted` from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp"
-        )
+    // Source mapping: actions.hpp::consume_accepted.
+    fn consume_accepted(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+        self.error = AcceptParserError::None;
+        self.accept_result = AcceptResult::Accepted;
+        Ok(())
     }
-    fn consume_rejected(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp::consume_rejected
-        todo!(
-            "TODO: port action `consume_rejected` from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp"
-        )
+
+    // Source mapping: actions.hpp::consume_rejected.
+    fn consume_rejected(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+        self.error = AcceptParserError::None;
+        self.accept_result = AcceptResult::Rejected;
+        Ok(())
     }
-    fn dispatch_parse_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp::dispatch_parse_failed
-        todo!(
-            "TODO: port action `dispatch_parse_failed` from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp"
-        )
+
+    // Source mapping: actions.hpp::dispatch_parse_failed.
+    fn dispatch_parse_failed(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+        self.error = AcceptParserError::ParseFailed;
+        self.accept_result = AcceptResult::Unknown;
+        Ok(())
     }
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp"
-        )
+
+    // Source mapping: actions.hpp::on_unexpected, origin-explicit per row.
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
+
+    // Source mapping: guards.hpp::parse_failed.
+    fn parse_failed(&self, event_data: &SamplerEventSampleRuntime) -> Result<bool, ()> {
+        Ok(event_data.input.error != AcceptParserError::None)
     }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp"
-        )
+
+    // Source mapping: guards.hpp::token_accepted_by_grammar.
+    fn token_accepted_by_grammar(
+        &self,
+        event_data: &SamplerEventSampleRuntime,
+    ) -> Result<bool, ()> {
+        Ok(self.token_accepted(event_data))
     }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/sampler/accept_parser/actions.hpp"
-        )
+
+    // Source mapping: guards.hpp::token_rejected_by_grammar.
+    fn token_rejected_by_grammar(
+        &self,
+        event_data: &SamplerEventSampleRuntime,
+    ) -> Result<bool, ()> {
+        Ok(event_data.input.error == AcceptParserError::None && !self.token_accepted(event_data))
     }
-    fn parse_failed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/guards.hpp::parse_failed
-        todo!(
-            "TODO: port guard `parse_failed` from emel.cpp/src/emel/gbnf/sampler/accept_parser/guards.hpp"
-        )
+}
+
+/// Synchronous bounded actor around the generated accept-parser machine.
+#[derive(Debug)]
+pub struct GbnfSamplerAcceptParserActor {
+    machine: GbnfSamplerAcceptParserStateMachine<GbnfSamplerAcceptParserContext>,
+}
+
+impl Default for GbnfSamplerAcceptParserActor {
+    fn default() -> Self { Self::new() }
+}
+
+impl GbnfSamplerAcceptParserActor {
+    /// Creates an actor in generated `deciding` state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { machine: GbnfSamplerAcceptParserStateMachine::new(Default::default()) }
     }
-    fn token_accepted_by_grammar(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/guards.hpp::token_accepted_by_grammar
-        todo!(
-            "TODO: port guard `token_accepted_by_grammar` from emel.cpp/src/emel/gbnf/sampler/accept_parser/guards.hpp"
-        )
+
+    /// Dispatches one copied runtime event to completion.
+    pub fn process_event(&mut self, input: AcceptInput) -> Result<AcceptResult, AcceptParserError> {
+        self.machine.context_mut().set_input(input);
+        if self
+            .machine
+            .process_event(GbnfSamplerAcceptParserEvents::SamplerEventSampleRuntime(input.into()))
+            .is_err()
+        {
+            self.machine.context_mut().error = AcceptParserError::InternalError;
+            self.machine.context_mut().accept_result = AcceptResult::Unknown;
+        }
+        self.outcome()
     }
-    fn token_rejected_by_grammar(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/sampler/accept_parser/guards.hpp::token_rejected_by_grammar
-        todo!(
-            "TODO: port guard `token_rejected_by_grammar` from emel.cpp/src/emel/gbnf/sampler/accept_parser/guards.hpp"
-        )
+
+    /// Dispatches an explicit unexpected event.
+    pub fn process_unexpected(&mut self) -> Result<AcceptResult, AcceptParserError> {
+        if self.machine.process_event(GbnfSamplerAcceptParserEvents::UnexpectedEvent).is_err() {
+            self.machine.context_mut().error = AcceptParserError::InternalError;
+            self.machine.context_mut().accept_result = AcceptResult::Unknown;
+        }
+        self.outcome()
+    }
+
+    fn outcome(&self) -> Result<AcceptResult, AcceptParserError> {
+        let context = self.machine.context();
+        match context.error {
+            AcceptParserError::None => Ok(context.accept_result),
+            error => Err(error),
+        }
+    }
+
+    /// Returns generated state inspection data.
+    #[must_use]
+    pub fn state(&self) -> &GbnfSamplerAcceptParserStates { self.machine.state() }
+
+    /// Reports whether the generated machine is in `state`.
+    #[must_use]
+    pub fn is(&self, state: &GbnfSamplerAcceptParserStates) -> bool { self.machine.is(state) }
+
+    /// Returns the actor context for result inspection.
+    #[must_use]
+    pub fn context(&self) -> &GbnfSamplerAcceptParserContext { self.machine.context() }
+}
+
+/// Short actor alias for accept-parser callers.
+pub type AcceptParser = GbnfSamplerAcceptParserActor;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_token_in_bounded_grammar_range() {
+        let mut parser = AcceptParser::new();
+        assert_eq!(parser.process_event(AcceptInput::new(4, 3)), Ok(AcceptResult::Accepted));
+        assert!(parser.is(&GbnfSamplerAcceptParserStates::Parsed));
+        assert_eq!(parser.context().accept_result, AcceptResult::Accepted);
+    }
+
+    #[test]
+    fn rejects_negative_and_out_of_range_token_ids() {
+        let mut parser = AcceptParser::new();
+        assert_eq!(parser.process_event(AcceptInput::new(4, -1)), Ok(AcceptResult::Rejected));
+        let mut parser = AcceptParser::new();
+        assert_eq!(parser.process_event(AcceptInput::new(4, 4)), Ok(AcceptResult::Rejected));
+        assert!(parser.is(&GbnfSamplerAcceptParserStates::Parsed));
+    }
+
+    #[test]
+    fn failed_and_invalid_inputs_are_parse_failed() {
+        for input in [AcceptInput::failed(AcceptParserError::ParseFailed), AcceptInput::invalid()] {
+            let mut parser = AcceptParser::new();
+            assert_eq!(parser.process_event(input), Err(AcceptParserError::ParseFailed));
+            assert!(parser.is(&GbnfSamplerAcceptParserStates::ParseFailed));
+            assert_eq!(parser.context().accept_result, AcceptResult::Unknown);
+        }
+    }
+
+    #[test]
+    fn explicit_unexpected_event_is_internal_error() {
+        let mut parser = AcceptParser::new();
+        assert_eq!(parser.process_unexpected(), Err(AcceptParserError::InternalError));
+        assert!(parser.is(&GbnfSamplerAcceptParserStates::ParseFailed));
     }
 }
