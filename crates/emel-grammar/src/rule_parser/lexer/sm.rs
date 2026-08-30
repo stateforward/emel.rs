@@ -1,371 +1,79 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned synchronous GBNF lexer actor.
 
-#![allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
+use super::{Cursor, Error, EventScanNext, NextDone, NextError, Token, TokenKind};
 
-use sml::sml;
+/// States exposed by the lexer actor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GbnfRuleParserLexerStates { Initialized, Scanning }
 
-// --- machine GbnfRuleParserLexer from emel.cpp/src/emel/gbnf/rule_parser/lexer/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventScanNext;
-
-sml! {
-    GbnfRuleParserLexer {
-        "initialized"_s <= *"initialized"_s + event<EventScanNext> [invalid_next] / reject_invalid_next_from_initialized,
-        "initialized"_s <= "initialized"_s + event<EventScanNext> [invalid_cursor_position] / reject_invalid_cursor_from_initialized,
-        "scan_ready"_s <= "initialized"_s + event<EventScanNext> [valid_cursor_position] / prepare_scan_from_initialized,
-        "scanning"_s <= "scanning"_s + event<EventScanNext> [invalid_next] / reject_invalid_next_from_scanning,
-        "scanning"_s <= "scanning"_s + event<EventScanNext> [invalid_cursor_position] / reject_invalid_cursor_from_scanning,
-        "scan_ready"_s <= "scanning"_s + event<EventScanNext> [valid_cursor_position] / prepare_scan_from_scanning,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [at_eof] / emit_eof,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [layout_exhausted] / emit_layout_exhausted_unknown,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_newline_crlf] / emit_newline_crlf_token,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_newline_single] / emit_newline_single_token,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_definition_operator] / emit_definition_operator,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_alternation] / emit_alternation,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_dot] / emit_dot,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_open_group] / emit_open_group,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_close_group] / emit_close_group,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_quantifier] / emit_quantifier,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_string_literal] / emit_string_literal,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_character_class] / emit_character_class,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_braced_quantifier] / emit_braced_quantifier,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [parsed_rule_reference_negated_valid] / emit_rule_reference_negated,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [parsed_rule_reference_negated_invalid] / emit_unknown_from_scan_ready,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [parsed_rule_reference_plain_valid] / emit_rule_reference_plain,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [parsed_rule_reference_plain_invalid] / emit_unknown_from_scan_ready,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> [starts_identifier] / emit_identifier,
-        "scanning"_s <= "scan_ready"_s + completion<EventScanNext> / emit_unknown_from_scan_ready,
-        "initialized"_s <= "initialized"_s + unexpected_event<_> [unexpected_has_error_callback] / dispatch_unexpected_error_from_initialized,
-        "initialized"_s <= "initialized"_s + unexpected_event<_> / ignore_unexpected_from_initialized,
-        "scanning"_s <= "scanning"_s + unexpected_event<_> [unexpected_has_error_callback] / dispatch_unexpected_error_from_scanning,
-        "scanning"_s <= "scanning"_s + unexpected_event<_> / ignore_unexpected_from_scanning,
-        "scan_ready"_s <= "scan_ready"_s + unexpected_event<_> [unexpected_has_error_callback] / dispatch_unexpected_error_from_scan_ready,
-        "scan_ready"_s <= "scan_ready"_s + unexpected_event<_> / ignore_unexpected_from_scan_ready,
-    }
-}
-
-/// Context for `GbnfRuleParserLexer` (TODO: context.hpp / detail.hpp).
+/// Run-to-completion lexer actor.
 #[derive(Debug, Default)]
-pub struct GbnfRuleParserLexerContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+pub struct GbnfRuleParserLexerStateMachine { state: GbnfRuleParserLexerStates, context: GbnfRuleParserLexerContext }
+
+/// Concise actor alias.
+pub type GbnfRuleParserLexer = GbnfRuleParserLexerStateMachine;
+
+impl Default for GbnfRuleParserLexerStates { fn default() -> Self { Self::Initialized } }
+impl GbnfRuleParserLexerStateMachine {
+    #[must_use] pub const fn new(context: GbnfRuleParserLexerContext) -> Self { Self { state: GbnfRuleParserLexerStates::Initialized, context } }
+    #[must_use] pub const fn state(&self) -> GbnfRuleParserLexerStates { self.state }
+    #[must_use] pub fn is(&self, state: GbnfRuleParserLexerStates) -> bool { self.state == state }
+    pub fn process_event<'input, 'callback>(&mut self, event: EventScanNext<'input, 'callback>) -> bool {
+        if event.on_done.is_none() || event.on_error.is_none() { emit_error(event.on_error, Error::InvalidRequest); return true; }
+        if event.cursor.offset as usize > event.cursor.input.len() { emit_error(event.on_error, Error::InvalidRequest); return true; }
+        self.state = GbnfRuleParserLexerStates::Scanning;
+        self.context.scan(event);
+        true
+    }
+    pub fn process_unexpected_event<'callback>(&mut self, on_error: Option<&'callback mut super::ErrorCallback<'callback>>) -> bool {
+        if let Some(callback) = on_error { callback(NextError { err: Error::InternalError }); }
+        true
+    }
 }
 
-impl GbnfRuleParserLexerStateMachineContext for GbnfRuleParserLexerContext {
-    fn at_eof(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::at_eof
-        todo!("TODO: port guard `at_eof` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp")
+#[derive(Debug, Default)]
+pub struct GbnfRuleParserLexerContext { start: usize, has_input: bool, first_char: u8 }
+
+impl GbnfRuleParserLexerContext {
+    fn scan<'input, 'callback>(&mut self, event: EventScanNext<'input, 'callback>) {
+        let input = event.cursor.input.as_bytes();
+        self.start = skip_layout(input, event.cursor.offset as usize);
+        self.has_input = self.start < input.len();
+        self.first_char = input.get(self.start).copied().unwrap_or_default();
+        if !self.has_input {
+            if self.start == event.cursor.offset as usize { emit_done(event.on_done, NextDone { token: empty_token(event.cursor.input), has_token: false, next_cursor: event.cursor }); }
+            else { emit_token(event.on_done, event.cursor, empty_token(event.cursor.input), self.start); }
+            return;
+        }
+        let (kind, end) = self.classify(input);
+        let end = valid_boundary(event.cursor.input, self.start, end.min(input.len()).max(self.start + 1));
+        let token = Token { kind, text: &event.cursor.input[self.start..end], start: self.start as u32, end: end as u32 };
+        emit_token(event.on_done, event.cursor, token, end);
     }
-    fn dispatch_unexpected_error_from_initialized(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::dispatch_unexpected_error
-        todo!(
-            "TODO: port action `dispatch_unexpected_error` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn dispatch_unexpected_error_from_scan_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::dispatch_unexpected_error
-        todo!(
-            "TODO: port action `dispatch_unexpected_error` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn dispatch_unexpected_error_from_scanning(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::dispatch_unexpected_error
-        todo!(
-            "TODO: port action `dispatch_unexpected_error` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_alternation(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_alternation
-        todo!(
-            "TODO: port action `emit_alternation` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_braced_quantifier(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_braced_quantifier
-        todo!(
-            "TODO: port action `emit_braced_quantifier` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_character_class(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_character_class
-        todo!(
-            "TODO: port action `emit_character_class` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_close_group(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_close_group
-        todo!(
-            "TODO: port action `emit_close_group` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_definition_operator(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_definition_operator
-        todo!(
-            "TODO: port action `emit_definition_operator` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_dot(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_dot
-        todo!(
-            "TODO: port action `emit_dot` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_eof(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_eof
-        todo!(
-            "TODO: port action `emit_eof` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_identifier(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_identifier
-        todo!(
-            "TODO: port action `emit_identifier` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_layout_exhausted_unknown(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_layout_exhausted_unknown
-        todo!(
-            "TODO: port action `emit_layout_exhausted_unknown` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_newline_crlf_token(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_newline_crlf_token
-        todo!(
-            "TODO: port action `emit_newline_crlf_token` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_newline_single_token(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_newline_single_token
-        todo!(
-            "TODO: port action `emit_newline_single_token` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_open_group(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_open_group
-        todo!(
-            "TODO: port action `emit_open_group` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_quantifier(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_quantifier
-        todo!(
-            "TODO: port action `emit_quantifier` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_rule_reference_negated(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_rule_reference_negated
-        todo!(
-            "TODO: port action `emit_rule_reference_negated` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_rule_reference_plain(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_rule_reference_plain
-        todo!(
-            "TODO: port action `emit_rule_reference_plain` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_string_literal(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_string_literal
-        todo!(
-            "TODO: port action `emit_string_literal` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn emit_unknown_from_scan_ready(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::emit_unknown
-        todo!(
-            "TODO: port action `emit_unknown` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn ignore_unexpected_from_initialized(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::ignore_unexpected
-        todo!(
-            "TODO: port action `ignore_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn ignore_unexpected_from_scan_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::ignore_unexpected
-        todo!(
-            "TODO: port action `ignore_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn ignore_unexpected_from_scanning(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::ignore_unexpected
-        todo!(
-            "TODO: port action `ignore_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn invalid_cursor_position(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::invalid_cursor_position
-        todo!(
-            "TODO: port guard `invalid_cursor_position` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn invalid_next(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::invalid_next
-        todo!(
-            "TODO: port guard `invalid_next` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn layout_exhausted(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::layout_exhausted
-        todo!(
-            "TODO: port guard `layout_exhausted` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn parsed_rule_reference_negated_invalid(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::parsed_rule_reference_negated_invalid
-        todo!(
-            "TODO: port guard `parsed_rule_reference_negated_invalid` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn parsed_rule_reference_negated_valid(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::parsed_rule_reference_negated_valid
-        todo!(
-            "TODO: port guard `parsed_rule_reference_negated_valid` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn parsed_rule_reference_plain_invalid(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::parsed_rule_reference_plain_invalid
-        todo!(
-            "TODO: port guard `parsed_rule_reference_plain_invalid` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn parsed_rule_reference_plain_valid(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::parsed_rule_reference_plain_valid
-        todo!(
-            "TODO: port guard `parsed_rule_reference_plain_valid` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn prepare_scan_from_initialized(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::prepare_scan
-        todo!(
-            "TODO: port action `prepare_scan` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn prepare_scan_from_scanning(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::prepare_scan
-        todo!(
-            "TODO: port action `prepare_scan` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn reject_invalid_cursor_from_initialized(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::reject_invalid_cursor
-        todo!(
-            "TODO: port action `reject_invalid_cursor` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn reject_invalid_cursor_from_scanning(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::reject_invalid_cursor
-        todo!(
-            "TODO: port action `reject_invalid_cursor` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn reject_invalid_next_from_initialized(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::reject_invalid_next
-        todo!(
-            "TODO: port action `reject_invalid_next` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn reject_invalid_next_from_scanning(&mut self, _event: &EventScanNext) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp::reject_invalid_next
-        todo!(
-            "TODO: port action `reject_invalid_next` from emel.cpp/src/emel/gbnf/rule_parser/lexer/actions.hpp"
-        )
-    }
-    fn starts_alternation(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_alternation
-        todo!(
-            "TODO: port guard `starts_alternation` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_braced_quantifier(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_braced_quantifier
-        todo!(
-            "TODO: port guard `starts_braced_quantifier` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_character_class(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_character_class
-        todo!(
-            "TODO: port guard `starts_character_class` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_close_group(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_close_group
-        todo!(
-            "TODO: port guard `starts_close_group` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_definition_operator(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_definition_operator
-        todo!(
-            "TODO: port guard `starts_definition_operator` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_dot(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_dot
-        todo!(
-            "TODO: port guard `starts_dot` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_identifier(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_identifier
-        todo!(
-            "TODO: port guard `starts_identifier` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_newline_crlf(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_newline_crlf
-        todo!(
-            "TODO: port guard `starts_newline_crlf` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_newline_single(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_newline_single
-        todo!(
-            "TODO: port guard `starts_newline_single` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_open_group(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_open_group
-        todo!(
-            "TODO: port guard `starts_open_group` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_quantifier(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_quantifier
-        todo!(
-            "TODO: port guard `starts_quantifier` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn starts_string_literal(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::starts_string_literal
-        todo!(
-            "TODO: port guard `starts_string_literal` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn unexpected_has_error_callback(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::unexpected_has_error_callback
-        todo!(
-            "TODO: port guard `unexpected_has_error_callback` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
-    }
-    fn valid_cursor_position(&self, _event: &EventScanNext) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp::valid_cursor_position
-        todo!(
-            "TODO: port guard `valid_cursor_position` from emel.cpp/src/emel/gbnf/rule_parser/lexer/guards.hpp"
-        )
+    fn classify(&self, input: &[u8]) -> (TokenKind, usize) {
+        let start = self.start;
+        if input.get(start..start + 2) == Some(b"\r\n") { return (TokenKind::Newline, start + 2); }
+        if matches!(self.first_char, b'\r' | b'\n') { return (TokenKind::Newline, start + 1); }
+        if input.get(start..start + 3) == Some(b"::=") { return (TokenKind::DefinitionOperator, start + 3); }
+        if let Some(kind) = match self.first_char { b'|' => Some(TokenKind::Alternation), b'.' => Some(TokenKind::Dot), b'(' => Some(TokenKind::OpenGroup), b')' => Some(TokenKind::CloseGroup), b'+' | b'*' | b'?' => Some(TokenKind::Quantifier), _ => None } { return (kind, start + 1); }
+        if self.first_char == b'"' { return (TokenKind::StringLiteral, quoted_end(input, start, b'"')); }
+        if self.first_char == b'[' { return (TokenKind::CharacterClass, quoted_end(input, start, b']')); }
+        if self.first_char == b'{' { return (TokenKind::Quantifier, braced_end(input, start)); }
+        if self.first_char == b'!' && input.get(start + 1..start + 3) == Some(b"<[") { let end = rule_ref_end(input, start + 1); if end > start + 1 { return (TokenKind::RuleReference, end); } return (TokenKind::Unknown, start + 1); }
+        if input.get(start..start + 2) == Some(b"<[") { let end = rule_ref_end(input, start); if end > start { return (TokenKind::RuleReference, end); } }
+        if is_word_char(self.first_char) { let mut end = start + 1; while end < input.len() && is_word_char(input[end]) { end += 1; } return (TokenKind::Identifier, end); }
+        (TokenKind::Unknown, start + char_len(input, start))
     }
 }
+
+fn emit_done<'callback>(callback: Option<&'callback mut super::DoneCallback<'callback>>, done: NextDone<'_>) { if let Some(callback) = callback { callback(done); } }
+fn emit_token<'input, 'callback>(callback: Option<&'callback mut super::DoneCallback<'callback>>, cursor: Cursor<'input>, token: Token<'input>, end: usize) { emit_done(callback, NextDone { token, has_token: true, next_cursor: Cursor { input: cursor.input, offset: end as u32, token_count: cursor.token_count.saturating_add(1) } }); }
+fn emit_error<'callback>(callback: Option<&'callback mut super::ErrorCallback<'callback>>, err: Error) { if let Some(callback) = callback { callback(NextError { err }); } }
+fn empty_token(input: &str) -> Token<'_> { Token { kind: TokenKind::Unknown, text: &input[0..0], start: 0, end: 0 } }
+fn valid_boundary(input: &str, start: usize, mut end: usize) -> usize { while end > start && !input.is_char_boundary(end) { end -= 1; } end }
+fn char_len(input: &[u8], pos: usize) -> usize { core::str::from_utf8(&input[pos..]).ok().and_then(|s| s.chars().next()).map_or(1, char::len_utf8) }
+fn is_word_char(c: u8) -> bool { c.is_ascii_alphanumeric() || c == b'-' }
+fn skip_layout(input: &[u8], mut pos: usize) -> usize { while pos < input.len() { match input[pos] { b' ' | b'\t' => pos += 1, b'#' => { pos += 1; while pos < input.len() && !matches!(input[pos], b'\r' | b'\n') { pos += 1; } }, _ => break } } pos }
+fn quoted_end(input: &[u8], pos: usize, terminator: u8) -> usize { let mut scan = pos + 1; while scan < input.len() { let c = input[scan]; scan += 1; if c == b'\\' && scan < input.len() { scan += 1; } else if c == terminator { break; } } scan }
+fn braced_end(input: &[u8], pos: usize) -> usize { let mut scan = pos + 1; while scan < input.len() { if input[scan] == b'}' { return scan + 1; } scan += 1; } scan }
+fn rule_ref_end(input: &[u8], pos: usize) -> usize { if input.get(pos..pos + 2) != Some(b"<[") { return pos; } let mut scan = pos + 2; while scan < input.len() && input[scan].is_ascii_digit() { scan += 1; } if input.get(scan..scan + 2) == Some(b"]>") { scan + 2 } else { pos } }
