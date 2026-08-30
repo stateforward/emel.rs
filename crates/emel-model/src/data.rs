@@ -2220,6 +2220,19 @@ mod tests {
             .process_event(Bind::new(Storage::exact(probe).unwrap()))
             .unwrap();
         let parsed = loader.process_event(Parse::new()).unwrap();
+        let allocation = measure(|| {
+            let (name_length, descriptor, bytes_length) = loader
+                .process_event(WithTensor::new(
+                    0,
+                    |name: &[u8], descriptor, bytes: &[u8]| (name.len(), descriptor, bytes.len()),
+                ))
+                .unwrap()
+                .unwrap();
+            assert_eq!(name_length, 6);
+            assert_eq!(descriptor.data_size(), 128);
+            assert_eq!(bytes_length, 128);
+        });
+        assert_eq!(allocation.count_total, 0);
         let (name_length, descriptor, bytes_length) = loader
             .process_event(WithTensor::new(
                 0,
