@@ -415,5 +415,15 @@ impl SpeechTranscriber {
     pub fn context(&self) -> &SpeechTranscriberContext { self.machine.context() }
     pub fn initialize(&mut self, event: EventInitializeRun<'_>) -> Result<(), TranscriberError> { self.machine.process_event(SpeechTranscriberEvents::EventInitializeRun(event)).map_err(|_| TranscriberError::UnexpectedEvent).and_then(|_| self.result()) }
     pub fn recognize(&mut self, event: EventRecognizeRun<'_>) -> Result<(), TranscriberError> { self.machine.process_event(SpeechTranscriberEvents::EventRecognizeRun(event)).map_err(|_| TranscriberError::UnexpectedEvent).and_then(|_| self.result()) }
+    /// Returns the generated state identity for parent-actor inspection.
+    #[must_use]
+    pub fn state(&self) -> SpeechTranscriberStates { self.machine.state() }
+    /// Tests the generated state identity.
+    #[must_use]
+    pub fn is(&self, state: &SpeechTranscriberStates) -> bool { self.machine.is(state) }
     fn result(&self) -> Result<(), TranscriberError> { match self.context().err { TranscriberError::None => Ok(()), error => Err(error) } }
+}
+
+impl Default for SpeechTranscriber {
+    fn default() -> Self { Self::new(Dependencies::default()) }
 }
