@@ -222,8 +222,59 @@ sml! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KvCacheRoute { Owned, Bound }
 
-pub struct MemoryHybridContext { pub kv: kv::MemoryKvStateMachine<kv::MemoryKvContext>, pub recurrent: recurrent::MemoryRecurrentStateMachine<recurrent::MemoryRecurrentContext>, pub kv_route: KvCacheRoute }
-impl Default for MemoryHybridContext { fn default() -> Self { Self { kv: kv::MemoryKvStateMachine::new(kv::MemoryKvContext::default()), recurrent: recurrent::MemoryRecurrentStateMachine::new(recurrent::MemoryRecurrentContext::default()), kv_route: KvCacheRoute::Owned } } }
+/// Public, safe boundary implemented by injected KV actors.
+pub trait HybridKvActor {
+    fn reserve(&mut self, max_sequences: i32, max_blocks: i32, block_tokens: i32, error_out: &RefCell<i32>) -> bool;
+    fn allocate_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool;
+    fn allocate_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>, copy_block: Option<&dyn kv::BlockCopier>) -> bool;
+    fn free_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool;
+    fn rollback_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>) -> bool;
+    fn capture_view(&mut self, snapshot_out: &RefCell<Snapshot>, error_out: &RefCell<i32>) -> bool;
+    fn branch_sequence(&mut self, parent_seq_id: i32, child_seq_id: i32, error_out: &RefCell<i32>) -> bool;
+}
+
+impl HybridKvActor for kv::MemoryKvStateMachine<kv::MemoryKvContext> {
+    fn reserve(&mut self, max_sequences: i32, max_blocks: i32, block_tokens: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::ReserveContext::default()); self.process_event(kv::EventReserveRuntime { max_sequences, max_blocks, block_tokens, error_out: Some(error_out), context: &c }).is_ok() }
+    fn allocate_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::AllocateSequenceContext::default()); self.process_event(kv::EventAllocateSequenceRuntime { seq_id, error_out: Some(error_out), context: &c }).is_ok() }
+    fn allocate_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>, copy_block: Option<&dyn kv::BlockCopier>) -> bool { let c = RefCell::new(kv::AllocateSlotsContext::default()); self.process_event(kv::EventAllocateSlotsRuntime { seq_id, token_count, block_count_out: Some(block_count_out), error_out: Some(error_out), copy_block, context: &c }).is_ok() }
+    fn free_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::FreeSequenceContext::default()); self.process_event(kv::EventFreeSequenceRuntime { seq_id, error_out: Some(error_out), context: &c }).is_ok() }
+    fn rollback_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::RollbackSlotsContext::default()); self.process_event(kv::EventRollbackSlotsRuntime { seq_id, token_count, block_count_out: Some(block_count_out), error_out: Some(error_out), context: &c }).is_ok() }
+    fn capture_view(&mut self, snapshot_out: &RefCell<Snapshot>, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::CaptureViewContext::default()); self.process_event(kv::EventCaptureViewRuntime { snapshot_out: Some(snapshot_out), error_out: Some(error_out), context: &c }).is_ok() }
+    fn branch_sequence(&mut self, parent_seq_id: i32, child_seq_id: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::BranchSequenceContext::default()); self.process_event(kv::EventBranchSequenceRuntime { parent_seq_id, child_seq_id, copy_state: None, error_out: Some(error_out), context: &c }).is_ok() }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KvBindingKind { Empty, Complete, Invalid }
+
+#[derive(Clone)]
+pub struct KvBinding { actor: Option<std::rc::Rc<RefCell<dyn HybridKvActor>>>, kind: KvBindingKind }
+impl Default for KvBinding { fn default() -> Self { Self { actor: None, kind: KvBindingKind::Empty } } }
+impl KvBinding {
+    pub fn empty() -> Self { Self::default() }
+    pub fn invalid() -> Self { Self { actor: None, kind: KvBindingKind::Invalid } }
+    pub fn from_shared(actor: std::rc::Rc<RefCell<dyn HybridKvActor>>) -> Self { Self { actor: Some(actor), kind: KvBindingKind::Complete } }
+    pub fn from_actor<A: HybridKvActor + 'static>(actor: A) -> Self { Self::from_shared(std::rc::Rc::new(RefCell::new(actor))) }
+    fn route(&self) -> KvCacheRoute { if matches!(self.kind, KvBindingKind::Empty) { KvCacheRoute::Owned } else { KvCacheRoute::Bound } }
+    fn is_invalid(&self) -> bool { matches!(self.kind, KvBindingKind::Invalid) }
+}
+
+pub struct MemoryHybridContext {
+    pub kv: kv::MemoryKvStateMachine<kv::MemoryKvContext>,
+    pub recurrent: recurrent::MemoryRecurrentStateMachine<recurrent::MemoryRecurrentContext>,
+    pub kv_route: KvCacheRoute,
+    pub kv_binding: KvBinding,
+    pub kv_snapshot: Snapshot,
+    pub recurrent_snapshot: recurrent::Snapshot,
+}
+impl Default for MemoryHybridContext {
+    fn default() -> Self {
+        Self { kv: kv::MemoryKvStateMachine::new(kv::MemoryKvContext::default()), recurrent: recurrent::MemoryRecurrentStateMachine::new(recurrent::MemoryRecurrentContext::default()), kv_route: KvCacheRoute::Owned, kv_binding: KvBinding::default(), kv_snapshot: Snapshot::default(), recurrent_snapshot: recurrent::Snapshot::default() }
+    }
+}
+impl MemoryHybridContext {
+    pub fn with_kv_binding(binding: KvBinding) -> Self { let mut context = Self::default(); context.kv_route = binding.route(); context.kv_binding = binding; context }
+    fn bound_actor(&self) -> Option<std::rc::Rc<RefCell<dyn HybridKvActor>>> { self.kv_binding.actor.clone() }
+}
 
 fn set_error(out: Option<&RefCell<i32>>, error: HybridError) { if let Some(out) = out { *out.borrow_mut() = error.code(); } }
 fn api_error(code: i32) -> HybridError { match code { 1 => HybridError::InvalidRequest, 2 => HybridError::BackendError, 4 => HybridError::InternalError, 8 => HybridError::OutOfMemory, 16 => HybridError::Untracked, _ => HybridError::InternalError } }
