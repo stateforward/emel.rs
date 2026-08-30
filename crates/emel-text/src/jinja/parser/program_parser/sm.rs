@@ -2,7 +2,8 @@
 #![allow(clippy::derive_partial_eq_without_eq, clippy::module_name_repetitions, clippy::missing_errors_doc, clippy::must_use_candidate, clippy::return_self_not_must_use, clippy::empty_structs_with_brackets, clippy::missing_const_for_fn, dead_code, unused_imports, missing_docs)]
 
 use sml::sml;
-use super::{expression_parser, statement_parser};
+use super::expression_parser::sm as expression_parser;
+use super::statement_parser::sm as statement_parser;
 use super::super::lexer::sm::TokenKind;
 
 pub const MAX_PROGRAM_TOKENS: usize = 512;
@@ -109,26 +110,26 @@ impl TextJinjaParserProgramParserContext {
 }
 
 impl TextJinjaParserProgramParserStateMachineContext for TextJinjaParserProgramParserContext {
-    fn start_program_parse(&mut self)->Result<(),()>{self.input.token_index=0;self.result=ProgramParseResult::default();Ok(())}
-    fn at_eof(&self)->Result<bool,()>{Ok(self.index()>=self.input.token_count as usize)}
-    fn token_text(&self)->Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::Text))}
-    fn token_comment(&self)->Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::Comment))}
-    fn token_open_expression(&self)->Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::OpenExpression))}
-    fn token_open_statement(&self)->Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::OpenStatement))}
-    fn token_unexpected(&self)->Result<bool,()>{Ok(self.current().is_some_and(|t|!matches!(t.kind,TokenKind::Eof|TokenKind::Text|TokenKind::Comment|TokenKind::OpenExpression|TokenKind::OpenStatement)))}
-    fn consume_text(&mut self)->Result<(),()>{self.set_index(self.index()+1);self.result.emitted_count=self.result.emitted_count.saturating_add(1);Ok(())}
-    fn consume_comment(&mut self)->Result<(),()>{self.set_index(self.index()+1);self.result.emitted_count=self.result.emitted_count.saturating_add(1);Ok(())}
-    fn finish_parsed(&mut self)->Result<(),()>{self.result.parsed=true;Ok(())}
-    fn fail_current_token(&mut self)->Result<(),()>{self.fail(ProgramParserError::ParseFailed,self.current().map_or(0,|t|t.pos));Ok(())}
-    fn run_statement_parser(&mut self)->Result<(),()>{self.run_statement();Ok(())}
-    fn run_expression_parser(&mut self)->Result<(),()>{self.run_expression();Ok(())}
-    fn parse_error_none(&self)->Result<bool,()>{Ok(self.result.error==ProgramParserError::None)}
-    fn parse_error_invalid_request(&self)->Result<bool,()>{Ok(self.result.error==ProgramParserError::InvalidRequest)}
-    fn parse_error_parse_failed(&self)->Result<bool,()>{Ok(self.result.error==ProgramParserError::ParseFailed)}
-    fn parse_error_internal_error(&self)->Result<bool,()>{Ok(self.result.error==ProgramParserError::InternalError)}
-    fn parse_error_untracked(&self)->Result<bool,()>{Ok(self.result.error==ProgramParserError::Untracked)}
-    fn parse_error_unknown(&self)->Result<bool,()>{Ok(self.result.error==ProgramParserError::Unknown)}
-    fn on_unexpected_from_deciding(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_parse_begin(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_dispatch_decision(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_text_emit(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_comment_emit(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_statement_parse_result_decision(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_expression_parse_result_decision(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_parsed(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_parse_failed(&mut self)->Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_unexpected_event(&mut self)->Result<(),()>{self.unexpected();Ok(())}
+    fn start_program_parse(&mut self)->core::result::Result<(),()>{self.input.token_index=0;self.result=ProgramParseResult::default();Ok(())}
+    fn at_eof(&self)->core::result::Result<bool,()>{Ok(self.index()>=self.input.token_count as usize)}
+    fn token_text(&self)->core::result::Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::Text))}
+    fn token_comment(&self)->core::result::Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::Comment))}
+    fn token_open_expression(&self)->core::result::Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::OpenExpression))}
+    fn token_open_statement(&self)->core::result::Result<bool,()>{Ok(self.current().is_some_and(|t|t.kind==TokenKind::OpenStatement))}
+    fn token_unexpected(&self)->core::result::Result<bool,()>{Ok(self.current().is_some_and(|t|!matches!(t.kind,TokenKind::Eof|TokenKind::Text|TokenKind::Comment|TokenKind::OpenExpression|TokenKind::OpenStatement)))}
+    fn consume_text(&mut self)->core::result::Result<(),()>{self.set_index(self.index()+1);self.result.emitted_count=self.result.emitted_count.saturating_add(1);Ok(())}
+    fn consume_comment(&mut self)->core::result::Result<(),()>{self.set_index(self.index()+1);self.result.emitted_count=self.result.emitted_count.saturating_add(1);Ok(())}
+    fn finish_parsed(&mut self)->core::result::Result<(),()>{self.result.parsed=true;Ok(())}
+    fn fail_current_token(&mut self)->core::result::Result<(),()>{self.fail(ProgramParserError::ParseFailed,self.current().map_or(0,|t|t.pos));Ok(())}
+    fn run_statement_parser(&mut self)->core::result::Result<(),()>{self.run_statement();Ok(())}
+    fn run_expression_parser(&mut self)->core::result::Result<(),()>{self.run_expression();Ok(())}
+    fn parse_error_none(&self)->core::result::Result<bool,()>{Ok(self.result.error==ProgramParserError::None)}
+    fn parse_error_invalid_request(&self)->core::result::Result<bool,()>{Ok(self.result.error==ProgramParserError::InvalidRequest)}
+    fn parse_error_parse_failed(&self)->core::result::Result<bool,()>{Ok(self.result.error==ProgramParserError::ParseFailed)}
+    fn parse_error_internal_error(&self)->core::result::Result<bool,()>{Ok(self.result.error==ProgramParserError::InternalError)}
+    fn parse_error_untracked(&self)->core::result::Result<bool,()>{Ok(self.result.error==ProgramParserError::Untracked)}
+    fn parse_error_unknown(&self)->core::result::Result<bool,()>{Ok(self.result.error==ProgramParserError::Unknown)}
+    fn on_unexpected_from_deciding(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_parse_begin(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_dispatch_decision(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_text_emit(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_comment_emit(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_statement_parse_result_decision(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_expression_parse_result_decision(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_parsed(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_parse_failed(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())} fn on_unexpected_from_unexpected_event(&mut self)->core::result::Result<(),()>{self.unexpected();Ok(())}
 }
 
 fn map_statement_kind(k:TokenKind)->statement_parser::TokenType { use statement_parser::TokenType as T; match k {TokenKind::Eof=>T::Eof,TokenKind::Text=>T::Text,TokenKind::NumericLiteral=>T::NumericLiteral,TokenKind::StringLiteral=>T::StringLiteral,TokenKind::Identifier=>T::Identifier,TokenKind::Equals=>T::Equals,TokenKind::OpenParen=>T::OpenParen,TokenKind::CloseParen=>T::CloseParen,TokenKind::OpenStatement=>T::OpenStatement,TokenKind::CloseStatement=>T::CloseStatement,TokenKind::OpenExpression=>T::OpenExpression,TokenKind::CloseExpression=>T::CloseExpression,TokenKind::OpenSquareBracket=>T::OpenSquareBracket,TokenKind::CloseSquareBracket=>T::CloseSquareBracket,TokenKind::OpenCurlyBracket=>T::OpenCurlyBracket,TokenKind::CloseCurlyBracket=>T::CloseCurlyBracket,TokenKind::Comma=>T::Comma,TokenKind::Dot=>T::Dot,TokenKind::Colon=>T::Colon,TokenKind::Pipe=>T::Pipe,TokenKind::CallOperator=>T::CallOperator,TokenKind::AdditiveBinaryOperator=>T::AdditiveBinaryOperator,TokenKind::MultiplicativeBinaryOperator=>T::MultiplicativeBinaryOperator,TokenKind::ComparisonBinaryOperator=>T::ComparisonBinaryOperator,TokenKind::UnaryOperator=>T::UnaryOperator,TokenKind::Comment=>T::Comment}}
@@ -147,4 +148,4 @@ impl TextJinjaParserProgramParserActor {
 }
 pub type ProgramParser=TextJinjaParserProgramParserActor;
 pub type Input=ProgramParserInput;
-pub type Result=ProgramParseResult;
+pub type ProgramResult=ProgramParseResult;
