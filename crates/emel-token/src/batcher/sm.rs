@@ -688,11 +688,14 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(!event.request.enforce_single_output_per_seq)
     }
     fn probe_single_output(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        if single_output_ok(event) {
-            event.context.error.set(DispatchError::None);
-        } else {
-            event.context.error.set(DispatchError::InvalidRequest);
-        }
+        const ERROR_LUT: [DispatchError; 2] = [
+            DispatchError::InvalidRequest,
+            DispatchError::None,
+        ];
+        event
+            .context
+            .error
+            .set(ERROR_LUT[usize::from(single_output_ok(event))]);
         Ok(())
     }
     fn continuity_required(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -702,11 +705,14 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(position_stride(&event.request) > 1)
     }
     fn probe_continuity(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        if continuity_ok(event) {
-            event.context.error.set(DispatchError::None);
-        } else {
-            event.context.error.set(DispatchError::InvalidRequest);
-        }
+        const ERROR_LUT: [DispatchError; 2] = [
+            DispatchError::InvalidRequest,
+            DispatchError::None,
+        ];
+        event
+            .context
+            .error
+            .set(ERROR_LUT[usize::from(continuity_ok(event))]);
         Ok(())
     }
     fn outputs_total_output_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -952,63 +958,69 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
                 ok
             });
         valid = valid && compatible;
-        let Some(next) = pos.checked_add(1) else {
-            continue;
-        };
-        if valid {
-            for (w, bits) in row.iter().enumerate() {
-                let mut b = bits.get();
-                while b != 0 {
-                    let bit = b.trailing_zeros() as usize;
-                    s.next_pos[w * 64 + bit] = next;
-                    b &= b - 1;
-                }
+        let advance = i64::from(valid as i32);
+        let next = i64::from(pos) + 1;
+        for (w, bits) in row.iter().enumerate() {
+            let mut b = bits.get();
+            while b != 0 {
+                let bit = b.trailing_zeros() as usize;
+                let id = w * 64 + bit;
+                let current = i64::from(s.next_pos[id]);
+                s.next_pos[id] = (advance * next + (1 - advance) * current) as i32;
+                b &= b - 1;
             }
         }
     }
-    e.context.error.set(if backend_error {
-        DispatchError::Backend
-    } else if !valid {
-        DispatchError::InvalidRequest
-    } else {
-        DispatchError::None
-    });
+    const ERROR_LUT: [[DispatchError; 2]; 2] = [
+        [DispatchError::InvalidRequest, DispatchError::None],
+        [DispatchError::Backend, DispatchError::Backend],
+    ];
+    e.context
+        .error
+        .set(ERROR_LUT[backend_error as usize][valid as usize]);
 }
 fn probe_unseeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
     let words = effective_mask_words(&e.request);
+    let mut valid = true;
     for i in 0..e.request.token_ids.len() {
         let primary = e.outputs.seq_primary_ids[i].get() as usize;
         let pos = s.next_pos[primary];
+        valid = valid && pos != i32::MAX;
         let row = &e.outputs.seq_masks[i * words..(i + 1) * words];
-        for (w, bits) in row.iter().enumerate() {
-            let mut b = bits.get();
-            while b != 0 {
-                let bit = b.trailing_zeros() as usize;
-                let id = w * 64 + bit;
-                if s.seen[id] && s.next_pos[id] != pos {
-                    e.context.error.set(DispatchError::InvalidRequest);
-                    return;
+        let aligned = valid
+            && row.iter().enumerate().all(|(w, bits)| {
+                let mut b = bits.get();
+                let mut ok = true;
+                while b != 0 {
+                    let bit = b.trailing_zeros() as usize;
+                    let id = w * 64 + bit;
+                    let current = [pos, s.next_pos[id]][usize::from(s.seen[id])];
+                    ok &= current == pos;
+                    b &= b - 1;
                 }
-                b &= b - 1;
-            }
-        }
+                ok
+            });
+        valid = valid && aligned;
+        let advance = i64::from(valid as i32);
+        let next = i64::from(pos) + 1;
         for (w, bits) in row.iter().enumerate() {
             let mut b = bits.get();
             while b != 0 {
                 let bit = b.trailing_zeros() as usize;
                 let id = w * 64 + bit;
-                s.seen[id] = true;
-                let Some(next) = pos.checked_add(1) else {
-                    e.context.error.set(DispatchError::InvalidRequest);
-                    return;
-                };
-                s.next_pos[id] = next;
+                s.seen[id] |= advance != 0;
+                let current = i64::from(s.next_pos[id]);
+                s.next_pos[id] = (advance * next + (1 - advance) * current) as i32;
                 b &= b - 1;
             }
         }
     }
-    e.context.error.set(DispatchError::None);
+    const ERROR_LUT: [DispatchError; 2] = [
+        DispatchError::InvalidRequest,
+        DispatchError::None,
+    ];
+    e.context.error.set(ERROR_LUT[valid as usize]);
 }
 fn generate_seeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
