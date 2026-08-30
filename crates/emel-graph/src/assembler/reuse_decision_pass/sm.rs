@@ -299,45 +299,44 @@ impl GraphAssemblerReuseDecisionPassStateMachineContext
         Ok(())
     }
 
-    fn phase_invalid_request(&self, event: &AssemblerEventAssembleGraph) -> Result<bool, ()> {
+    fn phase_invalid_request(&self) -> Result<bool, ()> {
         let reuse_candidate = self.has_reserved_topology
             && self.reserved_topology != 0
-            && event.node_count_hint == self.reserved_node_count
-            && event.tensor_count_hint == self.reserved_tensor_count;
-        Ok(event.err == AssemblerError::None
-            && event.validate_outcome == PhaseOutcome::Done
+            && self.node_count_hint == self.reserved_node_count
+            && self.tensor_count_hint == self.reserved_tensor_count;
+        Ok(self.err == AssemblerError::None
+            && self.validate_outcome == PhaseOutcome::Done
             && !reuse_candidate
-            && (event.node_count_hint == 0 || event.tensor_count_hint == 0))
+            && (self.node_count_hint == 0 || self.tensor_count_hint == 0))
     }
 
-    fn phase_prefailed(&self, event: &AssemblerEventAssembleGraph) -> Result<bool, ()> {
-        Ok(event.err != AssemblerError::None)
+    fn phase_prefailed(&self) -> Result<bool, ()> {
+        Ok(self.err != AssemblerError::None)
     }
 
-    fn phase_prereq_failed(&self, event: &AssemblerEventAssembleGraph) -> Result<bool, ()> {
-        Ok(event.err == AssemblerError::None
-            && event.validate_outcome != PhaseOutcome::Done)
+    fn phase_prereq_failed(&self) -> Result<bool, ()> {
+        Ok(self.err == AssemblerError::None && self.validate_outcome != PhaseOutcome::Done)
     }
 
-    fn phase_rebuild(&self, event: &AssemblerEventAssembleGraph) -> Result<bool, ()> {
+    fn phase_rebuild(&self) -> Result<bool, ()> {
         let reuse_candidate = self.has_reserved_topology
             && self.reserved_topology != 0
-            && event.node_count_hint == self.reserved_node_count
-            && event.tensor_count_hint == self.reserved_tensor_count;
-        Ok(event.err == AssemblerError::None
-            && event.validate_outcome == PhaseOutcome::Done
+            && self.node_count_hint == self.reserved_node_count
+            && self.tensor_count_hint == self.reserved_tensor_count;
+        Ok(self.err == AssemblerError::None
+            && self.validate_outcome == PhaseOutcome::Done
             && !reuse_candidate
-            && event.node_count_hint != 0
-            && event.tensor_count_hint != 0)
+            && self.node_count_hint != 0
+            && self.tensor_count_hint != 0)
     }
 
-    fn phase_reuse(&self, event: &AssemblerEventAssembleGraph) -> Result<bool, ()> {
-        Ok(event.err == AssemblerError::None
-            && event.validate_outcome == PhaseOutcome::Done
+    fn phase_reuse(&self) -> Result<bool, ()> {
+        Ok(self.err == AssemblerError::None
+            && self.validate_outcome == PhaseOutcome::Done
             && self.has_reserved_topology
             && self.reserved_topology != 0
-            && event.node_count_hint == self.reserved_node_count
-            && event.tensor_count_hint == self.reserved_tensor_count)
+            && self.node_count_hint == self.reserved_node_count
+            && self.tensor_count_hint == self.reserved_tensor_count)
     }
 }
 
