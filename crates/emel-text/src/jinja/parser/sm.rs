@@ -407,7 +407,10 @@ impl TextJinjaParserStateMachineContext for TextJinjaParserContext {
 
 impl TextJinjaParserContext {
     fn next_lex_token(&mut self) {
-        let Some(source) = self.source() else { self.mark_error(ParseError::ParseFailed, 0); return; };
+        let source = match core::str::from_utf8(&self.source[..self.source_len]) {
+            Ok(source) => source,
+            Err(_) => { self.mark_error(ParseError::ParseFailed, 0); return; }
+        };
         let cursor = Cursor { source, offset: self.lex_offset, token_index: self.lex_token_index, curly_bracket_depth: self.curly_bracket_depth, last_token_type: self.last_token_type, last_block_rstrip: self.last_block_rstrip, last_block_can_trim_newline: self.last_block_can_trim_newline };
         let mut capture = LexCapture::new(cursor);
         let mut done = |event: NextDone<'_>| { capture.has_token = event.has_token; capture.cursor = event.next_cursor; capture.token = Some(event.token); capture.error = ParseError::None; true };

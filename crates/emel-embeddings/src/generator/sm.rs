@@ -201,7 +201,23 @@ impl EmbeddingsGeneratorContext {
     fn valid_image(&self, event: &EventEmbedImageRun) -> bool { event.width > 0 && event.height > 0 && event.rgba_len == (event.width as usize).saturating_mul(event.height as usize).saturating_mul(4) && event.rgba_len <= MAX_RGBA_BYTES }
 }
 
-fn normalize(values: &mut [f32]) -> bool { let mut sum = 0.0; for value in values.iter() { sum += *value * *value; } if sum <= 0.0 { return false; } let inv = 1.0 / sum.sqrt(); for value in values { *value *= inv; } true }
+fn normalize(values: &mut [f32]) -> bool {
+    if values.is_empty() || values.len() > MAX_EMBEDDING_DIMENSION {
+        return false;
+    }
+    let mut sum = 0.0;
+    for value in values.iter() {
+        sum += *value * *value;
+    }
+    if sum <= 0.0 {
+        return false;
+    }
+    let inv = 1.0 / sum.sqrt();
+    for value in values {
+        *value *= inv;
+    }
+    true
+}
 impl EmbeddingsGeneratorStateMachineContext {
     fn effect_encode_text(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
     fn effect_prepare_image(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { let ok = _event.prepare.map_or(true, |f| f(_event, &mut self.scratch)); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
@@ -221,7 +237,11 @@ impl EmbeddingsGeneratorStateMachineContext {
     fn effect_begin_initialize_from_state_errored(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.reset(); Ok(()) }
     fn effect_begin_initialize_from_state_idle(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.reset(); Ok(()) }
     fn effect_begin_initialize_from_state_uninitialized(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.reset(); Ok(()) }
-    fn effect_dispatch_bind_conditioner(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.bind_accepted = _event.bind.map_or(false, |f| f(_event)); self.bind_err_code = if self.bind_accepted { 0 } else { 1 }; Ok(()) }
+    fn effect_dispatch_bind_conditioner(&mut self, event: EventInitializeRun) -> Result<(), ()> {
+        self.bind_accepted = event.bind.map_or(false, |f| f(&event));
+        self.bind_err_code = if self.bind_accepted { 0 } else { 1 };
+        Ok(())
+    }
     fn effect_dispatch_condition_text(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.prepare_accepted = _event.has_messages() && self.text_ready; self.prepare_err_code = if self.prepare_accepted { 0 } else { 1 }; self.token_count = _event.messages[.._event.message_count.min(MAX_MESSAGES)].iter().map(|m| m.len).sum::<usize>().min(self.max_positions); Ok(()) }
     fn effect_emit_embed_done_event_embed_audio_run(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { if let Some(f) = _event.on_done { f(&self.scratch[..self.output_dimension.min(MAX_EMBEDDING_DIMENSION)], self.output_dimension); } Ok(()) }
     fn effect_emit_embed_done_event_embed_image_run(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { if let Some(f) = _event.on_done { f(&self.scratch[..self.output_dimension.min(MAX_EMBEDDING_DIMENSION)], self.output_dimension); } Ok(()) }
