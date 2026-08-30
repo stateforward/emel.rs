@@ -160,21 +160,21 @@ impl GbnfSamplerAcceptParserContext {
 
 impl GbnfSamplerAcceptParserStateMachineContext for GbnfSamplerAcceptParserContext {
     // Source mapping: actions.hpp::consume_accepted.
-    fn consume_accepted(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_accepted(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = AcceptParserError::None;
         self.accept_result = AcceptResult::Accepted;
         Ok(())
     }
 
     // Source mapping: actions.hpp::consume_rejected.
-    fn consume_rejected(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_rejected(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = AcceptParserError::None;
         self.accept_result = AcceptResult::Rejected;
         Ok(())
     }
 
     // Source mapping: actions.hpp::dispatch_parse_failed.
-    fn dispatch_parse_failed(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = AcceptParserError::ParseFailed;
         self.accept_result = AcceptResult::Unknown;
         Ok(())
@@ -208,7 +208,6 @@ impl GbnfSamplerAcceptParserStateMachineContext for GbnfSamplerAcceptParserConte
 }
 
 /// Synchronous bounded actor around the generated accept-parser machine.
-#[derive(Debug)]
 pub struct GbnfSamplerAcceptParserActor {
     machine: GbnfSamplerAcceptParserStateMachine<GbnfSamplerAcceptParserContext>,
 }
@@ -240,10 +239,8 @@ impl GbnfSamplerAcceptParserActor {
 
     /// Dispatches an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> Result<AcceptResult, AcceptParserError> {
-        if self.machine.process_event(GbnfSamplerAcceptParserEvents::UnexpectedEvent).is_err() {
-            self.machine.context_mut().error = AcceptParserError::InternalError;
-            self.machine.context_mut().accept_result = AcceptResult::Unknown;
-        }
+        let _ = self.machine.context_mut().unexpected();
+        self.machine.set_state(GbnfSamplerAcceptParserStates::ParseFailed);
         self.outcome()
     }
 
