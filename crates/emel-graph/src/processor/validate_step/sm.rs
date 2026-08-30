@@ -286,7 +286,7 @@ impl Processor {
     pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
         self.machine.context_mut().set_request(event);
         self.machine
-            .process_event(GraphProcessorValidateStepEvents::ProcessorEventExecuteStep)
+            .process_event(GraphProcessorValidateStepEvents::ProcessorEventExecuteStep(event))
             .is_ok()
     }
 

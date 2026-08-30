@@ -312,7 +312,7 @@ impl Processor {
     pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
         self.machine.context_mut().set_request(event);
         self.machine
-            .process_event(GraphProcessorPrepareStepEvents::ProcessorEventExecuteStep)
+            .process_event(GraphProcessorPrepareStepEvents::ProcessorEventExecuteStep(event))
             .is_ok()
     }
 

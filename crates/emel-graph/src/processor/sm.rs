@@ -284,7 +284,7 @@ impl Default for GraphProcessor { fn default() -> Self { Self::new() } }
 impl GraphProcessor {
     #[must_use]
     pub fn new() -> Self { Self { machine: GraphProcessorStateMachine::new(GraphProcessorContext::default()) } }
-    pub fn process_event(&mut self, event: EventExecuteStep) -> bool { if self.machine.process_event(GraphProcessorEvents::EventExecuteStep).is_err() { self.machine.context_mut().err = ProcessorError::InternalError; return false; } self.machine.context().err == ProcessorError::None }
+    pub fn process_event(&mut self, event: EventExecuteStep) -> bool { if self.machine.process_event(GraphProcessorEvents::EventExecuteStep(event)).is_err() { self.machine.context_mut().err = ProcessorError::InternalError; return false; } self.machine.context().err == ProcessorError::None }
     pub fn process_unexpected_event(&mut self) -> bool { self.machine.process_event(GraphProcessorEvents::UnexpectedEvent).is_ok() }
     #[must_use]
     pub fn state(&self) -> &GraphProcessorStates { self.machine.state() }

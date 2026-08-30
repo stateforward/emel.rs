@@ -18,6 +18,8 @@
 )]
 
 use sml::sml;
+use crate::allocator::AllocationPlan;
+
 
 /// Outcome retained by the reserve-allocation phase.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -44,13 +46,7 @@ pub enum AllocationError {
 /// Short alias for callers using the phase's error type.
 pub type Error = AllocationError;
 
-/// Bounded scalar allocation plan copied from the allocator child result.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AllocationPlan {
-    pub tensor_count: u32,
-    pub interval_count: u32,
-    pub required_buffer_bytes: u64,
-}
+
 
 /// Copied reserve request fields used by source guards and actions.
 ///
@@ -294,7 +290,9 @@ impl GraphAssemblerReserveAllocPass {
             return false;
         }
         self.machine.context_mut().set_request(event);
-        self.machine.process_event(event).is_ok()
+        self.machine
+            .process_event(GraphAssemblerReserveAllocPassEvents::AssemblerEventReserveGraph(event))
+            .is_ok()
     }
 
     /// Dispatches an explicit unexpected event through the generated topology.

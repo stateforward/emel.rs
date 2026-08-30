@@ -309,7 +309,7 @@ impl GraphProcessorBindStepActor {
         }
         self.machine.context_mut().set_event(event);
         self.machine
-            .process_event(GraphProcessorBindStepEvents::ProcessorEventExecuteStep)
+            .process_event(GraphProcessorBindStepEvents::ProcessorEventExecuteStep(event))
             .is_ok()
     }
 

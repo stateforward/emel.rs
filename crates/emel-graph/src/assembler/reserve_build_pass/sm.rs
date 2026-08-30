@@ -18,6 +18,8 @@
 )]
 
 use sml::sml;
+use crate::allocator::AllocationPlan;
+
 
 /// Outcome of an assembler phase, matching the C++ phase outcome values.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -203,6 +205,9 @@ impl GraphAssemblerReserveBuildPassStateMachineContext for GraphAssemblerReserve
         self.err = AssemblerError::Internal;
         Ok(())
     }
+    fn phase_prereq_failed(&self) -> Result<bool, ()> {
+        Ok(self.err == AssemblerError::None && self.validate_outcome != PhaseOutcome::Done)
+    }
     fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
         let request = self.request;
         let overflow = product_overflows_u64(request.max_tensor_count as u64, request.bytes_per_tensor);
@@ -279,7 +284,7 @@ impl GraphAssemblerReserveBuildPass {
         }
         self.machine.context_mut().set_event(event);
         self.machine
-            .process_event(GraphAssemblerReserveBuildPassEvents::AssemblerEventReserveGraph)
+            .process_event(GraphAssemblerReserveBuildPassEvents::AssemblerEventReserveGraph(event))
             .is_ok()
     }
 
