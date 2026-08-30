@@ -31,7 +31,7 @@ pub const MAX_TOKEN_VALUE: usize = 128;
 ///
 /// The expression parser consumes the lexer worker's exact discriminants so
 /// callers can pass categories without a translation table.
-pub type TokenType = super::super::super::lexer::sm::TokenKind;
+pub type TokenType = super::super::lexer::sm::TokenKind;
 
 /// A bounded copied lexer token.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
