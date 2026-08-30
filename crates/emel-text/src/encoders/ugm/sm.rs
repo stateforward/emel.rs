@@ -437,7 +437,7 @@ impl TextEncodersUgmActor {
             if let Some(callback) = request.on_error { let _ = callback(EncodingError { error: UgmError::InvalidArgument }); }
             return Err(UgmError::InvalidArgument);
         }
-        if self.machine.context().vocab_identity != request.vocabulary.identity {
+        if !self.machine.context().tables_ready || self.machine.context().vocab_identity != request.vocabulary.identity {
             self.machine.context_mut().sync_vocabulary(request.vocabulary);
         }
         let event = match RuntimeEncodeRuntime::from_request(&request) {
