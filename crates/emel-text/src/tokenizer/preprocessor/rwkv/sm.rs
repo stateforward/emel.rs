@@ -1,5 +1,8 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned, bounded RWKV tokenizer preprocessor actor.
+//!
+//! The machine follows the pinned `preprocessor::rwkv` transition table.  All
+//! request storage is caller-owned, processing is synchronous, and callbacks
+//! are function pointers so a request never allocates or defers work.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -14,55 +17,278 @@
     missing_docs
 )]
 
+use core::cell::RefCell;
 use sml::sml;
 
-// --- machine TextTokenizerPreprocessorRwkv from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventPreprocessRuntime;
+/// Maximum number of output fragments accepted by the pinned contract.
+pub const MAX_FRAGMENTS: usize = 1024;
+/// Maximum number of special-token entries retained by the bounded cache.
+pub const MAX_SPECIAL_TOKENS: usize = 1024;
+
+/// Token classes used by the vocabulary contract.
+pub const TOKEN_TYPE_UNKNOWN: i32 = 2;
+pub const TOKEN_TYPE_CONTROL: i32 = 3;
+pub const TOKEN_TYPE_USER_DEFINED: i32 = 4;
+
+/// Errors reported by preprocessing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PreprocessorError {
+    /// No error occurred.
+    #[default]
+    None = 0,
+    /// The request or bounded destination is invalid.
+    InvalidRequest = 1,
+    /// The backend could not complete the operation.
+    BackendError = 2,
+}
+
+impl PreprocessorError {
+    /// Returns the source-compatible integer error code.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::InvalidRequest => 1,
+            Self::BackendError => 2,
+        }
+    }
+}
+
+/// Output fragment kind.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FragmentKind {
+    /// A view into the original request text.
+    #[default]
+    RawText,
+    /// A vocabulary token id.
+    Token,
+}
+
+/// Caller-owned output fragment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Fragment<'text> {
+    /// Kind of this fragment.
+    pub kind: FragmentKind,
+    /// Raw text for [`FragmentKind::RawText`].
+    pub text: &'text str,
+    /// Token id for [`FragmentKind::Token`], or `-1` for raw fragments.
+    pub token: i32,
+}
+
+/// One bounded vocabulary entry used while building the special-token cache.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VocabularyEntry<'text> {
+    /// Token spelling.
+    pub text: &'text str,
+    /// Token id.
+    pub token: i32,
+    /// Source token class.
+    pub token_type: i32,
+    /// Remove whitespace immediately before a match.
+    pub lstrip: bool,
+    /// Remove whitespace immediately after a match.
+    pub rstrip: bool,
+}
+
+/// Borrowed vocabulary view.  The caller owns entries and their spellings.
+#[derive(Clone, Copy, Debug)]
+pub struct Vocabulary<'text> {
+    /// Vocabulary entries indexed by token id.
+    pub entries: &'text [VocabularyEntry<'text>],
+}
+
+impl<'text> Vocabulary<'text> {
+    /// Constructs a borrowed vocabulary view.
+    #[must_use]
+    pub const fn new(entries: &'text [VocabularyEntry<'text>]) -> Self { Self { entries } }
+}
+
+/// Successful completion payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreprocessDone {
+    /// Number of output fragments.
+    pub fragment_count: usize,
+}
+
+/// Failed completion payload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreprocessErrorEvent {
+    /// Source-compatible error.
+    pub error: PreprocessorError,
+}
+/// Compatibility alias used by sibling preprocessor actors.
+pub type PreprocessError = PreprocessorError;
+/// Compatibility vocabulary-entry name.
+pub type VocabEntry<'text> = VocabularyEntry<'text>;
+/// Compatibility failure payload name.
+pub type PreprocessFailure = PreprocessErrorEvent;
+
+/// Synchronous successful completion callback.
+pub type DoneCallback = fn(PreprocessDone) -> bool;
+/// Synchronous failed completion callback.
+pub type ErrorCallback = fn(PreprocessErrorEvent) -> bool;
+
+/// Caller-owned preprocessing request.
+#[derive(Clone, Copy, Debug)]
+pub struct PreprocessRequest<'event> {
+    /// Vocabulary used to identify special tokens.
+    pub vocab: Vocabulary<'event>,
+    /// Text to partition.
+    pub text: &'event str,
+    /// Whether control/user-defined/unknown tokens are parsed as specials.
+    pub parse_special: bool,
+    /// Caller-owned bounded destination. `None` models a null destination.
+    pub fragments_out: Option<&'event RefCell<&'event mut [Fragment<'event>]>>,
+    /// Optional successful completion callback.
+    pub dispatch_done: Option<DoneCallback>,
+    /// Optional failed completion callback.
+    pub dispatch_error: Option<ErrorCallback>,
+}
+
+impl<'event> PreprocessRequest<'event> {
+    /// Constructs a request with both callbacks installed.
+    #[must_use]
+    pub const fn new(
+        vocab: Vocabulary<'event>,
+        text: &'event str,
+        parse_special: bool,
+        fragments_out: &'event RefCell<&'event mut [Fragment<'event>]>,
+        dispatch_done: DoneCallback,
+        dispatch_error: ErrorCallback,
+    ) -> Self {
+        Self {
+            vocab,
+            text,
+            parse_special,
+            fragments_out: Some(fragments_out),
+            dispatch_done: Some(dispatch_done),
+            dispatch_error: Some(dispatch_error),
+        }
+    }
+
+    /// Constructs a request with independently optional destination/callbacks.
+    #[must_use]
+    pub const fn with_callbacks(
+        vocab: Vocabulary<'event>,
+        text: &'event str,
+        parse_special: bool,
+        fragments_out: Option<&'event RefCell<&'event mut [Fragment<'event>]>>,
+        dispatch_done: Option<DoneCallback>,
+        dispatch_error: Option<ErrorCallback>,
+    ) -> Self {
+        Self { vocab, text, parse_special, fragments_out, dispatch_done, dispatch_error }
+    }
+}
+
+/// Mutable result context corresponding to the source `preprocess_ctx`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreprocessContext {
+    /// Number of produced fragments.
+    pub fragment_count: usize,
+    /// Whether the text was successfully preprocessed.
+    pub preprocessed: bool,
+    /// Error from the current phase.
+    pub phase_error: PreprocessorError,
+    /// Final request error.
+    pub error: PreprocessorError,
+    /// Final request result.
+    pub result: bool,
+    /// Set after an unexpected event.
+    pub unexpected: bool,
+    special_ids: [usize; MAX_SPECIAL_TOKENS],
+    special_count: usize,
+}
+
+impl Default for PreprocessContext {
+    fn default() -> Self {
+        Self {
+            fragment_count: 0,
+            preprocessed: false,
+            phase_error: PreprocessorError::None,
+            error: PreprocessorError::None,
+            result: false,
+            unexpected: false,
+            special_ids: [0; MAX_SPECIAL_TOKENS],
+            special_count: 0,
+        }
+    }
+}
+
+impl PreprocessContext {
+    fn reset(&mut self) {
+        self.fragment_count = 0;
+        self.preprocessed = false;
+        self.phase_error = PreprocessorError::None;
+        self.error = PreprocessorError::None;
+        self.result = false;
+        self.unexpected = false;
+        self.special_count = 0;
+    }
+}
+
+/// Runtime event carrying one borrowed request and result context.
+#[derive(Clone, Copy, Debug)]
+pub struct EventPreprocessRuntime<'event> {
+    /// Request fields.
+    pub request: PreprocessRequest<'event>,
+    /// Mutable result context.
+    pub context: &'event RefCell<PreprocessContext>,
+}
+
+impl<'event> EventPreprocessRuntime<'event> {
+    /// Constructs one runtime event.
+    #[must_use]
+    pub const fn new(
+        request: PreprocessRequest<'event>,
+        context: &'event RefCell<PreprocessContext>,
+    ) -> Self {
+        Self { request, context }
+    }
+}
 
 sml! {
-    TextTokenizerPreprocessorRwkv {
-        "request_buffer_decision"_s <= *"idle"_s + event<EventPreprocessRuntime>,
-        "request_buffer_decision"_s <= "done"_s + event<EventPreprocessRuntime>,
-        "request_buffer_decision"_s <= "errored"_s + event<EventPreprocessRuntime>,
-        "request_buffer_decision"_s <= "unexpected"_s + event<EventPreprocessRuntime>,
-        "request_capacity_nonzero_decision"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime> [fragments_buffer_present],
-        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime> [fragments_buffer_missing] / reject_invalid_from_request_buffer_decision,
-        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime> / reject_invalid_from_request_buffer_decision,
-        "request_capacity_limit_decision"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime> [fragments_capacity_nonzero],
-        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime> [fragments_capacity_zero] / reject_invalid_from_request_capacity_nonzero_decision,
-        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime> / reject_invalid_from_request_capacity_nonzero_decision,
-        "preparing"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime> [fragments_capacity_within_limit] / begin_preprocess,
-        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime> [fragments_capacity_exceeds_limit] / reject_invalid_from_request_capacity_limit_decision,
-        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime> / reject_invalid_from_request_capacity_limit_decision,
-        "build_specials_decision"_s <= "preparing"_s + completion<EventPreprocessRuntime> / build_specials,
-        "partition_specials_decision"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime> [build_specials_ok],
-        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime> [build_specials_invalid_request_error] / ensure_last_error_from_build_specials_decision,
-        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime> [build_specials_backend_error] / ensure_last_error_from_build_specials_decision,
-        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime> [build_specials_unknown_error] / ensure_last_error_from_build_specials_decision,
-        "partitioning_no_specials_input_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime> [no_specials],
-        "partition_parse_special_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime> [has_specials],
-        "errored"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime> / ensure_last_error_from_partition_specials_decision,
-        "partitioning_non_bpe_parse_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime> [parse_special_enabled],
-        "partitioning_non_bpe_skip_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime> [parse_special_disabled],
-        "errored"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime> / ensure_last_error_from_partition_parse_special_decision,
-        "partition_decision"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime> [request_text_empty] / set_empty_partition_result_from_partitioning_no_specials_input_decision,
-        "partitioning_no_specials"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime> [request_text_nonempty],
-        "errored"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime> / ensure_last_error_from_partitioning_no_specials_input_decision,
-        "partition_decision"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime> [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision,
-        "partitioning_non_bpe_parse_special"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime> [request_text_nonempty],
-        "errored"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime> / ensure_last_error_from_partitioning_non_bpe_parse_input_decision,
-        "partition_decision"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime> [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision,
-        "partitioning_non_bpe_skip_special"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime> [request_text_nonempty],
-        "errored"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime> / ensure_last_error_from_partitioning_non_bpe_skip_input_decision,
-        "partition_decision"_s <= "partitioning_no_specials"_s + completion<EventPreprocessRuntime> / partition_no_specials,
-        "partition_decision"_s <= "partitioning_non_bpe_parse_special"_s + completion<EventPreprocessRuntime> / partition_non_bpe_parse_special,
-        "partition_decision"_s <= "partitioning_non_bpe_skip_special"_s + completion<EventPreprocessRuntime> / partition_non_bpe_skip_special,
-        "done"_s <= "partition_decision"_s + completion<EventPreprocessRuntime> [partition_ok] / mark_done,
-        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime> [partition_invalid_request_error] / ensure_last_error_from_partition_decision,
-        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime> [partition_backend_error] / ensure_last_error_from_partition_decision,
-        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime> [partition_unknown_error] / ensure_last_error_from_partition_decision,
+    TextTokenizerPreprocessorRwkv<'event> {
+        "request_buffer_decision"_s <= *"idle"_s + event<EventPreprocessRuntime<'event>>,
+        "request_buffer_decision"_s <= "done"_s + event<EventPreprocessRuntime<'event>>,
+        "request_buffer_decision"_s <= "errored"_s + event<EventPreprocessRuntime<'event>>,
+        "request_buffer_decision"_s <= "unexpected"_s + event<EventPreprocessRuntime<'event>>,
+        "request_capacity_nonzero_decision"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime<'event>> [fragments_buffer_present],
+        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime<'event>> [fragments_buffer_missing] / reject_invalid_from_request_buffer_decision,
+        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime<'event>> / reject_invalid_from_request_buffer_decision,
+        "request_capacity_limit_decision"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime<'event>> [fragments_capacity_nonzero],
+        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime<'event>> [fragments_capacity_zero] / reject_invalid_from_request_capacity_nonzero_decision,
+        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime<'event>> / reject_invalid_from_request_capacity_nonzero_decision,
+        "preparing"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime<'event>> [fragments_capacity_within_limit] / begin_preprocess,
+        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime<'event>> [fragments_capacity_exceeds_limit] / reject_invalid_from_request_capacity_limit_decision,
+        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime<'event>> / reject_invalid_from_request_capacity_limit_decision,
+        "build_specials_decision"_s <= "preparing"_s + completion<EventPreprocessRuntime<'event>> / build_specials,
+        "partition_specials_decision"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime<'event>> [build_specials_ok],
+        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime<'event>> [build_specials_invalid_request_error] / ensure_last_error_from_build_specials_decision,
+        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime<'event>> [build_specials_backend_error] / ensure_last_error_from_build_specials_decision,
+        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime<'event>> [build_specials_unknown_error] / ensure_last_error_from_build_specials_decision,
+        "partitioning_no_specials_input_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime<'event>> [no_specials],
+        "partition_parse_special_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime<'event>> [has_specials],
+        "errored"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime<'event>> / ensure_last_error_from_partition_specials_decision,
+        "partitioning_non_bpe_parse_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime<'event>> [parse_special_enabled],
+        "partitioning_non_bpe_skip_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime<'event>> [parse_special_disabled],
+        "errored"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime<'event>> / ensure_last_error_from_partition_parse_special_decision,
+        "partition_decision"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime<'event>> [request_text_empty] / set_empty_partition_result_from_partitioning_no_specials_input_decision,
+        "partitioning_no_specials"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime<'event>> [request_text_nonempty],
+        "errored"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime<'event>> / ensure_last_error_from_partitioning_no_specials_input_decision,
+        "partition_decision"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime<'event>> [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision,
+        "partitioning_non_bpe_parse_special"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime<'event>> [request_text_nonempty],
+        "errored"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime<'event>> / ensure_last_error_from_partitioning_non_bpe_parse_input_decision,
+        "partition_decision"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime<'event>> [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision,
+        "partitioning_non_bpe_skip_special"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime<'event>> [request_text_nonempty],
+        "errored"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime<'event>> / ensure_last_error_from_partitioning_non_bpe_skip_input_decision,
+        "partition_decision"_s <= "partitioning_no_specials"_s + completion<EventPreprocessRuntime<'event>> / partition_no_specials,
+        "partition_decision"_s <= "partitioning_non_bpe_parse_special"_s + completion<EventPreprocessRuntime<'event>> / partition_non_bpe_parse_special,
+        "partition_decision"_s <= "partitioning_non_bpe_skip_special"_s + completion<EventPreprocessRuntime<'event>> / partition_non_bpe_skip_special,
+        "done"_s <= "partition_decision"_s + completion<EventPreprocessRuntime<'event>> [partition_ok] / mark_done,
+        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime<'event>> [partition_invalid_request_error] / ensure_last_error_from_partition_decision,
+        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime<'event>> [partition_backend_error] / ensure_last_error_from_partition_decision,
+        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime<'event>> [partition_unknown_error] / ensure_last_error_from_partition_decision,
         "unexpected"_s <= "idle"_s + unexpected_event<_> / on_unexpected_from_idle,
         "unexpected"_s <= "request_buffer_decision"_s + unexpected_event<_> / on_unexpected_from_request_buffer_decision,
         "unexpected"_s <= "request_capacity_nonzero_decision"_s + unexpected_event<_> / on_unexpected_from_request_capacity_nonzero_decision,
@@ -84,404 +310,276 @@ sml! {
     }
 }
 
-/// Context for `TextTokenizerPreprocessorRwkv` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
-pub struct TextTokenizerPreprocessorRwkvContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+/// Compatibility context name emitted by the state-machine generator.
+pub type TextTokenizerPreprocessorRwkvContext = PreprocessContext;
+
+impl<'event> TextTokenizerPreprocessorRwkvStateMachineContext
+    for TextTokenizerPreprocessorRwkvContext
+{
+    fn begin_preprocess(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> {
+        event.context.borrow_mut().reset();
+        Ok(())
+    }
+
+    fn build_specials(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> {
+        let mut context = event.context.borrow_mut();
+        context.special_count = 0;
+        context.phase_error = PreprocessorError::None;
+        for (index, entry) in event.request.vocab.entries.iter().enumerate() {
+            let special = matches!(entry.token_type, TOKEN_TYPE_UNKNOWN | TOKEN_TYPE_CONTROL | TOKEN_TYPE_USER_DEFINED)
+                && !entry.text.is_empty();
+            if !special { continue; }
+            if context.special_count == MAX_SPECIAL_TOKENS {
+                context.phase_error = PreprocessorError::InvalidRequest;
+                return Ok(());
+            }
+            context.special_ids[context.special_count] = index;
+            context.special_count += 1;
+        }
+        // The source cache is ordered longest-first to ensure deterministic
+        // handling when one special token is a prefix of another.
+        let count = context.special_count;
+        let mut i = 1;
+        while i < count {
+            let id = context.special_ids[i];
+            let len = event.request.vocab.entries[id].text.len();
+            let mut j = i;
+            while j > 0 {
+                let previous = context.special_ids[j - 1];
+                if event.request.vocab.entries[previous].text.len() >= len { break; }
+                context.special_ids[j] = previous;
+                j -= 1;
+            }
+            context.special_ids[j] = id;
+            i += 1;
+        }
+        Ok(())
+    }
+
+    fn build_specials_ok(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::None) }
+    fn build_specials_invalid_request_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::InvalidRequest) }
+    fn build_specials_backend_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::BackendError) }
+    fn build_specials_unknown_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { let e = event.context.borrow().phase_error; Ok(e != PreprocessorError::None && e != PreprocessorError::InvalidRequest && e != PreprocessorError::BackendError) }
+
+    fn ensure_last_error_from_build_specials_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_partition_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_partition_parse_special_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_partition_specials_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_partitioning_no_specials_input_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_partitioning_non_bpe_parse_input_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_partitioning_non_bpe_skip_input_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { ensure_last_error(event) }
+
+    fn fragments_buffer_missing(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.fragments_out.is_none()) }
+    fn fragments_buffer_present(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.fragments_out.is_some()) }
+    fn fragments_capacity_exceeds_limit(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.fragments_out.is_some_and(|out| out.borrow().len() > MAX_FRAGMENTS)) }
+    fn fragments_capacity_nonzero(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.fragments_out.is_some_and(|out| !out.borrow().is_empty())) }
+    fn fragments_capacity_within_limit(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.fragments_out.is_some_and(|out| out.borrow().len() <= MAX_FRAGMENTS)) }
+    fn fragments_capacity_zero(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.fragments_out.is_some_and(|out| out.borrow().is_empty())) }
+    fn has_specials(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().special_count != 0) }
+    fn no_specials(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().special_count == 0) }
+    fn parse_special_enabled(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.parse_special) }
+    fn parse_special_disabled(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(!event.request.parse_special) }
+    fn partition_backend_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::BackendError) }
+    fn partition_invalid_request_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::InvalidRequest) }
+    fn partition_unknown_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { let e = event.context.borrow().phase_error; Ok(e != PreprocessorError::None && e != PreprocessorError::InvalidRequest && e != PreprocessorError::BackendError) }
+
+    fn partition_no_specials(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> {
+        let Some(output) = event.request.fragments_out else { return reject_invalid(event); };
+        let mut out = output.borrow_mut();
+        out[0] = Fragment { kind: FragmentKind::RawText, text: event.request.text, token: -1 };
+        set_phase_result(event, 1, true);
+        Ok(())
+    }
+    fn partition_non_bpe_parse_special(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { partition_with_specials(event, true) }
+    fn partition_non_bpe_skip_special(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { partition_with_specials(event, false) }
+    fn partition_ok(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::None) }
+    fn partition_invalid_request_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.context.borrow().phase_error == PreprocessorError::InvalidRequest) }
+    fn partition_unknown_error(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { let e = event.context.borrow().phase_error; Ok(e != PreprocessorError::None && e != PreprocessorError::InvalidRequest && e != PreprocessorError::BackendError) }
+
+    fn reject_invalid_from_request_buffer_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { reject_invalid(event) }
+    fn reject_invalid_from_request_capacity_limit_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { reject_invalid(event) }
+    fn reject_invalid_from_request_capacity_nonzero_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { reject_invalid(event) }
+    fn request_text_empty(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(event.request.text.is_empty()) }
+    fn request_text_nonempty(&self, event: &EventPreprocessRuntime<'event>) -> Result<bool, ()> { Ok(!event.request.text.is_empty()) }
+    fn set_empty_partition_result_from_partitioning_no_specials_input_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { set_phase_result(event, 0, true); Ok(()) }
+    fn set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { set_phase_result(event, 0, true); Ok(()) }
+    fn set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { set_phase_result(event, 0, true); Ok(()) }
+
+    fn mark_done(&mut self, event: &EventPreprocessRuntime<'event>) -> Result<(), ()> { let mut c = event.context.borrow_mut(); c.phase_error = PreprocessorError::None; c.error = PreprocessorError::None; c.result = true; Ok(()) }
+
+    fn on_unexpected_from_build_specials_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_done(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_idle(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partition_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partition_parse_special_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partition_specials_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partitioning_no_specials(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partitioning_no_specials_input_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partitioning_non_bpe_parse_input_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partitioning_non_bpe_parse_special(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partitioning_non_bpe_skip_input_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_partitioning_non_bpe_skip_special(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_preparing(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_request_buffer_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_request_capacity_limit_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_request_capacity_nonzero_decision(&mut self) -> Result<(), ()> { mark_unexpected(self) }
+    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> { mark_unexpected(self) }
 }
 
-impl TextTokenizerPreprocessorRwkvStateMachineContext for TextTokenizerPreprocessorRwkvContext {
-    fn begin_preprocess(&mut self, _event: &EventPreprocessRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::begin_preprocess
-        todo!(
-            "TODO: port action `begin_preprocess` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn build_specials(&mut self, _event: &EventPreprocessRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::build_specials
-        todo!(
-            "TODO: port action `build_specials` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn build_specials_backend_error(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::build_specials_backend_error
-        todo!(
-            "TODO: port guard `build_specials_backend_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn build_specials_invalid_request_error(
-        &self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::build_specials_invalid_request_error
-        todo!(
-            "TODO: port guard `build_specials_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn build_specials_ok(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::build_specials_ok
-        todo!(
-            "TODO: port guard `build_specials_ok` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn build_specials_unknown_error(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::build_specials_unknown_error
-        todo!(
-            "TODO: port guard `build_specials_unknown_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn ensure_last_error_from_build_specials_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_partition_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_partition_parse_special_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_partition_specials_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_partitioning_no_specials_input_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_partitioning_non_bpe_parse_input_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_partitioning_non_bpe_skip_input_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn fragments_buffer_missing(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::fragments_buffer_missing
-        todo!(
-            "TODO: port guard `fragments_buffer_missing` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn fragments_buffer_present(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::fragments_buffer_present
-        todo!(
-            "TODO: port guard `fragments_buffer_present` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn fragments_capacity_exceeds_limit(
-        &self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::fragments_capacity_exceeds_limit
-        todo!(
-            "TODO: port guard `fragments_capacity_exceeds_limit` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn fragments_capacity_nonzero(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::fragments_capacity_nonzero
-        todo!(
-            "TODO: port guard `fragments_capacity_nonzero` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn fragments_capacity_within_limit(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::fragments_capacity_within_limit
-        todo!(
-            "TODO: port guard `fragments_capacity_within_limit` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn fragments_capacity_zero(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::fragments_capacity_zero
-        todo!(
-            "TODO: port guard `fragments_capacity_zero` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn has_specials(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::has_specials
-        todo!(
-            "TODO: port guard `has_specials` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn mark_done(&mut self, _event: &EventPreprocessRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn no_specials(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::no_specials
-        todo!(
-            "TODO: port guard `no_specials` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn on_unexpected_from_build_specials_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_idle(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partition_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partition_parse_special_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partition_specials_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partitioning_no_specials(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partitioning_no_specials_input_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partitioning_non_bpe_parse_input_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partitioning_non_bpe_parse_special(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partitioning_non_bpe_skip_input_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_partitioning_non_bpe_skip_special(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_preparing(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_request_buffer_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_request_capacity_limit_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_request_capacity_nonzero_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn parse_special_disabled(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::parse_special_disabled
-        todo!(
-            "TODO: port guard `parse_special_disabled` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn parse_special_enabled(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::parse_special_enabled
-        todo!(
-            "TODO: port guard `parse_special_enabled` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn partition_backend_error(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::partition_backend_error
-        todo!(
-            "TODO: port guard `partition_backend_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn partition_invalid_request_error(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::partition_invalid_request_error
-        todo!(
-            "TODO: port guard `partition_invalid_request_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn partition_no_specials(&mut self, _event: &EventPreprocessRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::partition_no_specials
-        todo!(
-            "TODO: port action `partition_no_specials` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn partition_non_bpe_parse_special(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::partition_non_bpe_parse_special
-        todo!(
-            "TODO: port action `partition_non_bpe_parse_special` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn partition_non_bpe_skip_special(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::partition_non_bpe_skip_special
-        todo!(
-            "TODO: port action `partition_non_bpe_skip_special` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn partition_ok(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::partition_ok
-        todo!(
-            "TODO: port guard `partition_ok` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn partition_unknown_error(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::partition_unknown_error
-        todo!(
-            "TODO: port guard `partition_unknown_error` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn reject_invalid_from_request_buffer_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn reject_invalid_from_request_capacity_limit_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn reject_invalid_from_request_capacity_nonzero_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::reject_invalid
-        todo!(
-            "TODO: port action `reject_invalid` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn request_text_empty(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::request_text_empty
-        todo!(
-            "TODO: port guard `request_text_empty` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn request_text_nonempty(&self, _event: &EventPreprocessRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp::request_text_nonempty
-        todo!(
-            "TODO: port guard `request_text_nonempty` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/guards.hpp"
-        )
-    }
-    fn set_empty_partition_result_from_partitioning_no_specials_input_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::set_empty_partition_result
-        todo!(
-            "TODO: port action `set_empty_partition_result` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::set_empty_partition_result
-        todo!(
-            "TODO: port action `set_empty_partition_result` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
-    fn set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision(
-        &mut self,
-        _event: &EventPreprocessRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp::set_empty_partition_result
-        todo!(
-            "TODO: port action `set_empty_partition_result` from emel.cpp/src/emel/text/tokenizer/preprocessor/rwkv/actions.hpp"
-        )
-    }
+fn mark_unexpected(context: &mut PreprocessContext) -> Result<(), ()> {
+    context.unexpected = true;
+    context.fragment_count = 0;
+    context.preprocessed = false;
+    context.phase_error = PreprocessorError::InvalidRequest;
+    context.error = PreprocessorError::InvalidRequest;
+    context.result = false;
+    Ok(())
 }
+
+fn set_phase_result(event: &EventPreprocessRuntime<'_>, count: usize, preprocessed: bool) {
+    let mut c = event.context.borrow_mut();
+    c.fragment_count = count;
+    c.preprocessed = preprocessed;
+    c.phase_error = PreprocessorError::None;
+    c.error = PreprocessorError::None;
+    c.result = false;
+}
+
+fn reject_invalid(event: &EventPreprocessRuntime<'_>) -> Result<(), ()> {
+    let mut c = event.context.borrow_mut();
+    c.fragment_count = 0;
+    c.preprocessed = false;
+    c.phase_error = PreprocessorError::InvalidRequest;
+    c.error = PreprocessorError::InvalidRequest;
+    c.result = false;
+    Ok(())
+}
+
+fn ensure_last_error(event: &EventPreprocessRuntime<'_>) -> Result<(), ()> {
+    let mut c = event.context.borrow_mut();
+    c.error = if c.phase_error == PreprocessorError::None { PreprocessorError::BackendError } else { c.phase_error };
+    c.result = false;
+    Ok(())
+}
+
+fn allowed(entry: VocabularyEntry<'_>, parse_special: bool) -> bool {
+    !entry.text.is_empty() && (parse_special || !matches!(entry.token_type, TOKEN_TYPE_CONTROL | TOKEN_TYPE_UNKNOWN))
+}
+
+fn partition_with_specials(event: &EventPreprocessRuntime<'_>, parse_special: bool) -> Result<(), ()> {
+    let Some(output) = event.request.fragments_out else { return reject_invalid(event); };
+    let capacity = output.borrow().len();
+    let mut current = [Fragment::default(); MAX_FRAGMENTS];
+    let mut next = [Fragment::default(); MAX_FRAGMENTS];
+    let mut current_count = 1usize;
+    current[0] = Fragment { kind: FragmentKind::RawText, text: event.request.text, token: -1 };
+    let context = event.context.borrow();
+    let ids = context.special_ids;
+    let special_count = context.special_count;
+    drop(context);
+    for id_index in 0..special_count {
+        let entry = event.request.vocab.entries[ids[id_index]];
+        if !allowed(entry, parse_special) { continue; }
+        let mut next_count = 0usize;
+        for fragment in current[..current_count].iter().copied() {
+            if fragment.kind == FragmentKind::Token { if next_count == capacity || next_count == MAX_FRAGMENTS { return reject_invalid(event); } next[next_count] = fragment; next_count += 1; continue; }
+            let mut rest = fragment.text;
+            loop {
+                let Some(match_at) = rest.find(entry.text) else {
+                    if !rest.is_empty() { if next_count == capacity || next_count == MAX_FRAGMENTS { return reject_invalid(event); } next[next_count] = Fragment { kind: FragmentKind::RawText, text: rest, token: -1 }; next_count += 1; }
+                    break;
+                };
+                let mut left = &rest[..match_at];
+                if entry.lstrip { left = left.trim_end_matches(char::is_whitespace); }
+                if !left.is_empty() { if next_count == capacity || next_count == MAX_FRAGMENTS { return reject_invalid(event); } next[next_count] = Fragment { kind: FragmentKind::RawText, text: left, token: -1 }; next_count += 1; }
+                if next_count == capacity || next_count == MAX_FRAGMENTS { return reject_invalid(event); }
+                next[next_count] = Fragment { kind: FragmentKind::Token, text: "", token: entry.token }; next_count += 1;
+                let mut after = &rest[match_at + entry.text.len()..];
+                if entry.rstrip { after = after.trim_start_matches(char::is_whitespace); }
+                rest = after;
+            }
+        }
+        current[..next_count].copy_from_slice(&next[..next_count]);
+        current_count = next_count;
+    }
+    let mut out = output.borrow_mut();
+    out[..current_count].copy_from_slice(&current[..current_count]);
+    set_phase_result(event, current_count, true);
+    Ok(())
+}
+
+/// Synchronous bounded actor around the generated RWKV machine.
+pub struct TextTokenizerPreprocessorRwkvActor<'event> {
+    machine: TextTokenizerPreprocessorRwkvStateMachine<'event, TextTokenizerPreprocessorRwkvContext>,
+    last_error: PreprocessorError,
+    fragment_count: usize,
+}
+
+impl<'event> Default for TextTokenizerPreprocessorRwkvActor<'event> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<'event> TextTokenizerPreprocessorRwkvActor<'event> {
+    /// Creates an actor in the generated `idle` state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: TextTokenizerPreprocessorRwkvStateMachine::new(TextTokenizerPreprocessorRwkvContext::default()),
+            last_error: PreprocessorError::None,
+            fragment_count: 0,
+        }
+    }
+
+    /// Processes one bounded request to run-to-completion.
+    pub fn process_event(&mut self, event: EventPreprocessRuntime<'event>) -> bool {
+        let context = event.context;
+        let accepted = self.machine.process_event(TextTokenizerPreprocessorRwkvEvents::EventPreprocessRuntime(event)).is_ok();
+        let ok = accepted && context.borrow().result && self.machine.is(&TextTokenizerPreprocessorRwkvStates::Done);
+        let mut result = context.borrow_mut();
+        result.error = if ok { PreprocessorError::None } else if result.error == PreprocessorError::None { PreprocessorError::BackendError } else { result.error };
+        let error = result.error;
+        let fragment_count = result.fragment_count;
+        self.last_error = error;
+        self.fragment_count = fragment_count;
+        drop(result);
+        if ok {
+            if let Some(callback) = event.request.dispatch_done { let _ = callback(PreprocessDone { fragment_count }); }
+        } else if let Some(callback) = event.request.dispatch_error { let _ = callback(PreprocessErrorEvent { error }); }
+        ok
+    }
+
+    /// Sends an explicit unexpected event through the machine's error path.
+    pub fn process_unexpected(&mut self) -> bool {
+        self.last_error = PreprocessorError::InvalidRequest;
+        self.fragment_count = 0;
+        let context = self.machine.context_mut();
+        context.unexpected = true;
+        context.phase_error = PreprocessorError::InvalidRequest;
+        context.error = PreprocessorError::InvalidRequest;
+        context.result = false;
+        context.preprocessed = false;
+        context.fragment_count = 0;
+        self.machine.set_state(TextTokenizerPreprocessorRwkvStates::Unexpected);
+        false
+    }
+
+    /// Returns the generated state.
+    #[must_use]
+    pub fn state(&self) -> &TextTokenizerPreprocessorRwkvStates { self.machine.state() }
+    /// Reports whether the actor is in `state`.
+    #[must_use]
+    pub fn is(&self, state: &TextTokenizerPreprocessorRwkvStates) -> bool { self.machine.is(state) }
+    /// Returns the machine context.
+    #[must_use]
+    pub fn context(&self) -> &TextTokenizerPreprocessorRwkvContext { self.machine.context() }
+    /// Returns the source-compatible numeric error code from the last request.
+    #[must_use]
+    pub fn last_error(&self) -> i32 { self.last_error.code() }
+    /// Returns the fragment count from the last request.
+    #[must_use]
+    pub const fn fragment_count(&self) -> usize { self.fragment_count }
+}
+
+/// Short public alias matching the pinned machine name.
+pub type Actor<'event> = TextTokenizerPreprocessorRwkvActor<'event>;
