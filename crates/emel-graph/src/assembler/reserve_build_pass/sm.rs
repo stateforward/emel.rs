@@ -40,31 +40,40 @@ pub enum AssemblerError {
     Internal = 4,
     Untracked = 8,
 }
-
-/// Short alias for callers that use the phase's error type directly.
-pub type Error = AssemblerError;
-
-/// Bounded allocation result copied from the allocator completion context.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct AllocationPlan {
-    pub tensor_count: u32,
-    pub interval_count: u32,
-    pub required_buffer_bytes: u64,
-}
-
-/// Copied reserve request consumed by the reserve-build actor.
+/// Bounded copied reserve request consumed by the reserve-build actor.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReserveGraphRequest {
+    pub has_model_topology: bool,
+    pub has_output_out: bool,
     pub max_node_count: u32,
     pub max_tensor_count: u32,
     pub bytes_per_tensor: u64,
     pub workspace_capacity_bytes: u64,
 }
 
+impl ReserveGraphRequest {
+    #[must_use]
+    pub const fn new(
+        has_model_topology: bool,
+        has_output_out: bool,
+        max_node_count: u32,
+        max_tensor_count: u32,
+        bytes_per_tensor: u64,
+        workspace_capacity_bytes: u64,
+    ) -> Self {
+        Self {
+            has_model_topology,
+            has_output_out,
+            max_node_count,
+            max_tensor_count,
+            bytes_per_tensor,
+            workspace_capacity_bytes,
+        }
+    }
+}
+
 /// Runtime event corresponding to C++ `assembler::event::reserve_graph`.
-///
-/// Inputs and prerequisite state are copied before dispatch so the actor never
-/// retains caller references or pointers.
+/// Inputs and prerequisite state are copied before dispatch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AssemblerEventReserveGraph {
     pub request: ReserveGraphRequest,
@@ -78,23 +87,11 @@ pub struct AssemblerEventReserveGraph {
 }
 
 impl AssemblerEventReserveGraph {
-    /// Creates an event from bounded request scalars and prerequisite outcome.
     #[must_use]
-    pub const fn new(
-        max_node_count: u32,
-        max_tensor_count: u32,
-        bytes_per_tensor: u64,
-        workspace_capacity_bytes: u64,
-        validate_outcome: PhaseOutcome,
-    ) -> Self {
+    pub const fn new(request: ReserveGraphRequest) -> Self {
         Self {
-            request: ReserveGraphRequest {
-                max_node_count,
-                max_tensor_count,
-                bytes_per_tensor,
-                workspace_capacity_bytes,
-            },
-            validate_outcome,
+            request,
+            validate_outcome: PhaseOutcome::Unknown,
             build_outcome: PhaseOutcome::Unknown,
             alloc_outcome: PhaseOutcome::Unknown,
             assembled_node_count: 0,
@@ -106,6 +103,18 @@ impl AssemblerEventReserveGraph {
             },
             err: AssemblerError::None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_prerequisites(
+        request: ReserveGraphRequest,
+        validate_outcome: PhaseOutcome,
+        err: AssemblerError,
+    ) -> Self {
+        let mut event = Self::new(request);
+        event.validate_outcome = validate_outcome;
+        event.err = err;
+        event
     }
 }
 
@@ -231,6 +240,14 @@ fn product_overflows_u64(lhs: u64, rhs: u64) -> bool {
     lhs != 0 && rhs > u64::MAX / lhs
 }
 
+impl GraphAssemblerReserveBuildPassContext {
+    #[must_use]
+    pub const fn outcome(&self) -> PhaseOutcome { self.build_outcome }
+
+    #[must_use]
+    pub const fn error(&self) -> AssemblerError { self.err }
+}
+
 /// Single-writer, synchronous reserve-build actor.
 pub struct GraphAssemblerReserveBuildPass {
     machine: GraphAssemblerReserveBuildPassStateMachine<GraphAssemblerReserveBuildPassContext>,
@@ -261,7 +278,16 @@ impl GraphAssemblerReserveBuildPass {
             return false;
         }
         self.machine.context_mut().set_event(event);
-        self.machine.process_event(event).is_ok()
+        self.machine
+            .process_event(GraphAssemblerReserveBuildPassEvents::AssemblerEventReserveGraph)
+            .is_ok()
+    }
+
+    /// Dispatches an explicit unexpected event synchronously.
+    pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine
+            .process_event(GraphAssemblerReserveBuildPassEvents::UnexpectedEvent)
+            .is_ok()
     }
 
     /// Returns the generated machine state.
@@ -295,3 +321,5 @@ impl GraphAssemblerReserveBuildPass {
         self.machine.context()
     }
 }
+/// Short actor alias matching the phase name.
+pub type Actor = GraphAssemblerReserveBuildPass;
