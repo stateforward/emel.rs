@@ -253,6 +253,7 @@ sml! {
         "decode_exec"_s <= "table_sync_result_decision"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) [table_sync_ok],
         "errored"_s <= "table_sync_result_decision"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) [table_sync_invalid_argument_error] / ensure_last_error_from_table_sync_result_decision,
         "errored"_s <= "table_sync_result_decision"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) [table_sync_backend_error] / ensure_last_error_from_table_sync_result_decision,
+        "errored"_s <= "table_sync_result_decision"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) [decode_result_model_invalid_error] / ensure_last_error_from_table_sync_result_decision,
         "errored"_s <= "table_sync_result_decision"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) [table_sync_unclassified_error_code] / ensure_last_error_from_table_sync_result_decision,
         "decode_result_decision"_s <= "decode_exec"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) / decode_input,
         "done"_s <= "decode_result_decision"_s + completion<RuntimeEncodeRuntime>(RuntimeEncodeRuntime<'a>) [decode_result_empty_ok] / mark_done_from_decode_result_decision,
@@ -300,20 +301,20 @@ sml! {
     }
 }
 
-impl<'a> TextEncodersPlamo2StateMachineContext for TextEncodersPlamo2Context<'a> {
-    fn apply_emit_result_failed(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+impl TextEncodersPlamo2StateMachineContext for TextEncodersPlamo2Context<'_> {
+    fn apply_emit_result_failed(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let mut context = event.context.borrow_mut();
         context.token_count = 0;
         context.error = event.emit_result_error.get();
         Ok(())
     }
-    fn apply_emit_result_ok(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn apply_emit_result_ok(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let mut context = event.context.borrow_mut();
         context.token_count = event.emit_result_token_count.get();
         context.error = EncodeError::None;
         Ok(())
     }
-    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let mut context = event.context.borrow_mut();
         context.token_count = 0;
         context.error = EncodeError::None;
@@ -323,13 +324,13 @@ impl<'a> TextEncodersPlamo2StateMachineContext for TextEncodersPlamo2Context<'a>
         self.unexpected = false;
         Ok(())
     }
-    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         self.begin_encode(event)?;
         self.vocab = Some(event.request.vocab);
         self.tables_ready = false;
         Ok(())
     }
-    fn decode_input(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn decode_input(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let text = event.request.text;
         let mut index = 0usize;
         for codepoint in text.chars() {
@@ -345,15 +346,15 @@ impl<'a> TextEncodersPlamo2StateMachineContext for TextEncodersPlamo2Context<'a>
         event.data_len.set(index);
         Ok(())
     }
-    fn decode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::Backend) }
-    fn decode_result_empty_ok(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None && event.data_len.get() == 0) }
-    fn decode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::InvalidArgument) }
-    fn decode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::ModelInvalid) }
-    fn decode_result_non_empty_ok(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None && event.data_len.get() > 0) }
-    fn decode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error != EncodeError::None && !matches!(event.context.borrow().error, EncodeError::InvalidArgument | EncodeError::Backend | EncodeError::ModelInvalid)) }
-    fn emit_result_failed(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.emit_result_error.get() != EncodeError::None) }
-    fn emit_result_ok(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.emit_result_error.get() == EncodeError::None) }
-    fn emit_tokens(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn decode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::Backend) }
+    fn decode_result_empty_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None && event.data_len.get() == 0) }
+    fn decode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::InvalidArgument) }
+    fn decode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::ModelInvalid) }
+    fn decode_result_non_empty_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None && event.data_len.get() > 0) }
+    fn decode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error != EncodeError::None && !matches!(event.context.borrow().error, EncodeError::InvalidArgument | EncodeError::Backend | EncodeError::ModelInvalid)) }
+    fn emit_result_failed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.emit_result_error.get() != EncodeError::None) }
+    fn emit_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.emit_result_error.get() == EncodeError::None) }
+    fn emit_tokens(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let mut output = event.request.token_ids.borrow_mut();
         let capacity = output.len();
         let mut count = 0usize;
@@ -385,47 +386,47 @@ impl<'a> TextEncodersPlamo2StateMachineContext for TextEncodersPlamo2Context<'a>
         event.emit_result_error.set(error);
         Ok(())
     }
-    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::Backend) }
-    fn encode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::InvalidArgument) }
-    fn encode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::ModelInvalid) }
-    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None) }
-    fn encode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error != EncodeError::None && !matches!(event.context.borrow().error, EncodeError::InvalidArgument | EncodeError::Backend | EncodeError::ModelInvalid)) }
-    fn ensure_last_error_from_decode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_emit_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_table_policy_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_table_sync_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_backtrace_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { ensure_last_error(event) }
-    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.request.token_ids.borrow().is_empty()) }
-    fn mark_done_from_decode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::Backend) }
+    fn encode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::InvalidArgument) }
+    fn encode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::ModelInvalid) }
+    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None) }
+    fn encode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error != EncodeError::None && !matches!(event.context.borrow().error, EncodeError::InvalidArgument | EncodeError::Backend | EncodeError::ModelInvalid)) }
+    fn ensure_last_error_from_decode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_emit_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_table_policy_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_table_sync_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_backtrace_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.token_ids.borrow().is_empty()) }
+    fn mark_done_from_decode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         event.context.borrow_mut().error = EncodeError::None;
         dispatch_done(event, 0);
         Ok(())
     }
-    fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         event.context.borrow_mut().error = EncodeError::None;
         dispatch_done(event, 0);
         Ok(())
     }
-    fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         event.context.borrow_mut().error = EncodeError::None;
         dispatch_done(event, event.emit_result_token_count.get());
         Ok(())
     }
     fn on_unexpected_events_encoding_done(&mut self, _event: &EventsEncodingDone) -> Result<(), ()> { self.unexpected = true; Ok(()) }
     fn on_unexpected_events_encoding_error(&mut self, _event: &EventsEncodingError) -> Result<(), ()> { self.unexpected = true; Ok(()) }
-    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { self.unexpected = true; let mut context = event.context.borrow_mut(); context.token_count = 0; context.error = EncodeError::InvalidArgument; Ok(()) }
+    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.unexpected = true; let mut context = event.context.borrow_mut(); context.token_count = 0; context.error = EncodeError::InvalidArgument; Ok(()) }
     fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.unexpected = true; Ok(()) }
-    fn prepare_dp(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn prepare_dp(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let len = event.data_len.get();
         for index in 0..=len { self.scores[index] = i64::MAX / 4; self.paths[index] = PathEntry::default(); }
         self.scores[len] = 0;
         Ok(())
     }
-    fn reject_invalid_encode_from_encode_validity_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { reject_invalid(event) }
-    fn reject_invalid_encode_from_encode_vocab_sync_decision(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { reject_invalid(event) }
-    fn run_dp(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn reject_invalid_encode_from_encode_validity_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
+    fn reject_invalid_encode_from_encode_vocab_sync_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
+    fn run_dp(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         let Some(vocab) = self.vocab.or(Some(event.request.vocab)) else { event.context.borrow_mut().error = EncodeError::ModelInvalid; return Ok(()); };
         for pos in (0..event.data_len.get()).rev() {
             let mut best_score = i64::MAX / 4;
@@ -459,28 +460,27 @@ impl<'a> TextEncodersPlamo2StateMachineContext for TextEncodersPlamo2Context<'a>
         }
         Ok(())
     }
-    fn sync_tables(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> {
+    fn sync_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
         self.vocab = Some(event.request.vocab);
         self.tables_ready = event.request.vocab.token_count() > 0;
         event.context.borrow_mut().error = if self.tables_ready { EncodeError::None } else { EncodeError::ModelInvalid };
         Ok(())
     }
-    fn table_sync_backend_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::Backend) }
-    fn table_sync_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::InvalidArgument) }
-    fn table_sync_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::ModelInvalid) }
-    fn table_sync_ok(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None) }
-    fn table_sync_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error != EncodeError::None && !matches!(event.context.borrow().error, EncodeError::InvalidArgument | EncodeError::Backend | EncodeError::ModelInvalid)) }
-    fn tables_missing(&self, _event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(!self.tables_ready) }
-    fn tables_ready(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(self.tables_ready && self.vocab.is_some_and(|vocab| core::ptr::eq(vocab, event.request.vocab))) }
-    fn text_empty(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.request.text.is_empty()) }
-    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(!event.request.text.is_empty()) }
-    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(!event.request.token_ids.borrow().is_empty()) }
-    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(!self.vocab.is_some_and(|vocab| core::ptr::eq(vocab, event.request.vocab))) }
-    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(!self.vocab_changed(event)?) }
-    fn backtrace_ok(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None && (event.data_len.get() == 0 || self.paths[0].token_len > 0)) }
-    fn backtrace_failed(&self, event: &RuntimeEncodeRuntime<'a>) -> Result<bool, ()> { Ok(!self.backtrace_ok(event)?) }
-    fn validate_backtrace(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { if event.data_len.get() > 0 && self.paths[0].token_len == 0 { event.context.borrow_mut().error = EncodeError::Backend; } Ok(()) }
-    fn mark_backtrace_failed(&mut self, event: &RuntimeEncodeRuntime<'a>) -> Result<(), ()> { event.context.borrow_mut().error = EncodeError::Backend; Ok(()) }
+    fn table_sync_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::Backend) }
+    fn table_sync_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::InvalidArgument) }
+    fn table_sync_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None) }
+    fn table_sync_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error != EncodeError::None && !matches!(event.context.borrow().error, EncodeError::InvalidArgument | EncodeError::Backend | EncodeError::ModelInvalid)) }
+    fn tables_missing(&self, _event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!self.tables_ready) }
+    fn tables_ready(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.tables_ready && self.vocab.is_some_and(|vocab| core::ptr::eq(vocab, event.request.vocab))) }
+    fn text_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.is_empty()) }
+    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.text.is_empty()) }
+    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.token_ids.borrow().is_empty()) }
+    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!self.vocab.is_some_and(|vocab| core::ptr::eq(vocab, event.request.vocab))) }
+    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!self.vocab_changed(event)?) }
+    fn backtrace_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncodeError::None && (event.data_len.get() == 0 || self.paths[0].token_len > 0)) }
+    fn backtrace_failed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!self.backtrace_ok(event)?) }
+    fn validate_backtrace(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { if event.data_len.get() > 0 && self.paths[0].token_len == 0 { event.context.borrow_mut().error = EncodeError::Backend; } Ok(()) }
+    fn mark_backtrace_failed(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncodeError::Backend; Ok(()) }
 }
 
 fn reject_invalid(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
@@ -515,7 +515,7 @@ fn dispatch_done(event: &RuntimeEncodeRuntime<'_>, token_count: usize) {
 
 /// Synchronous bounded PLaMo2 actor around the generated machine.
 pub struct TextEncodersPlamo2Actor<'a> {
-    machine: TextEncodersPlamo2StateMachine<'a, TextEncodersPlamo2Context<'a>>,
+    machine: TextEncodersPlamo2StateMachine<TextEncodersPlamo2Context<'a>>,
 }
 
 impl<'a> Default for TextEncodersPlamo2Actor<'a> {
