@@ -51,6 +51,13 @@ fn mixed_seed_errors(
     }
 }
 
+fn invalid_seed(
+    _context: &super::PositionSeedContext<'_>,
+    _sequence_id: i32,
+) -> Result<i32, PositionSeedError> {
+    Err(PositionSeedError::InvalidRequest)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "fixture construction mirrors the explicit batch request fields"
@@ -411,6 +418,60 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
 }
 
 #[test]
+fn continuity_counts_explicit_first_negative_position() {
+    let token_ids = [1];
+    let sequence_ids = [0];
+    let positions_input = [-1];
+    let mut primary = [0; 1];
+    let mut masks = [0; 1];
+    let mut positions = [0; 1];
+    let mut output = [0; 1];
+
+    let result = TokenBatcher::new().process_event(request(
+        &token_ids,
+        10,
+        None,
+        1,
+        Some(&sequence_ids),
+        Some(&positions_input),
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
+    ));
+
+    assert!(result.is_ok());
+    assert_eq!(positions, positions_input);
+}
+
+#[test]
+fn continuity_counts_negative_to_zero_position_sequence() {
+    let token_ids = [1, 2];
+    let sequence_ids = [0, 0];
+    let positions_input = [-1, 0];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [0; 2];
+    let mut output = [0; 2];
+
+    let result = TokenBatcher::new().process_event(request(
+        &token_ids,
+        10,
+        None,
+        1,
+        Some(&sequence_ids),
+        Some(&positions_input),
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
+    ));
+
+    assert!(result.is_ok());
+    assert_eq!(positions, positions_input);
+}
+
+#[test]
 fn continuity_allows_decreasing_positions_while_last_is_negative() {
     let token_ids = [1, 2];
     let sequence_ids = [0, 0];
@@ -762,6 +823,44 @@ fn maximum_seed_is_rejected_before_increment() {
         resolve_position_seed: Some(super::PositionSeedResolver {
             context: super::PositionSeedContext { seeds: &[] },
             resolve: max_seed,
+        }),
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+}
+
+#[test]
+fn seeded_probe_preserves_invalid_seed_error() {
+    let ids = [1];
+    let sequence_ids = [0];
+    let seeds = [0; MAX_SEQ];
+    let mut primary = [0; 1];
+    let mut masks = [0; 1];
+    let mut positions = [0; 1];
+    let mut output = [0; 1];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: Some(&sequence_ids),
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: Some(super::PositionSeedResolver {
+            context: super::PositionSeedContext { seeds: &seeds },
+            resolve: invalid_seed,
         }),
         seq_mask_words_out: None,
         positions_count_out: None,

@@ -934,8 +934,11 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
                 s.next_pos[id] = v;
                 s.seed_pos[id] = v;
             }
-            Err(PositionSeedError::Backend) | Err(PositionSeedError::InvalidRequest) => {
+            Err(PositionSeedError::Backend) => {
                 backend_error = true;
+            }
+            Err(PositionSeedError::InvalidRequest) => {
+                invalid = true;
             }
         }
     }
@@ -1125,14 +1128,13 @@ fn continuity_ok(e: &BatchRuntime<'_>) -> bool {
             while bits != 0 {
                 let id = w * 64 + bits.trailing_zeros() as usize;
                 let last = s.seq_last_pos[id];
+                let first_seen = !s.seq_seen[id];
                 let monotonic = last < 0 || pos >= last;
-                let pos_changed = pos != last;
+                let pos_changed = first_seen || pos != last;
                 s.seq_pos_count[id] += usize::from(pos_changed);
                 s.seq_last_pos[id] = pos;
                 s.seq_min_pos[id] = s.seq_min_pos[id].min(pos);
                 s.seq_max_pos[id] = s.seq_max_pos[id].max(pos);
-
-                let first_seen = !s.seq_seen[id];
                 let active_count = s.active_count;
                 let has_active_slot = active_count < MAX_SEQ;
                 if first_seen && has_active_slot {
