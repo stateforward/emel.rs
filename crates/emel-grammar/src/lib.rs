@@ -20,5 +20,6 @@ impl GrammarSource {
         &self.0
     }
 }
+pub mod gbnf;
 pub(crate) mod rule_parser;
 pub(crate) mod sampler;
