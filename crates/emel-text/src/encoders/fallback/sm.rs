@@ -275,10 +275,27 @@ impl<'a> TextEncodersFallbackActor<'a> {
     pub fn new() -> Self { Self { machine: TextEncodersFallbackStateMachine::new(TextEncodersFallbackContext::default()) } }
     pub fn process_event(&mut self, mut request: EncodeRequest<'a>) -> Result<EncodingDone, EncodingError> {
         let event = RuntimeEncodeRuntime { request: &mut request, error: Cell::new(EncoderError::None), token_count: Cell::new(0), emit_error: Cell::new(EncoderError::None), emit_count: Cell::new(0) };
-        let dispatch_result = self.machine.process_event(TextEncodersFallbackEvents::EventRuntimeEncodeRuntime(event));
-        if dispatch_result.is_err() { self.machine.set_state(TextEncodersFallbackStates::Unexpected); let failure = EncodingError { error: EncoderError::Unexpected }; if let Some(callback) = request.dispatch_error { let _ = callback(failure); } return Err(failure); }
-        let error = event.error.get(); let count = event.token_count.get();
-        if error == EncoderError::None { let done = EncodingDone { token_count: count }; if let Some(callback) = request.dispatch_done { let _ = callback(done); } Ok(done) } else { let failure = EncodingError { error }; if let Some(callback) = request.dispatch_error { let _ = callback(failure); } Err(failure) }
+        let accepted = self.machine.process_event(TextEncodersFallbackEvents::EventRuntimeEncodeRuntime(event));
+        let event = match accepted {
+            Ok(event) => event,
+            Err(_) => {
+                self.machine.set_state(TextEncodersFallbackStates::Unexpected);
+                let failure = EncodingError { error: EncoderError::Unexpected };
+                if let Some(callback) = request.dispatch_error { let _ = callback(failure); }
+                return Err(failure);
+            }
+        };
+        let error = event.error.get();
+        let count = event.token_count.get();
+        if error == EncoderError::None {
+            let done = EncodingDone { token_count: count };
+            if let Some(callback) = event.request.dispatch_done { let _ = callback(done); }
+            Ok(done)
+        } else {
+            let failure = EncodingError { error };
+            if let Some(callback) = event.request.dispatch_error { let _ = callback(failure); }
+            Err(failure)
+        }
     }
 }
 pub type Fallback<'a> = TextEncodersFallbackActor<'a>;
