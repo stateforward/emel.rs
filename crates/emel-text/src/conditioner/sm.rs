@@ -1,29 +1,28 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
-
-#![allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
-
+//! Source-aligned bounded TextConditioner state machine.
+#![allow(clippy::derive_partial_eq_without_eq, clippy::module_name_repetitions, clippy::missing_errors_doc, clippy::must_use_candidate, clippy::return_self_not_must_use, clippy::empty_structs_with_brackets, clippy::missing_const_for_fn, dead_code, unused_imports, missing_docs)]
+use core::cell::{Cell, RefCell};
 use sml::sml;
 
-// --- machine TextConditioner from emel.cpp/src/emel/text/conditioner/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventBindRuntime;
+/// Runtime bind request and its run-to-completion fields.
+pub struct EventBindRuntime {
+    pub tokenizer_available: bool, pub formatter_available: bool, pub model_valid: bool,
+    pub formatter: Option<fn(crate::FormatRequest<'_>) -> Result<(), crate::ConditionerError>>,
+    pub tokenizer: Option<fn(&[u8], bool, bool, &mut [i32]) -> Result<usize, crate::ConditionerError>>,
+    pub tokenizer_bind: Option<fn(bool, &mut i32) -> bool>, pub add_special: bool, pub parse_special: bool,
+    pub bind_accepted: Cell<bool>, pub bind_err_code: Cell<i32>, pub err: Cell<crate::ConditionerError>, pub result: Cell<bool>,
+    pub error_out: Option<&'static mut i32>, pub done_callback: Option<fn(crate::BindingDone) -> bool>, pub error_callback: Option<fn(crate::ConditionerError) -> bool>,
+}
+impl Default for EventBindRuntime { fn default()->Self { Self { tokenizer_available:false, formatter_available:false, model_valid:false, formatter:None, tokenizer:None, tokenizer_bind:None, add_special:true, parse_special:false, bind_accepted:Cell::new(false), bind_err_code:Cell::new(0), err:Cell::new(crate::ConditionerError::None), result:Cell::new(false), error_out:None, done_callback:None, error_callback:None } } }
+impl core::fmt::Debug for EventBindRuntime { fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result { f.debug_struct("EventBindRuntime").field("tokenizer_available",&self.tokenizer_available).field("formatter_available",&self.formatter_available).field("model_valid",&self.model_valid).finish() } }
+impl EventBindRuntime { fn reset(&self) { self.bind_accepted.set(false); self.bind_err_code.set(0); self.err.set(crate::ConditionerError::None); self.result.set(false); } }
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventPrepareRuntime;
+/// Runtime prepare request and its run-to-completion fields.
+pub struct EventPrepareRuntime<'a> {
+    pub messages: &'a [crate::ChatMessage<'a>], pub formatter_available: bool, pub tokenizer_available: bool, pub model_valid: bool, pub token_capacity: usize, pub token_ids: RefCell<&'a mut [i32]>, pub token_ids_present: bool, pub token_count_out: &'a mut usize, pub error_out: Option<&'a mut i32>,
+    pub add_generation_prompt: bool, pub enable_thinking: bool, pub add_special_request: bool, pub parse_special_request: bool, pub use_bind_defaults: bool, pub add_special: Cell<bool>, pub parse_special: Cell<bool>, pub formatted_length: Cell<usize>, pub formatted_capacity: usize, pub format_accepted: Cell<bool>, pub format_err_code: Cell<i32>, pub tokenize_accepted: Cell<bool>, pub tokenize_err_code: Cell<i32>, pub token_count: Cell<usize>, pub err: Cell<crate::ConditionerError>, pub result: Cell<bool>, pub done_callback: Option<fn(crate::ConditioningDone) -> bool>, pub error_callback: Option<fn(crate::ConditionerError) -> bool>,
+}
+impl<'a> core::fmt::Debug for EventPrepareRuntime<'a> { fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result { f.debug_struct("EventPrepareRuntime").field("token_capacity",&self.token_capacity).field("messages",&self.messages.len()).finish() } }
+impl<'a> EventPrepareRuntime<'a> { fn reset(&self) { self.formatted_length.set(0); self.format_accepted.set(false); self.format_err_code.set(0); self.tokenize_accepted.set(false); self.tokenize_err_code.set(0); self.token_count.set(0); self.err.set(crate::ConditionerError::None); self.result.set(false); } }
 
 sml! {
     TextConditioner {
@@ -116,737 +115,136 @@ sml! {
     }
 }
 
-/// Context for `TextConditioner` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
-pub struct TextConditionerContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
-}
+/// Bounded context retained by the generated machine.
+#[derive(Debug)]
+pub struct TextConditionerContext { pub bound: bool, pub formatted: [u8; 32768], pub formatter: Option<fn(crate::FormatRequest<'_>) -> Result<(), crate::ConditionerError>>, pub tokenizer: Option<fn(&[u8], bool, bool, &mut [i32]) -> Result<usize, crate::ConditionerError>>, pub tokenizer_bind: Option<fn(bool, &mut i32) -> bool>, pub add_special_default: bool, pub parse_special_default: bool, pub error: crate::ConditionerError, pub result: bool, pub token_count: usize }
+impl Default for TextConditionerContext { fn default()->Self { Self { bound:false, formatted:[0;32768], formatter:None, tokenizer:None, tokenizer_bind:None, add_special_default:true, parse_special_default:false, error:crate::ConditionerError::None, result:false, token_count:0 } } }
 
 impl TextConditionerStateMachineContext for TextConditionerContext {
-    fn begin_bind_from_done(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn begin_bind_from_errored(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn begin_bind_from_idle(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn begin_bind_from_unexpected(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn begin_bind_from_uninitialized(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_bind
-        todo!("TODO: port action `begin_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn begin_prepare_bind_defaults_from_done(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_bind_defaults
-        todo!(
-            "TODO: port action `begin_prepare_bind_defaults` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_bind_defaults_from_errored(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_bind_defaults
-        todo!(
-            "TODO: port action `begin_prepare_bind_defaults` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_bind_defaults_from_idle(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_bind_defaults
-        todo!(
-            "TODO: port action `begin_prepare_bind_defaults` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_bind_defaults_from_unexpected(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_bind_defaults
-        todo!(
-            "TODO: port action `begin_prepare_bind_defaults` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_from_request_from_done(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_from_request
-        todo!(
-            "TODO: port action `begin_prepare_from_request` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_from_request_from_errored(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_from_request
-        todo!(
-            "TODO: port action `begin_prepare_from_request` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_from_request_from_idle(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_from_request
-        todo!(
-            "TODO: port action `begin_prepare_from_request` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn begin_prepare_from_request_from_unexpected(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::begin_prepare_from_request
-        todo!(
-            "TODO: port action `begin_prepare_from_request` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn bind_error_backend(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::bind_error_backend
-        todo!(
-            "TODO: port action `bind_error_backend` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn bind_error_backend_code(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_error_backend_code
-        todo!(
-            "TODO: port guard `bind_error_backend_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn bind_error_capacity_code(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_error_capacity_code
-        todo!(
-            "TODO: port guard `bind_error_capacity_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn bind_error_invalid_argument_code(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_error_invalid_argument_code
-        todo!(
-            "TODO: port guard `bind_error_invalid_argument_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn bind_error_model_invalid_code(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_error_model_invalid_code
-        todo!(
-            "TODO: port guard `bind_error_model_invalid_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn bind_error_untracked_code(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_error_untracked_code
-        todo!(
-            "TODO: port guard `bind_error_untracked_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn bind_rejected_no_error(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_rejected_no_error
-        todo!(
-            "TODO: port guard `bind_rejected_no_error` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn bind_success(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::bind_success
-        todo!(
-            "TODO: port action `bind_success` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn bind_successful(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::bind_successful
-        todo!(
-            "TODO: port guard `bind_successful` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn dispatch_bind_tokenizer(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::dispatch_bind_tokenizer
-        todo!(
-            "TODO: port action `dispatch_bind_tokenizer` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn dispatch_format(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::dispatch_format
-        todo!(
-            "TODO: port action `dispatch_format` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn dispatch_tokenize(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::dispatch_tokenize
-        todo!(
-            "TODO: port action `dispatch_tokenize` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn emit_bind_done(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::emit_bind_done
-        todo!(
-            "TODO: port action `emit_bind_done` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn emit_bind_error(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::emit_bind_error
-        todo!(
-            "TODO: port action `emit_bind_error` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn emit_prepare_done(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::emit_prepare_done
-        todo!(
-            "TODO: port action `emit_prepare_done` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn emit_prepare_error(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::emit_prepare_error
-        todo!(
-            "TODO: port action `emit_prepare_error` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn format_error_backend(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::format_error_backend
-        todo!(
-            "TODO: port action `format_error_backend` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn format_error_backend_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_error_backend_code
-        todo!(
-            "TODO: port guard `format_error_backend_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_error_capacity_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_error_capacity_code
-        todo!(
-            "TODO: port guard `format_error_capacity_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_error_invalid_argument(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::format_error_invalid_argument
-        todo!(
-            "TODO: port action `format_error_invalid_argument` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn format_error_invalid_argument_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_error_invalid_argument_code
-        todo!(
-            "TODO: port guard `format_error_invalid_argument_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_error_model_invalid_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_error_model_invalid_code
-        todo!(
-            "TODO: port guard `format_error_model_invalid_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_error_untracked_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_error_untracked_code
-        todo!(
-            "TODO: port guard `format_error_untracked_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_length_overflow(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_length_overflow
-        todo!(
-            "TODO: port guard `format_length_overflow` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_rejected_no_error(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_rejected_no_error
-        todo!(
-            "TODO: port guard `format_rejected_no_error` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn format_successful(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::format_successful
-        todo!(
-            "TODO: port guard `format_successful` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn has_bind_done_callback(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::has_bind_done_callback
-        todo!(
-            "TODO: port guard `has_bind_done_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn has_bind_error_callback(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::has_bind_error_callback
-        todo!(
-            "TODO: port guard `has_bind_error_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn has_bind_error_out(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::has_bind_error_out
-        todo!(
-            "TODO: port guard `has_bind_error_out` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn has_prepare_done_callback(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::has_prepare_done_callback
-        todo!(
-            "TODO: port guard `has_prepare_done_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn has_prepare_error_callback(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::has_prepare_error_callback
-        todo!(
-            "TODO: port guard `has_prepare_error_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn invalid_bind(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::invalid_bind
-        todo!("TODO: port guard `invalid_bind` from emel.cpp/src/emel/text/conditioner/guards.hpp")
-    }
-    fn invalid_prepare(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::invalid_prepare
-        todo!(
-            "TODO: port guard `invalid_prepare` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn no_bind_done_callback(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::no_bind_done_callback
-        todo!(
-            "TODO: port guard `no_bind_done_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn no_bind_error_callback(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::no_bind_error_callback
-        todo!(
-            "TODO: port guard `no_bind_error_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn no_bind_error_out(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::no_bind_error_out
-        todo!(
-            "TODO: port guard `no_bind_error_out` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn no_prepare_done_callback(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::no_prepare_done_callback
-        todo!(
-            "TODO: port guard `no_prepare_done_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn no_prepare_error_callback(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::no_prepare_error_callback
-        todo!(
-            "TODO: port guard `no_prepare_error_callback` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn on_unexpected_from_bind_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_bind_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_bind_publish_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_bind_publish_success(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_bind_success(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_binding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_format_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_idle(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_prepare_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_prepare_publish_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_prepare_publish_error_count(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_prepare_publish_success_count(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_prepare_publish_success_error(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_prepare_success(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_preparing(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_tokenize_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_tokenizing(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_uninitialized(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn prepare_success(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::prepare_success
-        todo!(
-            "TODO: port action `prepare_success` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn reject_bind_from_done(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn reject_bind_from_errored(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn reject_bind_from_idle(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn reject_bind_from_unexpected(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn reject_bind_from_uninitialized(&mut self, _event: &EventBindRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_bind
-        todo!("TODO: port action `reject_bind` from emel.cpp/src/emel/text/conditioner/actions.hpp")
-    }
-    fn reject_prepare_from_done(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_prepare
-        todo!(
-            "TODO: port action `reject_prepare` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn reject_prepare_from_errored(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_prepare
-        todo!(
-            "TODO: port action `reject_prepare` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn reject_prepare_from_idle(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_prepare
-        todo!(
-            "TODO: port action `reject_prepare` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn reject_prepare_from_unexpected(&mut self, _event: &EventPrepareRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_prepare
-        todo!(
-            "TODO: port action `reject_prepare` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn reject_prepare_from_uninitialized(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::reject_prepare
-        todo!(
-            "TODO: port action `reject_prepare` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_backend_event_bind_runtime(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_backend
-        todo!(
-            "TODO: port action `set_error_backend` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_backend_event_prepare_runtime(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_backend
-        todo!(
-            "TODO: port action `set_error_backend` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_capacity_event_bind_runtime(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_capacity
-        todo!(
-            "TODO: port action `set_error_capacity` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_capacity_event_prepare_runtime(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_capacity
-        todo!(
-            "TODO: port action `set_error_capacity` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_invalid_argument_event_bind_runtime(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_invalid_argument
-        todo!(
-            "TODO: port action `set_error_invalid_argument` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_invalid_argument_event_prepare_runtime(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_invalid_argument
-        todo!(
-            "TODO: port action `set_error_invalid_argument` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_model_invalid_event_bind_runtime(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_model_invalid
-        todo!(
-            "TODO: port action `set_error_model_invalid` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_model_invalid_event_prepare_runtime(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_model_invalid
-        todo!(
-            "TODO: port action `set_error_model_invalid` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_untracked_event_bind_runtime(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_untracked
-        todo!(
-            "TODO: port action `set_error_untracked` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn set_error_untracked_event_prepare_runtime(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::set_error_untracked
-        todo!(
-            "TODO: port action `set_error_untracked` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn tokenize_count_invalid(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_count_invalid
-        todo!(
-            "TODO: port guard `tokenize_count_invalid` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_error_backend_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_error_backend_code
-        todo!(
-            "TODO: port guard `tokenize_error_backend_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_error_backend_from_tokenize_decision(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::tokenize_error_backend
-        todo!(
-            "TODO: port action `tokenize_error_backend` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn tokenize_error_capacity_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_error_capacity_code
-        todo!(
-            "TODO: port guard `tokenize_error_capacity_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_error_invalid_argument_code(
-        &self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_error_invalid_argument_code
-        todo!(
-            "TODO: port guard `tokenize_error_invalid_argument_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_error_model_invalid_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_error_model_invalid_code
-        todo!(
-            "TODO: port guard `tokenize_error_model_invalid_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_error_untracked_code(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_error_untracked_code
-        todo!(
-            "TODO: port guard `tokenize_error_untracked_code` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_rejected_no_error(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_rejected_no_error
-        todo!(
-            "TODO: port guard `tokenize_rejected_no_error` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn tokenize_successful(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::tokenize_successful
-        todo!(
-            "TODO: port guard `tokenize_successful` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn valid_bind(&self, _event: &EventBindRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::valid_bind
-        todo!("TODO: port guard `valid_bind` from emel.cpp/src/emel/text/conditioner/guards.hpp")
-    }
-    fn valid_prepare_with_bind_defaults(&self, _event: &EventPrepareRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::valid_prepare_with_bind_defaults
-        todo!(
-            "TODO: port guard `valid_prepare_with_bind_defaults` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn valid_prepare_with_request_overrides(
-        &self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/guards.hpp::valid_prepare_with_request_overrides
-        todo!(
-            "TODO: port guard `valid_prepare_with_request_overrides` from emel.cpp/src/emel/text/conditioner/guards.hpp"
-        )
-    }
-    fn write_bind_error_out_from_bind_error(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::write_bind_error_out
-        todo!(
-            "TODO: port action `write_bind_error_out` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn write_bind_error_out_from_bind_success(
-        &mut self,
-        _event: &EventBindRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::write_bind_error_out
-        todo!(
-            "TODO: port action `write_bind_error_out` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn write_prepare_error_out_from_prepare_publish_error_count(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::write_prepare_error_out
-        todo!(
-            "TODO: port action `write_prepare_error_out` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn write_prepare_error_out_from_prepare_publish_success_count(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::write_prepare_error_out
-        todo!(
-            "TODO: port action `write_prepare_error_out` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn write_prepare_token_count_from_prepare_error(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::write_prepare_token_count
-        todo!(
-            "TODO: port action `write_prepare_token_count` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
-    fn write_prepare_token_count_from_prepare_success(
-        &mut self,
-        _event: &EventPrepareRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/conditioner/actions.hpp::write_prepare_token_count
-        todo!(
-            "TODO: port action `write_prepare_token_count` from emel.cpp/src/emel/text/conditioner/actions.hpp"
-        )
-    }
+    fn begin_bind_from_done(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.begin_bind(event) }
+    fn begin_bind_from_errored(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.begin_bind(event) }
+    fn begin_bind_from_idle(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.begin_bind(event) }
+    fn begin_bind_from_unexpected(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.begin_bind(event) }
+    fn begin_bind_from_uninitialized(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.begin_bind(event) }
+    fn begin_prepare_bind_defaults_from_done(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_defaults(event) }
+    fn begin_prepare_bind_defaults_from_errored(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_defaults(event) }
+    fn begin_prepare_bind_defaults_from_idle(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_defaults(event) }
+    fn begin_prepare_bind_defaults_from_unexpected(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_defaults(event) }
+    fn begin_prepare_from_request_from_done(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_request(event) }
+    fn begin_prepare_from_request_from_errored(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_request(event) }
+    fn begin_prepare_from_request_from_idle(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_request(event) }
+    fn begin_prepare_from_request_from_unexpected(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { self.begin_prepare_request(event) }
+    fn bind_error_backend(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.set_bind_error(event, crate::ConditionerError::Backend); Ok(()) }
+    fn bind_error_backend_code(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(event.bind_err_code.get() == 8) }
+    fn bind_error_capacity_code(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(event.bind_err_code.get() == 4) }
+    fn bind_error_invalid_argument_code(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(event.bind_err_code.get() == 1) }
+    fn bind_error_model_invalid_code(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(event.bind_err_code.get() == 2) }
+    fn bind_error_untracked_code(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(event.bind_err_code.get() != 0 && !matches!(event.bind_err_code.get(), 1|2|4|8)) }
+    fn bind_rejected_no_error(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(!event.bind_accepted.get() && event.bind_err_code.get() == 0) }
+    fn bind_success(&mut self, event: &EventBindRuntime) -> Result<(), ()> { self.bound=true; self.error=crate::ConditionerError::None; self.result=true; event.err.set(crate::ConditionerError::None); event.result.set(true); Ok(()) }
+    fn bind_successful(&self, event: &EventBindRuntime) -> Result<bool, ()> { Ok(event.bind_accepted.get() && event.bind_err_code.get() == 0) }
+    fn dispatch_bind_tokenizer(&mut self, event: &EventBindRuntime) -> Result<(), ()> { let mut code=0; let accepted=self.tokenizer_bind.map(|f| f(event.tokenizer_available,&mut code)).unwrap_or(event.tokenizer_available); event.bind_accepted.set(accepted); event.bind_err_code.set(code); Ok(()) }
+    fn dispatch_format(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { let mut length=0; let result=self.formatter.map(|f| f(crate::FormatRequest{messages:event.messages,add_generation_prompt:event.add_generation_prompt,enable_thinking:event.enable_thinking,output:&mut self.formatted,output_length:&mut length})).unwrap_or(Err(crate::ConditionerError::Backend)); event.formatted_length.set(length); match result { Ok(())=>{event.format_accepted.set(true);event.format_err_code.set(0)},Err(e)=>{event.format_err_code.set(e.code())} }; Ok(()) }
+    fn dispatch_tokenize(&mut self, event: &EventPrepareRuntime) -> Result<(), ()> { let length=event.formatted_length.get().min(self.formatted.len()); let mut ids=event.token_ids.borrow_mut(); let result=self.tokenizer.map(|f| f(&self.formatted[..length],event.add_special.get(),event.parse_special.get(),&mut ids[..event.token_capacity.min(ids.len())])).unwrap_or(Err(crate::ConditionerError::Backend)); match result { Ok(n)=>{event.tokenize_accepted.set(true);event.token_count.set(n);self.token_count=n},Err(e)=>{event.tokenize_err_code.set(e.code());event.token_count.set(0);self.token_count=0} }; Ok(()) }
+    fn emit_bind_done(&mut self,event:&EventBindRuntime)->Result<(), ()>{if let Some(f)=event.done_callback{let _=f(crate::BindingDone)} Ok(())}
+    fn emit_bind_error(&mut self,event:&EventBindRuntime)->Result<(), ()>{if let Some(f)=event.error_callback{let _=f(event.err.get())} Ok(())}
+    fn emit_prepare_done(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{if let Some(f)=event.done_callback{let _=f(crate::ConditioningDone{token_count:event.token_count.get()})} Ok(())}
+    fn emit_prepare_error(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{if let Some(f)=event.error_callback{let _=f(event.err.get())} Ok(())}
+    fn format_error_backend(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::Backend);Ok(())}
+    fn format_error_backend_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.format_err_code.get()==8)}
+    fn format_error_capacity_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.format_err_code.get()==4)}
+    fn format_error_invalid_argument(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::InvalidArgument);Ok(())}
+    fn format_error_invalid_argument_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.format_err_code.get()==1)}
+    fn format_error_model_invalid_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.format_err_code.get()==2)}
+    fn format_error_untracked_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.format_err_code.get()!=0&&!matches!(event.format_err_code.get(),1|2|4|8))}
+    fn format_length_overflow(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.formatted_length.get()>event.formatted_capacity)}
+    fn format_rejected_no_error(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(!event.format_accepted.get()&&event.format_err_code.get()==0)}
+    fn format_successful(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.format_accepted.get()&&event.format_err_code.get()==0&&event.formatted_length.get()<=event.formatted_capacity)}
+    fn has_bind_done_callback(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(event.done_callback.is_some())}
+    fn has_bind_error_callback(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(event.error_callback.is_some())}
+    fn has_bind_error_out(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(event.error_out.is_some())}
+    fn has_prepare_done_callback(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.done_callback.is_some())}
+    fn has_prepare_error_callback(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.error_callback.is_some())}
+    fn invalid_bind(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(!self.valid_bind(event)?)}
+    fn invalid_prepare(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(!self.valid_prepare(event)?)}
+    fn no_bind_done_callback(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(!self.has_bind_done_callback(event)?)}
+    fn no_bind_error_callback(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(!self.has_bind_error_callback(event)?)}
+    fn no_bind_error_out(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(!self.has_bind_error_out(event)?)}
+    fn no_prepare_done_callback(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(!self.has_prepare_done_callback(event)?)}
+    fn no_prepare_error_callback(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(!self.has_prepare_error_callback(event)?)}
+    fn on_unexpected_from_bind_decision(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_bind_error(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_bind_publish_error(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_bind_publish_success(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_bind_success(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_binding(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_done(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_errored(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_format_decision(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_idle(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_prepare_error(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_prepare_publish_error(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_prepare_publish_error_count(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_prepare_publish_success_count(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_prepare_publish_success_error(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_prepare_success(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_preparing(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_tokenize_decision(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_tokenizing(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_unexpected(&mut self)->Result<(), ()>{self.unexpected()}
+    fn on_unexpected_from_uninitialized(&mut self)->Result<(), ()>{self.unexpected()}
+    fn prepare_success(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.error=crate::ConditionerError::None;self.result=true;event.result.set(true);Ok(())}
+    fn reject_bind_from_done(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.reject_bind(event)}
+    fn reject_bind_from_errored(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.reject_bind(event)}
+    fn reject_bind_from_idle(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.reject_bind(event)}
+    fn reject_bind_from_unexpected(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.reject_bind(event)}
+    fn reject_bind_from_uninitialized(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.reject_bind(event)}
+    fn reject_prepare_from_done(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.reject_prepare(event)}
+    fn reject_prepare_from_errored(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.reject_prepare(event)}
+    fn reject_prepare_from_idle(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.reject_prepare(event)}
+    fn reject_prepare_from_unexpected(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.reject_prepare(event)}
+    fn reject_prepare_from_uninitialized(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.reject_prepare(event)}
+    fn set_error_backend_event_bind_runtime(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.set_bind_error(event,crate::ConditionerError::Backend);Ok(())}
+    fn set_error_backend_event_prepare_runtime(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::Backend);Ok(())}
+    fn set_error_capacity_event_bind_runtime(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.set_bind_error(event,crate::ConditionerError::Capacity);Ok(())}
+    fn set_error_capacity_event_prepare_runtime(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::Capacity);Ok(())}
+    fn set_error_invalid_argument_event_bind_runtime(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.set_bind_error(event,crate::ConditionerError::InvalidArgument);Ok(())}
+    fn set_error_invalid_argument_event_prepare_runtime(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::InvalidArgument);Ok(())}
+    fn set_error_model_invalid_event_bind_runtime(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.set_bind_error(event,crate::ConditionerError::ModelInvalid);Ok(())}
+    fn set_error_model_invalid_event_prepare_runtime(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::ModelInvalid);Ok(())}
+    fn set_error_untracked_event_bind_runtime(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.set_bind_error(event,crate::ConditionerError::Untracked);Ok(())}
+    fn set_error_untracked_event_prepare_runtime(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::Untracked);Ok(())}
+    fn tokenize_count_invalid(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.tokenize_accepted.get()&&event.token_count.get()>event.token_capacity)}
+    fn tokenize_error_backend_from_tokenize_decision(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::Backend);Ok(())}
+    fn tokenize_error_capacity_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.tokenize_err_code.get()==4)}
+    fn tokenize_error_invalid_argument_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.tokenize_err_code.get()==1)}
+    fn tokenize_error_model_invalid_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.tokenize_err_code.get()==2)}
+    fn tokenize_error_untracked_code(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.tokenize_err_code.get()!=0&&!matches!(event.tokenize_err_code.get(),1|2|4|8))}
+    fn tokenize_rejected_no_error(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(!event.tokenize_accepted.get()&&event.tokenize_err_code.get()==0)}
+    fn tokenize_successful(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(event.tokenize_accepted.get()&&event.tokenize_err_code.get()==0&&event.token_count.get()<=event.token_capacity)}
+    fn valid_bind(&self,event:&EventBindRuntime)->Result<bool, ()>{Ok(event.tokenizer_available&&event.formatter_available&&event.model_valid&&event.formatter.is_some()&&event.tokenizer.is_some())}
+    fn valid_prepare_with_bind_defaults(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(self.valid_prepare(event)?&&event.use_bind_defaults)}
+    fn valid_prepare_with_request_overrides(&self,event:&EventPrepareRuntime)->Result<bool, ()>{Ok(self.valid_prepare(event)?&&!event.use_bind_defaults)}
+    fn write_bind_error_out_from_bind_error(&mut self,event:&EventBindRuntime)->Result<(), ()>{if let Some(out)=event.error_out.as_deref_mut(){*out=event.err.get().code()}Ok(())}
+    fn write_bind_error_out_from_bind_success(&mut self,event:&EventBindRuntime)->Result<(), ()>{if let Some(out)=event.error_out.as_deref_mut(){*out=0}Ok(())}
+    fn write_prepare_error_out_from_prepare_publish_error_count(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{if let Some(out)=event.error_out.as_deref_mut(){*out=event.err.get().code()}Ok(())}
+    fn write_prepare_error_out_from_prepare_publish_success_count(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{if let Some(out)=event.error_out.as_deref_mut(){*out=0}Ok(())}
+    fn write_prepare_token_count_from_prepare_error(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{*event.token_count_out=0;Ok(())}
+    fn write_prepare_token_count_from_prepare_success(&mut self,event:&EventPrepareRuntime)->Result<(), ()>{*event.token_count_out=event.token_count.get();Ok(())}
 }
+impl TextConditionerContext {
+    fn begin_bind(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.bound=false;self.error=crate::ConditionerError::None;self.result=false;event.reset();self.formatter=event.formatter;self.tokenizer=event.tokenizer;self.tokenizer_bind=event.tokenizer_bind;self.add_special_default=event.add_special;self.parse_special_default=event.parse_special;Ok(())}
+    fn begin_prepare_defaults<'a>(&mut self,event:&EventPrepareRuntime<'a>)->Result<(), ()>{event.reset();event.add_special.set(self.add_special_default);event.parse_special.set(self.parse_special_default);Ok(())}
+    fn begin_prepare_request<'a>(&mut self,event:&EventPrepareRuntime<'a>)->Result<(), ()>{event.reset();event.add_special.set(event.add_special_request);event.parse_special.set(event.parse_special_request);Ok(())}
+    fn valid_prepare<'a>(&self,event:&EventPrepareRuntime<'a>)->Result<bool, ()>{Ok(self.bound&&event.formatter_available&&event.tokenizer_available&&event.model_valid&&event.token_ids_present&&event.token_capacity>0&&event.token_capacity<=event.token_ids.borrow().len()&&event.formatted_capacity>0)}
+    fn set_bind_error(&mut self,event:&EventBindRuntime,error:crate::ConditionerError){self.bound=false;self.error=error;self.result=false;event.err.set(error);event.result.set(false)}
+    fn set_prepare_error<'a>(&mut self,event:&EventPrepareRuntime<'a>,error:crate::ConditionerError){self.error=error;self.result=false;self.token_count=0;event.err.set(error);event.result.set(false);event.token_count.set(0)}
+    fn reject_bind(&mut self,event:&EventBindRuntime)->Result<(), ()>{self.set_bind_error(event,crate::ConditionerError::InvalidArgument);Ok(())}
+    fn reject_prepare<'a>(&mut self,event:&EventPrepareRuntime<'a>)->Result<(), ()>{self.set_prepare_error(event,crate::ConditionerError::InvalidArgument);Ok(())}
+    fn unexpected(&mut self)->Result<(), ()>{self.error=crate::ConditionerError::InvalidArgument;self.result=false;self.token_count=0;Ok(())}
+}
+
+/// Synchronous actor wrapper with generated state inspection.
+pub struct TextConditioner { machine: TextConditionerStateMachine<TextConditionerContext> }
+impl Default for TextConditioner { fn default()->Self { Self::new() } }
+impl TextConditioner { pub fn new()->Self { Self { machine:TextConditionerStateMachine::new(TextConditionerContext::default()) } } pub fn state(&self)->&TextConditionerStates{self.machine.state()} pub fn is(&self,state:&TextConditionerStates)->bool{self.machine.is(state)} pub fn context(&self)->&TextConditionerContext{self.machine.context()} }
