@@ -216,15 +216,6 @@ sml! {
         "unexpected"_s <= "streaming"_s + unexpected_event<_> / on_unexpected_from_streaming,
         "unexpected"_s <= "generation_error"_s + unexpected_event<_> / on_unexpected_from_generation_error,
         "unexpected"_s <= "errored"_s + unexpected_event<_> / on_unexpected_from_errored,
-        "uninitialized"_s <= "uninitialized"_s + event<EventCaptureDiagnostics> / capture_diagnostics,
-        "ready"_s <= "ready"_s + event<EventCaptureDiagnostics> / capture_diagnostics,
-        "errored"_s <= "errored"_s + event<EventCaptureDiagnostics> / capture_diagnostics,
-        "uninitialized"_s <= "uninitialized"_s + event<EventCaptureGraphLifecycle> / capture_graph_lifecycle,
-        "ready"_s <= "ready"_s + event<EventCaptureGraphLifecycle> / capture_graph_lifecycle,
-        "errored"_s <= "errored"_s + event<EventCaptureGraphLifecycle> / capture_graph_lifecycle,
-        "uninitialized"_s <= "uninitialized"_s + event<EventConfigureBenchmarkLane> / configure_benchmark_lane,
-        "ready"_s <= "ready"_s + event<EventConfigureBenchmarkLane> / configure_benchmark_lane,
-        "errored"_s <= "errored"_s + event<EventConfigureBenchmarkLane> / configure_benchmark_lane,
         "unexpected"_s <= "unexpected"_s + unexpected_event<_> / on_unexpected_from_unexpected,
     }
 }
