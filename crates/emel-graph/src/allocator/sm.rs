@@ -131,7 +131,7 @@ pub struct Allocator { machine: GraphAllocatorStateMachine<GraphAllocatorContext
 impl Default for Allocator { fn default() -> Self { Self::new() } }
 impl Allocator {
     #[must_use] pub fn new() -> Self { Self { machine: GraphAllocatorStateMachine::new(GraphAllocatorContext::default()) } }
-    pub fn process_event(&mut self, event: EventAllocateGraphPlan) -> bool { self.machine.process_event(event) }
+    pub fn process_event(&mut self, event: EventAllocateGraphPlan) -> bool { self.machine.process_event(event).is_ok() }
     #[must_use] pub fn is_ready(&self) -> bool { self.machine.is(&GraphAllocatorStates::Ready) }
     #[must_use] pub fn plan(&self) -> AllocationPlan { self.machine.context().plan }
     #[must_use] pub fn error(&self) -> AllocationError { self.machine.context().error }
