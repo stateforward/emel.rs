@@ -442,6 +442,10 @@ impl TokenBatcherStateMachine<Context> {
             Ok(())
         }
     }
+
+    pub(super) fn is_ready(&self) -> bool {
+        self.is(&TokenBatcherStates::Ready)
+    }
 }
 
 impl TokenBatcherStateMachineContext for Context {

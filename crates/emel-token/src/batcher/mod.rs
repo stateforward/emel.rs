@@ -30,7 +30,15 @@ impl TokenBatcher {
     /// fails, or [`BatchError::Internal`] when the local state-machine
     /// contract cannot complete.
     pub fn process_event(&mut self, request: BatchRequest<'_>) -> Result<BatchResult, BatchError> {
-        self.machine.dispatch(request)
+        let result = self.machine.dispatch(request);
+        assert!(self.machine.is_ready(), "token batcher must return to ready");
+        result
+    }
+
+    /// Reports whether the generated state machine is in its stable ready state.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.machine.is_ready()
     }
 
     /// Exercises the explicit unexpected-event outcome.
@@ -40,7 +48,9 @@ impl TokenBatcher {
     /// Returns [`BatchError::UnexpectedEvent`] while the batcher is in its
     /// ready state.
     pub fn process_unexpected(&mut self) -> Result<(), BatchError> {
-        self.machine.dispatch_unexpected()
+        let result = self.machine.dispatch_unexpected();
+        assert!(self.machine.is_ready(), "token batcher must return to ready");
+        result
     }
 }
 

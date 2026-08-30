@@ -432,6 +432,60 @@ fn zero_vocab_matches_source_non_enforcing_mode_and_unexpected_is_explicit() {
 }
 
 #[test]
+fn generated_ready_state_survives_success_invalid_and_unexpected_dispatches() {
+    let mut batcher = TokenBatcher::new();
+    assert!(batcher.is_ready());
+
+    let token_ids = [1];
+    let mut primary_out = [0; 1];
+    let mut masks_out = [0; 1];
+    let mut positions_out = [0; 1];
+    let mut output_mask = [0; 1];
+    assert!(batcher
+        .process_event(request(
+            &token_ids,
+            32,
+            None,
+            1,
+            None,
+            None,
+            &mut primary_out,
+            &mut masks_out,
+            &mut positions_out,
+            &mut output_mask,
+        ))
+        .is_ok());
+    assert!(batcher.is_ready());
+
+    let mut primary_out = [0; 1];
+    let mut masks_out = [0; 1];
+    let mut positions_out = [0; 1];
+    let mut output_mask = [0; 1];
+    assert_eq!(
+        batcher.process_event(request(
+            &[32],
+            32,
+            None,
+            1,
+            None,
+            None,
+            &mut primary_out,
+            &mut masks_out,
+            &mut positions_out,
+            &mut output_mask,
+        )),
+        Err(BatchError::InvalidRequest)
+    );
+    assert!(batcher.is_ready());
+
+    assert_eq!(
+        batcher.process_unexpected(),
+        Err(BatchError::UnexpectedEvent)
+    );
+    assert!(batcher.is_ready());
+}
+
+#[test]
 fn request_dispatch_allocates_nothing() {
     let mut batcher = TokenBatcher::new();
     let token_ids = [1, 2];
