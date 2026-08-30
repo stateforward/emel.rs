@@ -311,8 +311,9 @@ impl SpeechTranscriberStateMachineContext for SpeechTranscriberContext {
         let mut tokens = event.storage.generated_tokens.borrow_mut();
         let mut workspace = event.storage.decoder_workspace.borrow_mut();
         let mut logits = event.storage.logits.borrow_mut();
-        let mut result = DecoderResult::default();
         self.decoder_accepted = callback(state, self.encoder_frame_count, &mut **tokens, &mut **workspace, &mut **logits, &mut result);
+        let token_capacity = tokens.len();
+        if result.generated_token_count < 0 || result.generated_token_count as usize > token_capacity { self.decoder_accepted = false; }
         if self.decoder_accepted { self.generated_token_count = result.generated_token_count; self.selected_token = result.selected_token; self.confidence = result.confidence; self.decoder_digest = result.digest; }
         Ok(())
     }
@@ -321,10 +322,9 @@ impl SpeechTranscriberStateMachineContext for SpeechTranscriberContext {
         let tokens = event.storage.generated_tokens.borrow();
         let count = self.generated_token_count.max(0) as usize;
         let tokens = tokens.get(..count).unwrap_or(&[]);
-        let mut transcript = event.transcript.borrow_mut();
         let result = callback(event.tokenizer.model_json, tokens, &mut **transcript);
-        self.detokenize_accepted = result.is_some();
-        if let Some(size) = result { self.transcript_size = size; }
+        self.detokenize_accepted = result.is_some_and(|size| size >= 0 && size as usize <= transcript.len());
+        if self.detokenize_accepted { self.transcript_size = result.unwrap_or(0); }
         Ok(())
     }
     fn effect_emit_initialize_error(&mut self, event: &EventInitializeRun<'_>) -> Result<(), ()> { if let Some(callback) = event.on_error { let _ = callback(InitializeError { error: self.err }); } Ok(()) }
