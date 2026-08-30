@@ -1673,9 +1673,9 @@ impl Data {
         if count == 0 || count > MAX_TENSORS {
             return Err(DataError::TooManyTensors);
         }
-        // Observe descriptor and view lengths before allocating callback-owned
-        // storage. `WithTensor` borrows source views only for synchronous
-        // dispatch, so each copy buffer is ready before its callback runs.
+        // Observe descriptor and view lengths before allocating copy storage.
+        // `WithTensor` borrows source views only for synchronous dispatch, so
+        // every destination buffer is initialized before the second pass.
         let mut descriptors = Vec::new();
         descriptors
             .try_reserve_exact(count)
@@ -1695,6 +1695,9 @@ impl Data {
                 .ok_or(DataError::InvalidTensor)?;
         }
 
+        // Reserve and initialize every owned destination before any second-pass
+        // dispatch. The callbacks below only compare metadata and copy bytes;
+        // they never grow or allocate a Vec.
         let mut owned = Vec::new();
         owned
             .try_reserve_exact(count)
@@ -1707,8 +1710,6 @@ impl Data {
             if name_capacity > MAX_NAME_BYTES || bytes_capacity == 0 {
                 return Err(DataError::InvalidTensor);
             }
-            // Reservations and initialization happen before dispatch; the
-            // callback itself only copies borrowed bytes into these buffers.
             let mut name = Vec::new();
             name.try_reserve_exact(name_capacity)
                 .map_err(|_| DataError::Capacity)?;
@@ -1718,12 +1719,18 @@ impl Data {
                 .try_reserve_exact(bytes_capacity)
                 .map_err(|_| DataError::Capacity)?;
             bytes.resize(bytes_capacity, 0);
+            owned.push((name, descriptor, bytes));
+        }
+
+        for index in 0..parsed.tensor_count() {
+            let (name, descriptor, bytes) =
+                &mut owned[usize::try_from(index).map_err(|_| DataError::TooManyTensors)?];
             let observed = loader.process_event(emel_gguf::event::WithTensor::new(
                 index,
                 |borrowed_name: &[u8],
                  observed_descriptor: emel_gguf::event::TensorDescriptor,
                  borrowed_bytes: &[u8]| {
-                    if observed_descriptor == descriptor
+                    if observed_descriptor == *descriptor
                         && borrowed_name.len() == name.len()
                         && borrowed_bytes.len() == bytes.len()
                     {
@@ -1764,8 +1771,8 @@ impl Data {
             {
                 return Err(DataError::InvalidTensor);
             }
-            owned.push((name, descriptor, bytes));
         }
+
         let mut tensors = Vec::new();
         tensors
             .try_reserve_exact(count)
