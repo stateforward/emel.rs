@@ -21,6 +21,29 @@ pub const MAX_TOKENS: usize = 4096;
 pub const MAX_SEQ: usize = 256;
 pub const SEQ_WORDS: usize = MAX_SEQ.div_ceil(64);
 
+/// Synchronous success outcome delivered to a batch callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchDone {
+    /// Number of tokens in the completed request.
+    pub token_count: usize,
+    /// Number of selected output tokens.
+    pub outputs_total: usize,
+}
+
+/// Synchronous failure outcome delivered to a batch callback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchFailure {
+    /// Failure classification.
+    pub error: BatchError,
+    /// Number of tokens in the rejected request.
+    pub token_count: usize,
+}
+
+/// Statically dispatched, non-retained success callback.
+pub type BatchDoneCallback = fn(BatchDone);
+/// Statically dispatched, non-retained failure callback.
+pub type BatchErrorCallback = fn(BatchFailure);
+
 /// Failure reported by a position-seed provider.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PositionSeedError {
@@ -83,6 +106,10 @@ pub struct BatchRequest<'a> {
     pub seq_mask_words_out: Option<&'a mut usize>,
     pub positions_count_out: Option<&'a mut usize>,
     pub outputs_total_out: Option<&'a mut usize>,
+    /// Optional synchronous completion callback.
+    pub on_done: Option<BatchDoneCallback>,
+    /// Optional synchronous error callback.
+    pub on_error: Option<BatchErrorCallback>,
     pub outputs: BatchOutputs<'a>,
 }
 
@@ -222,6 +249,8 @@ struct RequestView<'a> {
     seq_mask_words_out: Option<&'a Cell<usize>>,
     positions_count_out: Option<&'a Cell<usize>>,
     outputs_total_out: Option<&'a Cell<usize>>,
+    on_done: Option<BatchDoneCallback>,
+    on_error: Option<BatchErrorCallback>,
 }
 
 #[derive(Clone, Copy)]
@@ -282,16 +311,23 @@ sml! {
         "positions_publish"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "positions_publish"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "positions_publish"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "output_decision"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / publish_positions,
+        "positions_mask_publish"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_present] / publish_mask_words,
+        "positions_count_decision"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_absent],
+        "positions_count_decision"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "positions_count_publish"_s <= "positions_count_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [positions_count_output_present] / publish_positions_count,
+        "output_decision"_s <= "positions_count_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [positions_count_output_absent],
+        "output_decision"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
 
         "output_all"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_all_mode] / set_output_all,
         "output_copy"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_copy_mode] / copy_output,
         "output_last"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_last_mode] / set_output_last,
         "errored"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "count_outputs"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "count_outputs"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "count_outputs"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "single_output_decision"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
+        "count_outputs"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
+        "count_outputs"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
+        "count_outputs"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
+        "outputs_total_publish"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_present] / publish_outputs_total,
+        "single_output_decision"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_absent],
+        "single_output_decision"_s <= "outputs_total_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "single_output_probe"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_required] / probe_single_output,
         "continuity_decision"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_skipped],
         "continuity_decision"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok],
@@ -302,8 +338,12 @@ sml! {
         "done"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok],
         "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_invalid] / invalid,
         "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "ready"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / publish_done,
-        "ready"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "done_callback_decision"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_present] / publish_done_callback,
+        "ready"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_absent],
+        "error_callback_decision"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [error_callback_present] / publish_error_callback,
+        "ready"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [error_callback_absent],
+        "ready"_s <= "done_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "ready"_s <= "error_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "ready"_s <= "request_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
         "errored"_s <= "errored"_s + UnexpectedProbe,
         "ready"_s <= "ready"_s + unexpected<_> / unexpected,
@@ -329,6 +369,8 @@ impl TokenBatcherStateMachine<Context> {
             seq_mask_words_out,
             positions_count_out,
             outputs_total_out,
+            on_done,
+            on_error,
             outputs,
         } = request;
         let primary_out = Cell::from_mut(outputs.seq_primary_ids).as_slice_of_cells();
@@ -354,6 +396,8 @@ impl TokenBatcherStateMachine<Context> {
                 seq_mask_words_out: mask_words_cell.as_ref().map(|c| &**c),
                 positions_count_out: positions_count_cell.as_ref().map(|c| &**c),
                 outputs_total_out: total_cell.as_ref().map(|c| &**c),
+                on_done,
+                on_error,
             },
             outputs: OutputCells {
                 seq_primary_ids: primary_out,
@@ -514,8 +558,32 @@ impl TokenBatcherStateMachineContext for Context {
         generate_unseeded(event);
         Ok(())
     }
-    fn publish_positions(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        publish_positions(event);
+    fn mask_words_output_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.seq_mask_words_out.is_some())
+    }
+    fn mask_words_output_absent(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.seq_mask_words_out.is_none())
+    }
+    fn positions_count_output_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.positions_count_out.is_some())
+    }
+    fn positions_count_output_absent(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.positions_count_out.is_none())
+    }
+    fn publish_mask_words(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        event
+            .request
+            .seq_mask_words_out
+            .expect("guard selected mask output")
+            .set(event.context.mask_words.get());
+        Ok(())
+    }
+    fn publish_positions_count(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        event
+            .request
+            .positions_count_out
+            .expect("guard selected position output")
+            .set(event.context.positions_count.get());
         Ok(())
     }
     fn output_all_mode(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -598,24 +666,51 @@ impl TokenBatcherStateMachineContext for Context {
         }
         Ok(())
     }
-    fn publish_done(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+    fn outputs_total_output_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.outputs_total_out.is_some())
+    }
+    fn outputs_total_output_absent(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.outputs_total_out.is_none())
+    }
+    fn publish_outputs_total(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         event
-            .context
-            .mask_words
-            .set(effective_mask_words(&event.request));
-        event
-            .context
-            .positions_count
-            .set(normalized_positions_count(&event.request));
-        if let Some(o) = event.request.seq_mask_words_out {
-            o.set(event.context.mask_words.get());
-        }
-        if let Some(o) = event.request.positions_count_out {
-            o.set(event.context.positions_count.get());
-        }
-        if let Some(o) = event.request.outputs_total_out {
-            o.set(event.context.outputs_total.get());
-        }
+            .request
+            .outputs_total_out
+            .expect("guard selected total output")
+            .set(event.context.outputs_total.get());
+        Ok(())
+    }
+    fn done_callback_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.on_done.is_some())
+    }
+    fn done_callback_absent(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.on_done.is_none())
+    }
+    fn error_callback_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.on_error.is_some())
+    }
+    fn error_callback_absent(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.on_error.is_none())
+    }
+    fn publish_done_callback(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        (event.request.on_done.expect("guard selected done callback"))(BatchDone {
+            token_count: event.request.token_ids.len(),
+            outputs_total: event.context.outputs_total.get(),
+        });
+        Ok(())
+    }
+    fn publish_error_callback(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        (event
+            .request
+            .on_error
+            .expect("guard selected error callback"))(BatchFailure {
+            error: match event.context.error.get() {
+                DispatchError::InvalidRequest => BatchError::InvalidRequest,
+                DispatchError::Backend => BatchError::Backend,
+                DispatchError::Internal | DispatchError::None => BatchError::Internal,
+            },
+            token_count: event.request.token_ids.len(),
+        });
         Ok(())
     }
     fn invalid(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
@@ -637,11 +732,11 @@ impl TokenBatcherStateMachineContext for Context {
 }
 
 fn has_masks(r: &RequestView<'_>) -> bool {
-    r.seq_masks.is_some()
-        && r.seq_mask_words > 0
-        && r.seq_mask_words <= SEQ_WORDS
-        && r.seq_masks
-            .is_some_and(|v| v.len() >= r.token_ids.len().saturating_mul(r.seq_mask_words))
+    // The C++ event carries a mask pointer and a row count separately. The
+    // flattened Rust slice uses one element per logical row for this presence
+    // test; width validation remains an independent payload guard.
+    r.seq_masks
+        .is_some_and(|values| values.len() >= r.token_ids.len())
 }
 fn has_primary(r: &RequestView<'_>) -> bool {
     r.seq_primary_ids
@@ -685,10 +780,9 @@ fn mask_has(mask: &[u64], id: i32) -> bool {
         .is_some_and(|id| id / 64 < mask.len() && mask[id / 64] & (1u64 << (id % 64)) != 0)
 }
 fn seq_payload_valid(r: &RequestView<'_>) -> bool {
-    if (r.seq_masks.is_some() && r.seq_mask_words > SEQ_WORDS) || position_stride(r) < 0 {
-        return false;
-    }
-    if position_stride(r) < 0 {
+    if (has_masks(r) && (r.seq_mask_words == 0 || r.seq_mask_words > SEQ_WORDS))
+        || position_stride(r) < 0
+    {
         return false;
     }
     let masks = has_masks(r);

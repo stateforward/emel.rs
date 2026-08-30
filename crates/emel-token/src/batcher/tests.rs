@@ -1,9 +1,24 @@
 use allocation_counter::measure;
 
 use super::{
-    BatchError, BatchOutputs, BatchRequest, MAX_SEQ, MAX_TOKENS, PositionSeedError, SEQ_WORDS,
-    TokenBatcher,
+    BatchDone, BatchError, BatchFailure, BatchOutputs, BatchRequest, MAX_SEQ, MAX_TOKENS,
+    PositionSeedError, SEQ_WORDS, TokenBatcher,
 };
+
+static DONE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static ERROR_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn on_done(done: BatchDone) {
+    assert_eq!(done.token_count, 1);
+    assert_eq!(done.outputs_total, 1);
+    DONE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn on_error(error: BatchFailure) {
+    assert_eq!(error.error, BatchError::InvalidRequest);
+    assert_eq!(error.token_count, 0);
+    ERROR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
 
 #[allow(clippy::unnecessary_wraps)]
 fn seed_zero(
@@ -43,6 +58,8 @@ fn request<'a>(
         seq_mask_words_out: None,
         positions_count_out: None,
         outputs_total_out: None,
+        on_done: None,
+        on_error: None,
         outputs: BatchOutputs {
             seq_primary_ids: seq_primary_ids_out,
             seq_masks: seq_masks_out,
@@ -448,6 +465,8 @@ fn full_outputs_and_stride_three_are_published() {
             seq_mask_words_out: Some(&mut words),
             positions_count_out: Some(&mut position_count),
             outputs_total_out: Some(&mut total),
+            on_done: None,
+            on_error: None,
             outputs: BatchOutputs {
                 seq_primary_ids: &mut primary,
                 seq_masks: &mut masks,
@@ -491,6 +510,8 @@ fn seeded_generation_and_output_mask_copy_are_source_branches() {
             seq_mask_words_out: Some(&mut words),
             positions_count_out: Some(&mut position_count),
             outputs_total_out: Some(&mut total),
+            on_done: None,
+            on_error: None,
             outputs: BatchOutputs {
                 seq_primary_ids: &mut primary,
                 seq_masks: &mut masks,
@@ -530,6 +551,8 @@ fn oversized_output_buffers_are_logically_bounded() {
             seq_mask_words_out: None,
             positions_count_out: None,
             outputs_total_out: Some(&mut total),
+            on_done: None,
+            on_error: None,
             outputs: BatchOutputs {
                 seq_primary_ids: &mut primary,
                 seq_masks: &mut masks,
@@ -574,6 +597,8 @@ fn maximum_seed_is_rejected_before_increment() {
         seq_mask_words_out: None,
         positions_count_out: None,
         outputs_total_out: None,
+        on_done: None,
+        on_error: None,
         outputs: BatchOutputs {
             seq_primary_ids: &mut primary,
             seq_masks: &mut masks,
@@ -606,6 +631,8 @@ fn output_last_does_not_touch_oversized_tail() {
             seq_mask_words_out: None,
             positions_count_out: None,
             outputs_total_out: None,
+            on_done: None,
+            on_error: None,
             outputs: BatchOutputs {
                 seq_primary_ids: &mut primary,
                 seq_masks: &mut masks,
@@ -616,6 +643,76 @@ fn output_last_does_not_touch_oversized_tail() {
         .unwrap();
     assert_eq!(result.outputs_total, 1);
     assert_eq!(output, [0, 1, 7]);
+}
+
+#[test]
+fn callbacks_are_synchronous_and_non_retained() {
+    DONE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    ERROR_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    let ids = [1];
+    let mut primary = [0];
+    let mut masks = [0];
+    let mut positions = [0];
+    let mut output = [0];
+    let mut batcher = TokenBatcher::new();
+    let request = BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: Some(on_done),
+        on_error: Some(on_error),
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    };
+    assert!(batcher.process_event(request).is_ok());
+    assert_eq!(DONE_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed), 0);
+    let mut primary = [];
+    let mut masks = [];
+    let mut positions = [];
+    let mut output = [];
+    let request = BatchRequest {
+        token_ids: &[],
+        vocab_size: 10,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: Some(on_done),
+        on_error: Some(on_error),
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    };
+    assert_eq!(
+        batcher.process_event(request),
+        Err(BatchError::InvalidRequest)
+    );
+    assert_eq!(ERROR_COUNT.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
 #[test]
@@ -641,6 +738,8 @@ fn output_last_and_single_output_rejection_are_explicit() {
             seq_mask_words_out: None,
             positions_count_out: None,
             outputs_total_out: None,
+            on_done: None,
+            on_error: None,
             outputs: BatchOutputs {
                 seq_primary_ids: &mut primary,
                 seq_masks: &mut masks,
@@ -671,6 +770,8 @@ fn output_last_and_single_output_rejection_are_explicit() {
         seq_mask_words_out: None,
         positions_count_out: None,
         outputs_total_out: None,
+        on_done: None,
+        on_error: None,
         outputs: BatchOutputs {
             seq_primary_ids: &mut primary,
             seq_masks: &mut masks,
