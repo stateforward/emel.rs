@@ -371,21 +371,21 @@ impl BatchPlannerModesEqualStateMachineContext for BatchPlannerModesEqualContext
     }
 
     fn guard_fast_path_input_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        Ok(self.guard_has_valid_step_size(event)?
-            && self.guard_fast_path_has_primary_ids(event)?
-            && self.guard_fast_path_primary_ids_valid(event)?)
+        Ok(event.scratch.borrow().effective_step_size > 0
+            && event.request.seq_primary_ids.is_some()
+            && fast_path_primary_ids_valid(event))
     }
     fn guard_fast_path_missing_primary_ids(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        Ok(!self.guard_fast_path_has_primary_ids(event)?)
+        Ok(event.request.seq_primary_ids.is_none())
     }
     fn guard_fast_path_primary_ids_invalid(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        Ok(self.guard_fast_path_has_primary_ids(event)? && !self.guard_fast_path_primary_ids_valid(event)?)
+        Ok(event.request.seq_primary_ids.is_some() && !fast_path_primary_ids_valid(event))
     }
     fn guard_general_input_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        self.guard_has_valid_step_size(event)
+        Ok(event.scratch.borrow().effective_step_size > 0)
     }
     fn guard_has_invalid_step_size(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        Ok(!self.guard_has_valid_step_size(event)?)
+        Ok(event.scratch.borrow().effective_step_size == 0)
     }
     fn guard_lacks_index_capacity(&self, event: &PlanRuntime) -> Result<bool, ()> {
         let scratch = event.scratch.borrow();
@@ -395,7 +395,7 @@ impl BatchPlannerModesEqualStateMachineContext for BatchPlannerModesEqualContext
         Ok(event.scratch.borrow().step_sizes.len() >= MAX_PLAN_STEPS)
     }
     fn guard_mode_is_general_path(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        Ok(!self.guard_mode_is_primary_fast_path(event)?)
+        Ok(!(event.request.seq_masks.is_none() && event.request.seq_primary_ids.is_some()))
     }
     fn guard_mode_is_primary_fast_path(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(event.request.seq_masks.is_none() && event.request.seq_primary_ids.is_some())
@@ -413,21 +413,19 @@ impl BatchPlannerModesEqualStateMachineContext for BatchPlannerModesEqualContext
     fn guard_storage_capacity_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(!self.guard_lacks_step_capacity(event)? && !self.guard_lacks_index_capacity(event)?)
     }
+}
 
-    fn guard_fast_path_has_primary_ids(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        Ok(event.request.seq_primary_ids.is_some())
-    }
-    fn guard_fast_path_primary_ids_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
-        let Some(ids) = event.request.seq_primary_ids.as_ref() else {
-            return Ok(false);
-        };
-        let max_seq = event.request.seq_mask_words.saturating_mul(64);
-        Ok(max_seq > 0 && max_seq <= MAX_SEQ
-            && ids.len() >= event.request.token_ids.len()
-            && ids[..event.request.token_ids.len()]
-                .iter()
-                .all(|id| *id >= 0 && (*id as usize) < max_seq))
-    }
+fn fast_path_primary_ids_valid(event: &PlanRuntime) -> bool {
+    let Some(ids) = event.request.seq_primary_ids.as_ref() else {
+        return false;
+    };
+    let max_seq = event.request.seq_mask_words.saturating_mul(64);
+    max_seq > 0
+        && max_seq <= MAX_SEQ
+        && ids.len() >= event.request.token_ids.len()
+        && ids[..event.request.token_ids.len()]
+            .iter()
+            .all(|id| *id >= 0 && (*id as usize) < max_seq)
 }
 
 pub(crate) fn run(runtime: PlanRuntime) {
