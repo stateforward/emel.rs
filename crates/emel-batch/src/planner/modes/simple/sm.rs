@@ -1,186 +1,134 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Simple fixed-size batch planning algorithm.
 
 #![allow(
-    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
+    clippy::redundant_pub_crate,
+    private_interfaces
 )]
 
+use crate::planner::sm::{MAX_PLAN_STEPS, PlanRuntime, PlannerError};
 use sml::sml;
 
-// --- machine BatchPlannerModesSimple from emel.cpp/src/emel/batch/planner/modes/simple/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventPlanRuntime;
+#[derive(Clone, Debug)]
+struct Plan;
 
 sml! {
     BatchPlannerModesSimple {
-        "state_planning"_s <= *"state_preparing"_s + event<EventPlanRuntime> / effect_begin_planning,
-        "state_planning_input_decision"_s <= "state_planning"_s + completion<EventPlanRuntime>,
-        "state_planning_failed"_s <= "state_planning_input_decision"_s + completion<EventPlanRuntime> [guard_has_invalid_step_size] / effect_reject_invalid_step_size,
-        "state_planning_capacity_decision"_s <= "state_planning_input_decision"_s + completion<EventPlanRuntime> [guard_has_valid_step_size],
-        "state_planning_failed"_s <= "state_planning_capacity_decision"_s + completion<EventPlanRuntime> [guard_exceeds_step_capacity] / effect_reject_output_steps_full,
-        "state_planning_failed"_s <= "state_planning_capacity_decision"_s + completion<EventPlanRuntime> [guard_exceeds_index_capacity] / effect_reject_output_indices_full,
-        "state_planning_decision"_s <= "state_planning_capacity_decision"_s + completion<EventPlanRuntime> [guard_simple_plan_capacity_ok] / effect_plan_simple_batches,
-        "state_planning_done"_s <= "state_planning_decision"_s + completion<EventPlanRuntime> [guard_planning_succeeded] / effect_emit_plan_done,
-        "state_planning_failed"_s <= "state_planning_decision"_s + completion<EventPlanRuntime> [guard_planning_failed] / effect_reject_planning_progress_stalled,
-        "state_planning_failed"_s <= "state_planning_done"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning_done,
-        "state_planning_failed"_s <= "state_planning_failed"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning_failed,
-        "state_planning_failed"_s <= "state_preparing"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_preparing,
-        "state_planning_failed"_s <= "state_planning"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning,
-        "state_planning_failed"_s <= "state_planning_input_decision"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning_input_decision,
-        "state_planning_failed"_s <= "state_planning_capacity_decision"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning_capacity_decision,
-        "state_planning_failed"_s <= "state_planning_decision"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning_decision,
+        "planning_input"_s <= *"preparing"_s + Plan(PlanRuntime) / effect_begin,
+        "planning_capacity"_s <= "planning_input"_s + completion<Plan>(PlanRuntime) [guard_valid],
+        "planning_failed"_s <= "planning_input"_s + completion<Plan>(PlanRuntime) [guard_invalid] / effect_invalid,
+        "planning"_s <= "planning_capacity"_s + completion<Plan>(PlanRuntime) [guard_capacity],
+        "planning_failed"_s <= "planning_capacity"_s + completion<Plan>(PlanRuntime) [guard_no_capacity] / effect_capacity,
+        "planning_done"_s <= "planning"_s + completion<Plan>(PlanRuntime) / effect_plan,
+        "planning_failed"_s <= "preparing"_s + unexpected_event<_> / effect_unexpected,
+        "planning_failed"_s <= "planning_input"_s + unexpected_event<_> / effect_unexpected,
+        "planning_failed"_s <= "planning_capacity"_s + unexpected_event<_> / effect_unexpected,
+        "planning_failed"_s <= "planning"_s + unexpected_event<_> / effect_unexpected,
+        "planning_failed"_s <= "planning_done"_s + unexpected_event<_> / effect_unexpected,
+        "planning_failed"_s <= "planning_failed"_s + unexpected_event<_> / effect_unexpected,
     }
 }
 
-/// Context for `BatchPlannerModesSimple` (TODO: context.hpp / detail.hpp).
 #[derive(Debug, Default)]
-pub struct BatchPlannerModesSimpleContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+struct Context;
+
+impl BatchPlannerModesSimpleStateMachineContext for Context {
+    fn effect_begin(&mut self, _event: PlanRuntime) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn guard_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
+        Ok(event.scratch.borrow().effective_step_size > 0)
+    }
+
+    fn guard_invalid(&self, event: &PlanRuntime) -> Result<bool, ()> {
+        Ok(!self.guard_valid(event)?)
+    }
+
+    fn guard_capacity(&self, event: &PlanRuntime) -> Result<bool, ()> {
+        let scratch = event.scratch.borrow();
+        let n = event.request.token_ids.len();
+        let size = scratch.effective_step_size;
+        Ok(size > 0 && n <= MAX_PLAN_STEPS && n.div_ceil(size) <= MAX_PLAN_STEPS)
+    }
+
+    fn guard_no_capacity(&self, event: &PlanRuntime) -> Result<bool, ()> {
+        Ok(!self.guard_capacity(event)?)
+    }
+
+    fn effect_capacity(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        event.scratch.borrow_mut().fail(PlannerError::OutputStepsFull);
+        Ok(())
+    }
+
+    fn effect_invalid(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        event.scratch.borrow_mut().fail(PlannerError::InvalidStepSize);
+        Ok(())
+    }
+
+    fn effect_plan(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        let size = event.scratch.borrow().effective_step_size;
+        let n = event.request.token_ids.len();
+        let mut scratch = event.scratch.borrow_mut();
+        let mut start = 0;
+        while start < n {
+            let offset = scratch.step_token_indices.len();
+            if !scratch.step_token_offsets.push(offset) {
+                scratch.fail(PlannerError::OutputStepsFull);
+                return Ok(());
+            }
+            let end = (start + size).min(n);
+            for index in start..end {
+                if !scratch.step_token_indices.push(index) {
+                    scratch.fail(PlannerError::OutputIndicesFull);
+                    return Ok(());
+                }
+            }
+            if !scratch.step_sizes.push(end - start) {
+                scratch.fail(PlannerError::OutputStepsFull);
+                return Ok(());
+            }
+            start = end;
+        }
+        let offset = scratch.step_token_indices.len();
+        if !scratch.step_token_offsets.push(offset) {
+            scratch.fail(PlannerError::OutputStepsFull);
+        }
+        Ok(())
+    }
+
+    fn effect_unexpected(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
-impl BatchPlannerModesSimpleStateMachineContext for BatchPlannerModesSimpleContext {
-    fn effect_begin_planning(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_begin_planning
-        todo!(
-            "TODO: port action `effect_begin_planning` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
+pub(crate) fn run(runtime: PlanRuntime) {
+    let mut machine = BatchPlannerModesSimpleStateMachine::new(Context);
+    let _ = machine.process_event(BatchPlannerModesSimpleEvents::Plan(runtime));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::sm::{PlanMode, PlanRequest, Planner};
+
+    #[test]
+    fn chunks_remainder_and_preserves_offsets() {
+        let mut planner = Planner::new();
+        let result = planner.plan(PlanRequest::new((0..5).collect(), 2, PlanMode::Simple));
+        let result = result.expect("simple planning should succeed");
+        assert_eq!(result.step_sizes, [2, 2, 1]);
+        assert_eq!(result.step_token_indices, [0, 1, 2, 3, 4]);
+        assert_eq!(result.step_token_offsets, [0, 2, 4, 5]);
     }
-    fn effect_emit_internal_plan_error_from_state_planning(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_internal_plan_error_from_state_planning_capacity_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_internal_plan_error_from_state_planning_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_internal_plan_error_from_state_planning_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_internal_plan_error_from_state_planning_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_internal_plan_error_from_state_planning_input_decision(
-        &mut self,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_internal_plan_error_from_state_preparing(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_internal_plan_error
-        todo!(
-            "TODO: port action `effect_emit_internal_plan_error` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_emit_plan_done(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_emit_plan_done
-        todo!(
-            "TODO: port action `effect_emit_plan_done` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_plan_simple_batches(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_plan_simple_batches
-        todo!(
-            "TODO: port action `effect_plan_simple_batches` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_reject_invalid_step_size(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_reject_invalid_step_size
-        todo!(
-            "TODO: port action `effect_reject_invalid_step_size` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_reject_output_indices_full(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_reject_output_indices_full
-        todo!(
-            "TODO: port action `effect_reject_output_indices_full` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_reject_output_steps_full(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_reject_output_steps_full
-        todo!(
-            "TODO: port action `effect_reject_output_steps_full` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn effect_reject_planning_progress_stalled(
-        &mut self,
-        _event: &EventPlanRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp::effect_reject_planning_progress_stalled
-        todo!(
-            "TODO: port action `effect_reject_planning_progress_stalled` from emel.cpp/src/emel/batch/planner/modes/simple/actions.hpp"
-        )
-    }
-    fn guard_exceeds_index_capacity(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_exceeds_index_capacity
-        todo!(
-            "TODO: port guard `guard_exceeds_index_capacity` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
-    }
-    fn guard_exceeds_step_capacity(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_exceeds_step_capacity
-        todo!(
-            "TODO: port guard `guard_exceeds_step_capacity` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
-    }
-    fn guard_has_invalid_step_size(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_has_invalid_step_size
-        todo!(
-            "TODO: port guard `guard_has_invalid_step_size` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
-    }
-    fn guard_has_valid_step_size(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_has_valid_step_size
-        todo!(
-            "TODO: port guard `guard_has_valid_step_size` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
-    }
-    fn guard_planning_failed(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_planning_failed
-        todo!(
-            "TODO: port guard `guard_planning_failed` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
-    }
-    fn guard_planning_succeeded(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_planning_succeeded
-        todo!(
-            "TODO: port guard `guard_planning_succeeded` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
-    }
-    fn guard_simple_plan_capacity_ok(&self, _event: &EventPlanRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp::guard_simple_plan_capacity_ok
-        todo!(
-            "TODO: port guard `guard_simple_plan_capacity_ok` from emel.cpp/src/emel/batch/planner/modes/simple/guards.hpp"
-        )
+
+    #[test]
+    fn zero_requested_step_size_defaults_to_all_tokens() {
+        let mut planner = Planner::new();
+        let result = planner
+            .plan(PlanRequest::new((0..3).collect(), 0, PlanMode::Simple))
+            .expect("zero step size uses token count");
+        assert_eq!(result.step_sizes, [3]);
+        assert_eq!(result.step_token_offsets, [0, 3]);
     }
 }
