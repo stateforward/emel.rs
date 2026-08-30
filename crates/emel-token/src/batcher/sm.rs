@@ -744,9 +744,8 @@ impl TokenBatcherStateMachineContext for Context {
 }
 
 fn has_masks(r: &RequestView<'_>) -> bool {
-    // `Some` preserves the source pointer-presence decision. The flattened
-    // payload length is validated separately before the mask action runs.
-    r.seq_masks.is_some()
+    r.seq_masks
+        .is_some_and(|values| values.len() >= r.token_ids.len())
 }
 fn has_primary(r: &RequestView<'_>) -> bool {
     r.seq_primary_ids
@@ -1062,37 +1061,65 @@ fn continuity_ok(e: &BatchRuntime<'_>) -> bool {
     s.seq_max_pos.fill(i32::MIN);
     s.seq_pos_count.fill(0);
     s.seq_seen.fill(false);
+    s.active.fill(0);
+    s.active_count = 0;
+    s.current_masks.fill(0);
+
     let words = effective_mask_words(&e.request);
+    let mut ok = true;
     for i in 0..e.request.token_ids.len() {
         let pos = e.outputs.positions[i].get();
-        for (w, bits) in e.outputs.seq_masks[i * words..(i + 1) * words]
-            .iter()
-            .enumerate()
-        {
-            let mut b = bits.get();
-            while b != 0 {
-                let id = w * 64 + b.trailing_zeros() as usize;
-                if s.seq_seen[id] && pos < s.seq_last_pos[id] {
-                    return false;
-                }
-                if !s.seq_seen[id] || pos != s.seq_last_pos[id] {
-                    s.seq_pos_count[id] += 1;
-                }
-                s.seq_seen[id] = true;
+        let row = &e.outputs.seq_masks[i * words..(i + 1) * words];
+        for (w, bits) in row.iter().enumerate() {
+            let mut bits = bits.get();
+            while bits != 0 {
+                let id = w * 64 + bits.trailing_zeros() as usize;
+                let last = s.seq_last_pos[id];
+                let monotonic = last < 0 || pos >= last;
+                let pos_changed = pos != last;
+                s.seq_pos_count[id] += usize::from(pos_changed);
                 s.seq_last_pos[id] = pos;
                 s.seq_min_pos[id] = s.seq_min_pos[id].min(pos);
                 s.seq_max_pos[id] = s.seq_max_pos[id].max(pos);
-                b &= b - 1;
+
+                let first_seen = !s.seq_seen[id];
+                let active_count = s.active_count;
+                let has_active_slot = active_count < MAX_SEQ;
+                if first_seen && has_active_slot {
+                    s.active[active_count] = id;
+                    s.active_count = active_count + 1;
+                }
+                s.seq_seen[id] = true;
+
+                let mask_start = id * SEQ_WORDS;
+                if first_seen {
+                    for (current, value) in s.current_masks[mask_start..mask_start + words]
+                        .iter_mut()
+                        .zip(row.iter())
+                    {
+                        *current = value.get();
+                    }
+                } else {
+                    for (current, value) in s.current_masks[mask_start..mask_start + words]
+                        .iter_mut()
+                        .zip(row.iter())
+                    {
+                        *current &= value.get();
+                    }
+                }
+                let intersection_non_empty = s.current_masks[mask_start..mask_start + words]
+                    .iter()
+                    .any(|value| *value != 0);
+                ok = ok && (!first_seen || has_active_slot) && monotonic && intersection_non_empty;
+                bits &= bits - 1;
             }
         }
     }
-    for id in 0..MAX_SEQ {
-        if s.seq_seen[id]
-            && (s.seq_max_pos[id] as i64 - s.seq_min_pos[id] as i64 + 1)
-                > s.seq_pos_count[id] as i64
-        {
-            return false;
-        }
+
+    for index in 0..s.active_count {
+        let id = s.active[index];
+        let span = i64::from(s.seq_max_pos[id]) - i64::from(s.seq_min_pos[id]) + 1;
+        ok = ok && span <= s.seq_pos_count[id] as i64;
     }
-    true
+    ok
 }

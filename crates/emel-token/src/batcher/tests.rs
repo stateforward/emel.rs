@@ -386,9 +386,13 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
         Err(BatchError::InvalidRequest)
     );
 
-    // A present flattened mask input must contain every logical row before
-    // normalization; rejecting it avoids indexing a short payload.
+    // A short counted mask input is absent in the source contract, so the
+    // request falls through to the default sequence normalization mode.
     let short_masks = [u64::MAX];
+    let mut primary_out = [0; 2];
+    let mut masks_out = [0; 2];
+    let mut positions_out = [0; 2];
+    let mut output_mask = [0; 2];
     let result = batcher.process_event(request(
         &[1, 2],
         32,
@@ -396,10 +400,58 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
         1,
         None,
         None,
-        &mut [0; 2],
-        &mut [0; 2],
-        &mut [0; 2],
-        &mut [0; 2],
+        &mut primary_out,
+        &mut masks_out,
+        &mut positions_out,
+        &mut output_mask,
+    ));
+    assert_eq!(result.unwrap().seq_mask_words, 1);
+    assert_eq!(primary_out, [0, 0]);
+    assert_eq!(masks_out, [1, 1]);
+}
+
+#[test]
+fn continuity_allows_decreasing_positions_while_last_is_negative() {
+    let token_ids = [1, 2];
+    let sequence_ids = [0, 0];
+    let positions_input = [-2, -3];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [0; 2];
+    let mut output = [0; 2];
+
+    let result = TokenBatcher::new().process_event(request(
+        &token_ids,
+        10,
+        None,
+        1,
+        Some(&sequence_ids),
+        Some(&positions_input),
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
+    ));
+
+    assert!(result.is_ok());
+    assert_eq!(positions, positions_input);
+
+    let positions_input = [2, 1];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [0; 2];
+    let mut output = [0; 2];
+    let result = TokenBatcher::new().process_event(request(
+        &token_ids,
+        10,
+        None,
+        1,
+        Some(&sequence_ids),
+        Some(&positions_input),
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
     ));
     assert_eq!(result, Err(BatchError::InvalidRequest));
 }
@@ -644,7 +696,7 @@ fn oversized_output_buffers_are_logically_bounded() {
 }
 
 #[test]
-fn short_flattened_masks_are_rejected_without_panicking() {
+fn short_flattened_masks_fall_through_without_panicking() {
     let ids = [1, 2];
     let short_masks = [1_u64];
     let mut primary = [0; 2];
@@ -673,8 +725,11 @@ fn short_flattened_masks_are_rejected_without_panicking() {
             positions: &mut positions,
             output_mask: &mut output,
         },
-    });
-    assert_eq!(result, Err(BatchError::InvalidRequest));
+    })
+    .unwrap();
+    assert_eq!(result.seq_mask_words, 1);
+    assert_eq!(primary, [0, 0]);
+    assert_eq!(masks, [1, 1]);
 }
 
 #[test]
