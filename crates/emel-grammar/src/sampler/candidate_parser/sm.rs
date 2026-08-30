@@ -141,17 +141,17 @@ impl GbnfSamplerCandidateParserContext {
 
 impl GbnfSamplerCandidateParserStateMachineContext for GbnfSamplerCandidateParserContext {
     // Source mapping: candidate_parser/actions.hpp::consume_empty.
-    fn consume_empty(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_empty(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.consume(CandidateKind::Empty)
     }
 
     // Source mapping: candidate_parser/actions.hpp::consume_text.
-    fn consume_text(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_text(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.consume(CandidateKind::Text)
     }
 
     // Source mapping: candidate_parser/actions.hpp::dispatch_parse_failed.
-    fn dispatch_parse_failed(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.dispatch_parse_failed_result()
     }
 

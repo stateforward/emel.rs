@@ -155,21 +155,21 @@ impl GbnfSamplerTokenParserContext {
 
 impl GbnfSamplerTokenParserStateMachineContext for GbnfSamplerTokenParserContext {
     // Source mapping: actions.hpp::consume_text_token.
-    fn consume_text_token(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_text_token(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = TokenParserError::None;
         self.token_kind = TokenKind::TextToken;
         Ok(())
     }
 
     // Source mapping: actions.hpp::consume_empty_token.
-    fn consume_empty_token(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_empty_token(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = TokenParserError::None;
         self.token_kind = TokenKind::EmptyToken;
         Ok(())
     }
 
     // Source mapping: actions.hpp::dispatch_parse_failed.
-    fn dispatch_parse_failed(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = TokenParserError::ParseFailed;
         self.token_kind = TokenKind::Unknown;
         Ok(())
