@@ -307,16 +307,19 @@ impl fmt::Debug for Gemma4 {
 }
 
 impl Context {
-    fn layer(&self) -> LayerExecution {
-        let index = self.parameters.block_count.saturating_sub(1);
+    fn layer(&self, index: i32) -> LayerExecution {
         let shared_start = self
             .parameters
             .block_count
             .saturating_sub(self.parameters.attention_shared_kv_layers);
         let shared = index >= shared_start;
-        let sliding = usize::try_from(index).is_ok_and(|index| {
+        let sliding = usize::try_from(index).ok().is_some_and(|index| {
             index < self.parameters.sliding_window_pattern_count as usize
-                && self.parameters.sliding_window_pattern[index] != 0
+                && self
+                    .parameters
+                    .sliding_window_pattern
+                    .get(index)
+                    .is_some_and(|flag| *flag != 0)
         });
         LayerExecution::new(
             ResidualRoute::Attention,
@@ -477,7 +480,7 @@ impl Gemma4MachineStateMachineContext for Context {
             self.builder
                 .process_event(generation::event::AttentionBlock::new(
                     event.event.index,
-                    self.layer(),
+                    self.layer(event.event.index),
                 )),
         );
         Ok(())

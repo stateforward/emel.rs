@@ -7,7 +7,7 @@ use crate::catalog::event::{
 };
 use crate::generation::{
     AttentionQkNormRoute, AttentionVNormRoute, AttentionValueRoute, AttentionWindowRoute,
-    QuantizedStageFamily,
+    QuantizedStageFamily, ResidualRoute,
 };
 
 use super::event::{
@@ -46,6 +46,32 @@ const TENSORS_WITH_UP: [&[u8]; 13] = [
     TENSORS[11],
     b"blk.0.ffn_up.weight",
 ];
+const TWO_BLOCK_TENSORS: [&[u8]; 24] = [
+    b"token_embd.weight",
+    b"output_norm.weight",
+    b"output.weight",
+    b"blk.0.attn_norm.weight",
+    b"blk.0.attn_q.weight",
+    b"blk.0.attn_k.weight",
+    b"blk.0.attn_v.weight",
+    b"blk.0.attn_q_norm.weight",
+    b"blk.0.attn_k_norm.weight",
+    b"blk.0.attn_output.weight",
+    b"blk.0.ffn_norm.weight",
+    b"blk.0.ffn_gate.weight",
+    b"blk.0.ffn_down.weight",
+    b"blk.0.ffn_up.weight",
+    b"blk.1.attn_norm.weight",
+    b"blk.1.attn_q.weight",
+    b"blk.1.attn_k.weight",
+    b"blk.1.attn_q_norm.weight",
+    b"blk.1.attn_k_norm.weight",
+    b"blk.1.attn_output.weight",
+    b"blk.1.ffn_norm.weight",
+    b"blk.1.ffn_gate.weight",
+    b"blk.1.ffn_down.weight",
+    b"blk.1.ffn_up.weight",
+];
 
 fn parameters() -> Parameters {
     Parameters {
@@ -79,7 +105,7 @@ fn parameters() -> Parameters {
     }
 }
 
-fn actor_with(names: &[&[u8]]) -> (Gemma4, ModelIdentity) {
+fn actor_with_capacity(names: &[&[u8]], block_capacity: usize) -> (Gemma4, ModelIdentity) {
     let name_bytes = names.iter().map(|name| name.len()).sum();
     let mut storage = CatalogStorage::with_capacity(names.len(), name_bytes, names.len()).unwrap();
     for name in names {
@@ -93,10 +119,14 @@ fn actor_with(names: &[&[u8]]) -> (Gemma4, ModelIdentity) {
     let actor = Gemma4::new(
         catalog,
         Resolver::new(),
-        super::event::Storage::with_block_capacity(1).unwrap(),
+        super::event::Storage::with_block_capacity(block_capacity).unwrap(),
     )
     .unwrap();
     (actor, model)
+}
+
+fn actor_with(names: &[&[u8]]) -> (Gemma4, ModelIdentity) {
+    actor_with_capacity(names, 1)
 }
 
 fn actor() -> (Gemma4, ModelIdentity) {
@@ -115,6 +145,95 @@ fn complete(actor: &mut Gemma4, model: ModelIdentity) {
     for family in QuantizedStageFamily::ALL {
         actor.process_event(StageAudit::new(family)).unwrap();
     }
+}
+
+#[test]
+fn block_build_uses_each_dispatched_index_for_routes_and_lengths() {
+    let (mut actor, model) = actor_with_capacity(&TWO_BLOCK_TENSORS, 2);
+    let mut parameters = parameters();
+    parameters.block_count = 2;
+    parameters.attention_shared_kv_layers = 1;
+    parameters.sliding_window_pattern = [
+        0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0,
+    ];
+    parameters.sliding_window_pattern_count = 2;
+    actor
+        .process_event(ContractBegin::new(b"gemma4", model, parameters))
+        .unwrap();
+    actor.process_event(BlockBuild::new(0)).unwrap();
+    actor.process_event(BlockBuild::new(1)).unwrap();
+    actor.process_event(TopologyBuild::new()).unwrap();
+    actor.process_event(PlanBuild::new()).unwrap();
+    actor.process_event(BlockValidation::new(0)).unwrap();
+    actor.process_event(BlockValidation::new(1)).unwrap();
+    let block0 = actor.process_event(BlockVisit::new(0)).unwrap();
+
+    assert_eq!(block0.layer().residual_route(), ResidualRoute::Attention);
+    assert_eq!(
+        block0.layer().qk_norm_route(),
+        AttentionQkNormRoute::HeadwiseRms
+    );
+    assert_eq!(
+        block0.layer().value_route(),
+        AttentionValueRoute::DedicatedValue
+    );
+    assert_eq!(block0.layer().v_norm_route(), AttentionVNormRoute::None);
+    assert_eq!(
+        block0.layer().window_route(),
+        AttentionWindowRoute::FullContext
+    );
+    assert_eq!(block0.layer().attention_key_length(), 16);
+    assert_eq!(block0.layer().attention_value_length(), 20);
+    assert_eq!(block0.layer().attention_rope_dim(), 16);
+    assert_eq!(
+        block0.layer().attention_rope_freq_base().to_bits(),
+        10_000.0f32.to_bits()
+    );
+    let block1 = actor.process_event(BlockVisit::new(1)).unwrap();
+
+    assert_eq!(block1.layer().residual_route(), ResidualRoute::Attention);
+    assert_eq!(
+        block1.layer().qk_norm_route(),
+        AttentionQkNormRoute::HeadwiseRms
+    );
+    assert_eq!(
+        block1.layer().value_route(),
+        AttentionValueRoute::SharedKeyValue
+    );
+    assert_eq!(block1.layer().v_norm_route(), AttentionVNormRoute::Rms);
+    assert_eq!(
+        block1.layer().window_route(),
+        AttentionWindowRoute::SlidingWindow
+    );
+    assert_eq!(block1.layer().attention_key_length(), 8);
+    assert_eq!(block1.layer().attention_value_length(), 10);
+    assert_eq!(block1.layer().attention_rope_dim(), 8);
+    assert_eq!(
+        block1.layer().attention_rope_freq_base().to_bits(),
+        1_000.0f32.to_bits()
+    );
+}
+
+#[test]
+fn two_block_build_dispatch_remains_allocation_free() {
+    let (mut actor, model) = actor_with_capacity(&TWO_BLOCK_TENSORS, 2);
+    let mut parameters = parameters();
+    parameters.block_count = 2;
+    parameters.attention_shared_kv_layers = 1;
+    parameters.sliding_window_pattern = [
+        0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0,
+    ];
+    parameters.sliding_window_pattern_count = 2;
+    let measured = measure(|| {
+        actor
+            .process_event(ContractBegin::new(b"gemma4", model, parameters))
+            .unwrap();
+        actor.process_event(BlockBuild::new(0)).unwrap();
+        actor.process_event(BlockBuild::new(1)).unwrap();
+    });
+    assert_eq!(measured.count_total, 0);
 }
 
 #[test]
