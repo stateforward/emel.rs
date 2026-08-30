@@ -1,7 +1,7 @@
 //! Bounds-checked GGUF scanner ported from `emel.cpp`.
 
 use super::{Error, KvEntry, Requirements, TensorInfo};
-use crate::{DEFAULT_ALIGNMENT, MAGIC, MAX_TENSOR_DIMS, MIN_VERSION, VERSION};
+use crate::{DEFAULT_ALIGNMENT, MAGIC, MAX_TENSOR_DIMS, VERSION};
 use emel_tensor::dtype::{ConversionError, SerializedType};
 
 pub(super) const TYPE_UINT8: u32 = 0;
@@ -153,9 +153,7 @@ fn read_header(reader: &mut Reader<'_>) -> Option<(u32, u64, u64)> {
     let version = reader.u32()?;
     let tensor_count = reader.u64()?;
     let kv_count = reader.u64()?;
-    (MIN_VERSION..=VERSION)
-        .contains(&version)
-        .then_some((version, tensor_count, kv_count))
+    (version == VERSION).then_some((version, tensor_count, kv_count))
 }
 
 const fn header_error(file_image: &[u8]) -> Error {

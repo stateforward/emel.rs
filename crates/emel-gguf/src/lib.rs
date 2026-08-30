@@ -1,4 +1,4 @@
-//! Bounds-checked GGUF v2/v3 probing and loading.
+//! Bounds-checked GGUF v3 probing and loading.
 //!
 //! The public runtime boundary is the [`Loader`] actor plus concrete types in
 //! [`event`]. Parsed records, storage offsets, generated machine state, guards,
@@ -31,9 +31,6 @@ pub(crate) const MAGIC: [u8; 4] = *b"GGUF";
 
 /// The newest supported GGUF format version.
 pub(crate) const VERSION: u32 = 3;
-
-/// The oldest supported GGUF format version.
-pub(crate) const MIN_VERSION: u32 = 2;
 
 /// The default tensor-data alignment when metadata does not override it.
 pub(crate) const DEFAULT_ALIGNMENT: u32 = 32;

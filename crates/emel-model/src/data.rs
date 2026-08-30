@@ -1923,6 +1923,14 @@ fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(),
             i32::try_from(metadata.dimension_count()).map_err(|_| DataError::InvalidTensor)?;
         let active_dimensions =
             usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
+        let serialized_size_valid = SerializedType::try_from(metadata.tensor_type().wire_code())
+            .ok()
+            .and_then(|tensor_type| {
+                tensor_type
+                    .data_size(metadata.dimensions(), metadata.dimension_count())
+                    .ok()
+            })
+            == Some(metadata.data_size());
         if !(1..=4).contains(&dimension_count)
             || metadata
                 .dimensions()
@@ -1932,6 +1940,7 @@ fn copy_mimi_tensors(data: &mut Data, tensors: &[TensorInput<'_>]) -> Result<(),
             || metadata.dimensions()[active_dimensions..]
                 .iter()
                 .any(|dimension| *dimension != 1)
+            || !serialized_size_valid
             || metadata.data_size() == 0
             || metadata.storage().is_some_and(|storage| {
                 storage.length() != metadata.data_size()
@@ -2239,6 +2248,42 @@ mod tests {
             data_offset: 0,
             file_offset: 0,
             data_size: 16,
+            file_index: 0,
+            storage: None,
+        });
+        let tensors = [TensorInput::with_bytes(b"tensor", metadata, &[0; 15])];
+        assert_eq!(
+            Data::try_from_mimi(MimiDataInput {
+                hparams,
+                tensors: &tensors
+            }),
+            Err(DataError::InvalidTensor)
+        );
+    }
+
+    #[test]
+    fn serialized_tensor_size_must_match_dtype_and_shape() {
+        let hparams = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 32,
+            dim: 16,
+            semantic_n_q: 1,
+            codebook_dim: 8,
+            transformer_num_layers: 2,
+            transformer_num_heads: 2,
+            transformer_context: 8,
+            transformer_max_period: 1_000,
+        })
+        .unwrap();
+        let metadata = TensorMetadata::new(TensorMetadataInput {
+            tensor_type: SerializedType::F32,
+            dimension_count: 1,
+            dimensions: [4, 1, 1, 1],
+            data_offset: 0,
+            file_offset: 0,
+            data_size: 15,
             file_index: 0,
             storage: None,
         });

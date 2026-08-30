@@ -1098,10 +1098,19 @@ fn hostile_headers_and_payloads_are_classified_without_panics() {
     );
 
     let mut bad_version = typed_metadata_fixture();
-    bad_version[4..8].copy_from_slice(&4_u32.to_le_bytes());
+    bad_version[4..8].copy_from_slice(&2_u32.to_le_bytes());
     assert_eq!(
         Loader::new()
             .process_event(Probe::new(source(&bad_version)))
+            .unwrap_err(),
+        Error::ModelInvalid
+    );
+
+    let mut unsupported_version = typed_metadata_fixture();
+    unsupported_version[4..8].copy_from_slice(&4_u32.to_le_bytes());
+    assert_eq!(
+        Loader::new()
+            .process_event(Probe::new(source(&unsupported_version)))
             .unwrap_err(),
         Error::ModelInvalid
     );
