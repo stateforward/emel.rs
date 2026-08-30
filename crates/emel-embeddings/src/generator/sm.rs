@@ -17,18 +17,22 @@ pub const MAX_EMBEDDING_DIMENSION: usize = 4096;
 pub const MAX_TOKEN_POSITIONS: usize = 4096;
 
 #[repr(u32)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum EmbeddingsGeneratorError { None = 0, InvalidRequest = 1, ModelInvalid = 2, Backend = 4 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbeddingsGeneratorStatus { None = 0, InvalidRequest = 1, ModelInvalid = 2, Backend = 4 }
+impl Default for EmbeddingsGeneratorStatus { fn default() -> Self { Self::None } }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextRouteKind { None, Encoder }
+impl Default for TextRouteKind { fn default() -> Self { Self::None } }
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageRouteKind { None, Encoder }
+impl Default for ImageRouteKind { fn default() -> Self { Self::None } }
 #[repr(u8)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AudioRouteKind { None, Encoder }
+impl Default for AudioRouteKind { fn default() -> Self { Self::None } }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BenchmarkStageTimings { pub prepare_ns: u64, pub encode_ns: u64, pub publish_ns: u64, pub total_ns: u64 }
@@ -40,12 +44,13 @@ pub type ImageEncodeFn = fn(&EventEmbedImageRun, &mut [f32]) -> bool;
 pub type AudioPrepareFn = fn(&EventEmbedAudioRun, &mut [f32]) -> bool;
 pub type AudioEncodeFn = fn(&EventEmbedAudioRun, &mut [f32]) -> bool;
 pub type InitDoneFn = fn();
-pub type InitErrorFn = fn(EmbeddingsGeneratorError);
+pub type InitErrorFn = fn(EmbeddingsGeneratorStatus);
 pub type EmbedDoneFn = fn(&[f32], usize);
-pub type EmbedErrorFn = fn(EmbeddingsGeneratorError);
+pub type EmbedErrorFn = fn(EmbeddingsGeneratorStatus);
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CopiedMessage { pub bytes: [u8; MAX_MESSAGE_BYTES], pub len: usize }
+impl Default for CopiedMessage { fn default() -> Self { Self { bytes: [0; MAX_MESSAGE_BYTES], len: 0 } } }
 impl CopiedMessage { pub fn new(input: &[u8]) -> Self { let mut out = Self::default(); out.len = input.len().min(MAX_MESSAGE_BYTES); out.bytes[..out.len].copy_from_slice(&input[..out.len]); out } pub fn as_bytes(&self) -> &[u8] { &self.bytes[..self.len] } }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,15 +192,15 @@ pub struct EmbeddingsGeneratorContext {
     pub embedding_length: usize, pub image_encoder_length: usize, pub audio_encoder_length: usize, pub max_positions: usize,
     pub matryoshka_dimensions: [usize; 32], pub matryoshka_dimension_count: usize,
     pub scratch: [f32; MAX_EMBEDDING_DIMENSION], pub token_ids: [i32; MAX_TOKEN_POSITIONS],
-    pub error: EmbeddingsGeneratorError, pub bind_accepted: bool, pub bind_err_code: i32, pub prepare_accepted: bool, pub prepare_err_code: i32, pub token_count: usize, pub output_dimension: usize,
+    pub error: EmbeddingsGeneratorStatus, pub bind_accepted: bool, pub bind_err_code: i32, pub prepare_accepted: bool, pub prepare_err_code: i32, pub token_count: usize, pub output_dimension: usize,
 }
-impl Default for EmbeddingsGeneratorContext { fn default() -> Self { Self { model_ready:false, conditioner_ready:false, initialized:false, text_route:TextRouteKind::None, image_route:ImageRouteKind::None, audio_route:AudioRouteKind::None, text_ready:false, image_ready:false, audio_ready:false, scratch_ready:false, embedding_length:0, image_encoder_length:0, audio_encoder_length:0, max_positions:0, matryoshka_dimensions:[0;32], matryoshka_dimension_count:0, scratch:[0.0;MAX_EMBEDDING_DIMENSION], token_ids:[0;MAX_TOKEN_POSITIONS], error:EmbeddingsGeneratorError::None, bind_accepted:false, bind_err_code:0, prepare_accepted:false, prepare_err_code:0, token_count:0, output_dimension:0 } } }
+impl Default for EmbeddingsGeneratorContext { fn default() -> Self { Self { model_ready:false, conditioner_ready:false, initialized:false, text_route:TextRouteKind::None, image_route:ImageRouteKind::None, audio_route:AudioRouteKind::None, text_ready:false, image_ready:false, audio_ready:false, scratch_ready:false, embedding_length:0, image_encoder_length:0, audio_encoder_length:0, max_positions:0, matryoshka_dimensions:[0;32], matryoshka_dimension_count:0, scratch:[0.0;MAX_EMBEDDING_DIMENSION], token_ids:[0;MAX_TOKEN_POSITIONS], error:EmbeddingsGeneratorStatus::None, bind_accepted:false, bind_err_code:0, prepare_accepted:false, prepare_err_code:0, token_count:0, output_dimension:0 } } }
 impl EmbeddingsGeneratorContext {
     pub fn configure(&mut self, embedding_length: usize, max_positions: usize) { self.embedding_length = embedding_length.min(MAX_EMBEDDING_DIMENSION); self.max_positions = max_positions.min(MAX_TOKEN_POSITIONS); self.model_ready = self.embedding_length > 0; self.scratch_ready = true; }
     pub fn set_routes(&mut self, text: TextRouteKind, image: ImageRouteKind, audio: AudioRouteKind) { self.text_route = text; self.image_route = image; self.audio_route = audio; self.text_ready = text == TextRouteKind::Encoder; self.image_ready = image == ImageRouteKind::Encoder; self.audio_ready = audio == AudioRouteKind::Encoder; self.conditioner_ready = self.text_ready; }
-    pub fn state_error(&self) -> EmbeddingsGeneratorError { self.error }
-    fn reset(&mut self) { self.error = EmbeddingsGeneratorError::None; self.bind_accepted = false; self.bind_err_code = 0; self.prepare_accepted = false; self.prepare_err_code = 0; self.token_count = 0; self.output_dimension = 0; }
-    fn set_error(&mut self, error: EmbeddingsGeneratorError) { self.error = error; self.output_dimension = 0; }
+    pub fn state_error(&self) -> EmbeddingsGeneratorStatus { self.error }
+    fn reset(&mut self) { self.error = EmbeddingsGeneratorStatus::None; self.bind_accepted = false; self.bind_err_code = 0; self.prepare_accepted = false; self.prepare_err_code = 0; self.token_count = 0; self.output_dimension = 0; }
+    fn set_error(&mut self, error: EmbeddingsGeneratorStatus) { self.error = error; self.output_dimension = 0; }
     fn requested_dimension(&self, dimension: usize) -> usize { if dimension == 0 { self.embedding_length } else { dimension } }
     fn valid_dim(&self, dimension: usize) -> bool { dimension > 0 && dimension <= self.embedding_length && (dimension == self.embedding_length || self.matryoshka_dimensions[..self.matryoshka_dimension_count.min(32)].contains(&dimension)) }
     fn valid_image(&self, event: &EventEmbedImageRun) -> bool { event.width > 0 && event.height > 0 && event.rgba_len == (event.width as usize).saturating_mul(event.height as usize).saturating_mul(4) && event.rgba_len <= MAX_RGBA_BYTES }
@@ -218,12 +223,12 @@ fn normalize(values: &mut [f32]) -> bool {
     }
     true
 }
-impl EmbeddingsGeneratorStateMachineContext {
-    fn effect_encode_text(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
-    fn effect_prepare_image(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { let ok = _event.prepare.map_or(true, |f| f(_event, &mut self.scratch)); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
-    fn effect_encode_image(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
-    fn effect_prepare_audio(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { let ok = _event.prepare.map_or(true, |f| f(_event, &mut self.scratch)); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
-    fn effect_encode_audio(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorError::Backend; } Ok(()) }
+impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
+    fn effect_encode_text(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorStatus::Backend; } Ok(()) }
+    fn effect_prepare_image(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { let ok = _event.prepare.map_or(true, |f| f(_event, &mut self.scratch)); if !ok { self.error = EmbeddingsGeneratorStatus::Backend; } Ok(()) }
+    fn effect_encode_image(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorStatus::Backend; } Ok(()) }
+    fn effect_prepare_audio(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { let ok = _event.prepare.map_or(true, |f| f(_event, &mut self.scratch)); if !ok { self.error = EmbeddingsGeneratorStatus::Backend; } Ok(()) }
+    fn effect_encode_audio(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { let ok = _event.encode.map_or(false, |f| f(_event, &mut self.scratch[..self.embedding_length.min(MAX_EMBEDDING_DIMENSION)])); if !ok { self.error = EmbeddingsGeneratorStatus::Backend; } Ok(()) }
     fn effect_begin_embed_audio_from_state_done(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.reset(); Ok(()) }
     fn effect_begin_embed_audio_from_state_errored(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.reset(); Ok(()) }
     fn effect_begin_embed_audio_from_state_idle(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.reset(); Ok(()) }
@@ -251,53 +256,53 @@ impl EmbeddingsGeneratorStateMachineContext {
     fn effect_emit_embed_error_event_embed_text_run(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { if let Some(f) = _event.on_error { f(self.error); } Ok(()) }
     fn effect_emit_initialize_done(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { if let Some(f) = _event.on_done { f(); } Ok(()) }
     fn effect_emit_initialize_error(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { if let Some(f) = _event.on_error { f(self.error); } Ok(()) }
-    fn effect_mark_initialized(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.initialized = true; self.error = EmbeddingsGeneratorError::None; Ok(()) }
+    fn effect_mark_initialized(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.initialized = true; self.error = EmbeddingsGeneratorStatus::None; Ok(()) }
     fn effect_publish_full_embedding_event_embed_audio_run(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.output_dimension = self.embedding_length; Ok(()) }
     fn effect_publish_full_embedding_event_embed_image_run(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.output_dimension = self.embedding_length; Ok(()) }
     fn effect_publish_full_embedding_event_embed_text_run(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.output_dimension = self.embedding_length; Ok(()) }
     fn effect_publish_truncated_embedding_event_embed_audio_run(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.output_dimension = self.requested_dimension(_event.truncate_dimension); let _ = normalize(&mut self.scratch[..self.output_dimension.min(MAX_EMBEDDING_DIMENSION)]); Ok(()) }
     fn effect_publish_truncated_embedding_event_embed_image_run(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.output_dimension = self.requested_dimension(_event.truncate_dimension); let _ = normalize(&mut self.scratch[..self.output_dimension.min(MAX_EMBEDDING_DIMENSION)]); Ok(()) }
     fn effect_publish_truncated_embedding_event_embed_text_run(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.output_dimension = self.requested_dimension(_event.truncate_dimension); let _ = normalize(&mut self.scratch[..self.output_dimension.min(MAX_EMBEDDING_DIMENSION)]); Ok(()) }
-    fn effect_reject_embed_audio_from_state_done(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_audio_from_state_errored(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_audio_from_state_idle(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_image_from_state_done(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_image_from_state_errored(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_image_from_state_idle(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_text_from_state_done(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_text_from_state_errored(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_embed_text_from_state_idle(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_initialize_from_state_done(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_initialize_from_state_errored(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_initialize_from_state_idle(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_initialize_from_state_uninitialized(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_audio_encoding(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_audio_preparing(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_conditioning(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_conditioning_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_done(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_embed_error_channel_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_embed_publish_error(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_embed_publish_success(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_embedding_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_encoding(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_errored(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_idle(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_image_encoding(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_image_preparing(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_initialize_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_initialize_error_channel_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_initialize_publish_error(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_initialize_publish_success(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_initializing(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_reject_unexpected_from_state_uninitialized(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_set_embed_backend_error_event_embed_audio_run(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::Backend); Ok(()) }
-    fn effect_set_embed_backend_error_event_embed_image_run(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::Backend); Ok(()) }
-    fn effect_set_embed_backend_error_event_embed_text_run(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::Backend); Ok(()) }
-    fn effect_set_embed_invalid_request(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::InvalidRequest); Ok(()) }
-    fn effect_set_embed_model_invalid(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::ModelInvalid); Ok(()) }
-    fn effect_set_initialize_backend_error(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::Backend); Ok(()) }
-    fn effect_set_initialize_model_invalid(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorError::ModelInvalid); Ok(()) }
+    fn effect_reject_embed_audio_from_state_done(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_audio_from_state_errored(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_audio_from_state_idle(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_image_from_state_done(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_image_from_state_errored(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_image_from_state_idle(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_text_from_state_done(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_text_from_state_errored(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_embed_text_from_state_idle(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_initialize_from_state_done(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_initialize_from_state_errored(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_initialize_from_state_idle(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_initialize_from_state_uninitialized(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_audio_encoding(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_audio_preparing(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_conditioning(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_conditioning_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_done(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_embed_error_channel_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_embed_publish_error(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_embed_publish_success(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_embedding_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_encoding(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_errored(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_idle(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_image_encoding(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_image_preparing(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_initialize_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_initialize_error_channel_decision(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_initialize_publish_error(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_initialize_publish_success(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_initializing(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_reject_unexpected_from_state_uninitialized(&mut self) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_set_embed_backend_error_event_embed_audio_run(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::Backend); Ok(()) }
+    fn effect_set_embed_backend_error_event_embed_image_run(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::Backend); Ok(()) }
+    fn effect_set_embed_backend_error_event_embed_text_run(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::Backend); Ok(()) }
+    fn effect_set_embed_invalid_request(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::InvalidRequest); Ok(()) }
+    fn effect_set_embed_model_invalid(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::ModelInvalid); Ok(()) }
+    fn effect_set_initialize_backend_error(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::Backend); Ok(()) }
+    fn effect_set_initialize_model_invalid(&mut self, _event: &EventInitializeRun) -> Result<(), ()> { self.set_error(EmbeddingsGeneratorStatus::ModelInvalid); Ok(()) }
     fn effect_write_embed_error_out_event_embed_audio_run(&mut self, _event: &EventEmbedAudioRun) -> Result<(), ()> { Ok(()) }
     fn effect_write_embed_error_out_event_embed_image_run(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> { Ok(()) }
     fn effect_write_embed_error_out_event_embed_text_run(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> { Ok(()) }
@@ -307,15 +312,15 @@ impl EmbeddingsGeneratorStateMachineContext {
     fn guard_audio_prepare_ready(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.audio_route == AudioRouteKind::Encoder && self.model_ready && self.audio_ready && self.scratch_ready) }
     fn guard_audio_prepare_unready(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(!(self.audio_route == AudioRouteKind::Encoder && self.model_ready && self.audio_ready && self.scratch_ready)) }
     fn guard_audio_route_unsupported(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.audio_route != AudioRouteKind::Encoder) }
-    fn guard_embedding_failed_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.error != EmbeddingsGeneratorError::None) }
-    fn guard_embedding_failed_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.error != EmbeddingsGeneratorError::None) }
-    fn guard_embedding_failed_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.error != EmbeddingsGeneratorError::None) }
-    fn guard_embedding_succeeded_full_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorError::None && self.requested_dimension(_event.truncate_dimension) == self.embedding_length) }
-    fn guard_embedding_succeeded_full_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorError::None && self.requested_dimension(_event.truncate_dimension) == self.embedding_length) }
-    fn guard_embedding_succeeded_full_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorError::None && self.requested_dimension(_event.truncate_dimension) == self.embedding_length) }
-    fn guard_embedding_succeeded_truncate_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorError::None && self.requested_dimension(_event.truncate_dimension) > 0 && self.requested_dimension(_event.truncate_dimension) < self.embedding_length) }
-    fn guard_embedding_succeeded_truncate_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorError::None && self.requested_dimension(_event.truncate_dimension) > 0 && self.requested_dimension(_event.truncate_dimension) < self.embedding_length) }
-    fn guard_embedding_succeeded_truncate_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorError::None && self.requested_dimension(_event.truncate_dimension) > 0 && self.requested_dimension(_event.truncate_dimension) < self.embedding_length) }
+    fn guard_embedding_failed_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.error != EmbeddingsGeneratorStatus::None) }
+    fn guard_embedding_failed_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.error != EmbeddingsGeneratorStatus::None) }
+    fn guard_embedding_failed_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.error != EmbeddingsGeneratorStatus::None) }
+    fn guard_embedding_succeeded_full_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorStatus::None && self.requested_dimension(_event.truncate_dimension) == self.embedding_length) }
+    fn guard_embedding_succeeded_full_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorStatus::None && self.requested_dimension(_event.truncate_dimension) == self.embedding_length) }
+    fn guard_embedding_succeeded_full_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorStatus::None && self.requested_dimension(_event.truncate_dimension) == self.embedding_length) }
+    fn guard_embedding_succeeded_truncate_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorStatus::None && self.requested_dimension(_event.truncate_dimension) > 0 && self.requested_dimension(_event.truncate_dimension) < self.embedding_length) }
+    fn guard_embedding_succeeded_truncate_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorStatus::None && self.requested_dimension(_event.truncate_dimension) > 0 && self.requested_dimension(_event.truncate_dimension) < self.embedding_length) }
+    fn guard_embedding_succeeded_truncate_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.error == EmbeddingsGeneratorStatus::None && self.requested_dimension(_event.truncate_dimension) > 0 && self.requested_dimension(_event.truncate_dimension) < self.embedding_length) }
     fn guard_has_embed_done_callback_event_embed_audio_run(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(_event.on_done.is_some()) }
     fn guard_has_embed_done_callback_event_embed_image_run(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(_event.on_done.is_some()) }
     fn guard_has_embed_done_callback_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(_event.on_done.is_some()) }
@@ -329,9 +334,9 @@ impl EmbeddingsGeneratorStateMachineContext {
     fn guard_image_prepare_ready(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.image_route == ImageRouteKind::Encoder && self.model_ready && self.image_ready && self.scratch_ready) }
     fn guard_image_prepare_unready(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(!(self.image_route == ImageRouteKind::Encoder && self.model_ready && self.image_ready && self.scratch_ready)) }
     fn guard_image_route_unsupported(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(self.image_route != ImageRouteKind::Encoder) }
-    fn guard_initialize_backend_error(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(!self.guard_initialize_success(_event)? && !self.guard_initialize_model_invalid(_event)? && self.error == EmbeddingsGeneratorError::None) }
+    fn guard_initialize_backend_error(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(!self.guard_initialize_success(_event)? && !self.guard_initialize_model_invalid(_event)? && self.error == EmbeddingsGeneratorStatus::None) }
     fn guard_initialize_model_invalid(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(!self.text_ready || self.bind_err_code == 2) }
-    fn guard_initialize_success(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(self.text_ready && self.scratch_ready && self.bind_accepted && self.bind_err_code == 0 && self.error == EmbeddingsGeneratorError::None) }
+    fn guard_initialize_success(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(self.text_ready && self.scratch_ready && self.bind_accepted && self.bind_err_code == 0 && self.error == EmbeddingsGeneratorStatus::None) }
     fn guard_invalid_embed(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(!self.guard_valid_embed_full(_event)? && !self.guard_valid_embed_truncate(_event)?) }
     fn guard_invalid_embed_audio(&self, _event: &EventEmbedAudioRun) -> Result<bool, ()> { Ok(!self.guard_valid_embed_audio_full(_event)? && !self.guard_valid_embed_audio_truncate(_event)?) }
     fn guard_invalid_embed_image(&self, _event: &EventEmbedImageRun) -> Result<bool, ()> { Ok(!self.guard_valid_embed_image_full(_event)? && !self.guard_valid_embed_image_truncate(_event)?) }
@@ -344,10 +349,10 @@ impl EmbeddingsGeneratorStateMachineContext {
     fn guard_no_embed_error_callback_event_embed_text_run(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(_event.on_error.is_none()) }
     fn guard_no_initialize_done_callback(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(_event.on_done.is_none()) }
     fn guard_no_initialize_error_callback(&self, _event: &EventInitializeRun) -> Result<bool, ()> { Ok(_event.on_error.is_none()) }
-    fn guard_prepare_backend_error(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(!self.guard_prepare_success(_event)? && !self.guard_prepare_invalid_request(_event)? && !self.guard_prepare_model_invalid(_event)? && self.error == EmbeddingsGeneratorError::None) }
+    fn guard_prepare_backend_error(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(!self.guard_prepare_success(_event)? && !self.guard_prepare_invalid_request(_event)? && !self.guard_prepare_model_invalid(_event)? && self.error == EmbeddingsGeneratorStatus::None) }
     fn guard_prepare_invalid_request(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.prepare_err_code == 1) }
     fn guard_prepare_model_invalid(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.prepare_err_code == 2) }
-    fn guard_prepare_success(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.prepare_accepted && self.prepare_err_code == 0 && self.token_count > 0 && self.error == EmbeddingsGeneratorError::None) }
+    fn guard_prepare_success(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.prepare_accepted && self.prepare_err_code == 0 && self.token_count > 0 && self.error == EmbeddingsGeneratorStatus::None) }
     fn guard_text_encode_ready(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.text_ready && self.scratch_ready && self.token_count > 0 && self.token_count <= self.max_positions) }
     fn guard_text_encode_unready(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(!(self.text_ready && self.scratch_ready && self.token_count > 0 && self.token_count <= self.max_positions)) }
     fn guard_text_route_unsupported(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> { Ok(self.text_route != TextRouteKind::Encoder) }
@@ -361,7 +366,7 @@ impl EmbeddingsGeneratorStateMachineContext {
 }
 
 /// Synchronous bounded actor wrapper.
-pub struct EmbeddingsGeneratorActor { machine: EmbeddingsGeneratorStateMachine }
+pub struct EmbeddingsGeneratorActor { machine: EmbeddingsGeneratorStateMachine<EmbeddingsGeneratorContext> }
 impl Default for EmbeddingsGeneratorActor { fn default() -> Self { Self::new() } }
 impl EmbeddingsGeneratorActor {
     pub fn new() -> Self { Self { machine: EmbeddingsGeneratorStateMachine::new(EmbeddingsGeneratorContext::default()) } }
