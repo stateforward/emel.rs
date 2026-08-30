@@ -20,12 +20,35 @@ fn on_error(error: BatchFailure) {
     ERROR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+fn on_backend_error(error: BatchFailure) {
+    assert_eq!(error.error, BatchError::Backend);
+    assert_eq!(error.token_count, 1);
+}
+
 #[allow(clippy::unnecessary_wraps)]
 fn seed_zero(
     context: &super::PositionSeedContext<'_>,
     _sequence_id: i32,
 ) -> Result<i32, PositionSeedError> {
     Ok(context.seeds[0])
+}
+
+fn seed_values(
+    context: &super::PositionSeedContext<'_>,
+    sequence_id: i32,
+) -> Result<i32, PositionSeedError> {
+    Ok(context.seeds[usize::try_from(sequence_id).unwrap()])
+}
+
+fn mixed_seed_errors(
+    context: &super::PositionSeedContext<'_>,
+    sequence_id: i32,
+) -> Result<i32, PositionSeedError> {
+    match sequence_id {
+        0 => Err(PositionSeedError::InvalidRequest),
+        1 => Err(PositionSeedError::Backend),
+        _ => seed_values(context, sequence_id),
+    }
 }
 
 #[allow(
@@ -641,6 +664,84 @@ fn maximum_seed_is_rejected_before_increment() {
         },
     });
     assert_eq!(result, Err(BatchError::InvalidRequest));
+}
+
+#[test]
+fn seeded_probe_backend_error_wins_over_invalid_seed_error() {
+    let ids = [1];
+    let sequence_ids = [0];
+    let seeds = [0; MAX_SEQ];
+    let mut primary = [0; 1];
+    let mut masks = [0; 1];
+    let mut positions = [0; 1];
+    let mut output = [0; 1];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: Some(&sequence_ids),
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: Some(super::PositionSeedResolver {
+            context: super::PositionSeedContext { seeds: &seeds },
+            resolve: mixed_seed_errors,
+        }),
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: Some(on_backend_error),
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result, Err(BatchError::Backend));
+}
+
+#[test]
+fn seeded_probe_accepts_unused_maximum_seed() {
+    let ids = [1];
+    let sequence_ids = [0];
+    let mut seeds = [0; MAX_SEQ];
+    seeds[1] = i32::MAX;
+    let mut primary = [0; 1];
+    let mut masks = [0; 1];
+    let mut positions = [0; 1];
+    let mut output = [0; 1];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: Some(&sequence_ids),
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: Some(super::PositionSeedResolver {
+            context: super::PositionSeedContext { seeds: &seeds },
+            resolve: seed_values,
+        }),
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result.unwrap().positions_count, 1);
+    assert_eq!(positions, [0]);
 }
 
 #[test]

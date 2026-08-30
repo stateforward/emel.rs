@@ -876,32 +876,31 @@ fn copy_positions(e: &BatchRuntime<'_>, stride: usize) {
 fn probe_seeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
     let resolver = e.request.resolve_position_seed.unwrap();
+    let mut backend_error = false;
+    let mut invalid = false;
     for id in 0..MAX_SEQ {
         match (resolver.resolve)(&resolver.context, id as i32) {
-            Ok(v) if (0..i32::MAX).contains(&v) => {
+            Ok(v) => {
+                invalid |= v < 0;
                 s.next_pos[id] = v;
                 s.seed_pos[id] = v;
             }
-            Ok(_) => {
-                e.context.error.set(DispatchError::InvalidRequest);
-                return;
-            }
             Err(PositionSeedError::Backend) => {
-                e.context.error.set(DispatchError::Backend);
-                return;
+                backend_error = true;
             }
             Err(PositionSeedError::InvalidRequest) => {
-                e.context.error.set(DispatchError::InvalidRequest);
-                return;
+                invalid = true;
             }
         }
     }
+    let mut valid = !backend_error && !invalid;
+    let words = effective_mask_words(&e.request);
     for i in 0..e.request.token_ids.len() {
         let primary = e.outputs.seq_primary_ids[i].get() as usize;
         let pos = s.next_pos[primary];
-        let row = &e.outputs.seq_masks
-            [i * effective_mask_words(&e.request)..(i + 1) * effective_mask_words(&e.request)];
-        if !row.iter().enumerate().all(|(w, bits)| {
+        valid = valid && pos != i32::MAX;
+        let row = &e.outputs.seq_masks[i * words..(i + 1) * words];
+        let compatible = valid && row.iter().enumerate().all(|(w, bits)| {
             let mut b = bits.get();
             let mut ok = true;
             while b != 0 {
@@ -910,24 +909,29 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
                 b &= b - 1;
             }
             ok
-        }) {
-            e.context.error.set(DispatchError::InvalidRequest);
-            return;
-        }
-        for (w, bits) in row.iter().enumerate() {
-            let mut b = bits.get();
-            while b != 0 {
-                let bit = b.trailing_zeros() as usize;
-                let Some(next) = pos.checked_add(1) else {
-                    e.context.error.set(DispatchError::InvalidRequest);
-                    return;
-                };
-                s.next_pos[w * 64 + bit] = next;
-                b &= b - 1;
+        });
+        valid = valid && compatible;
+        let Some(next) = pos.checked_add(1) else {
+            continue;
+        };
+        if valid {
+            for (w, bits) in row.iter().enumerate() {
+                let mut b = bits.get();
+                while b != 0 {
+                    let bit = b.trailing_zeros() as usize;
+                    s.next_pos[w * 64 + bit] = next;
+                    b &= b - 1;
+                }
             }
         }
     }
-    e.context.error.set(DispatchError::None);
+    e.context.error.set(if backend_error {
+        DispatchError::Backend
+    } else if !valid {
+        DispatchError::InvalidRequest
+    } else {
+        DispatchError::None
+    });
 }
 fn probe_unseeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
