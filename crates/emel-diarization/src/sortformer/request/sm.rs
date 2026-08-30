@@ -197,28 +197,28 @@ impl<'a> EventPrepareRun<'a> {
 
 sml! {
     DiarizationSortformerRequest {
-        "state_model_contract_decision"_s <= *"state_ready"_s + event<EventPrepareRun> / effect_begin_prepare,
-        "state_sample_rate_decision"_s <= "state_model_contract_decision"_s + completion<EventPrepareRun> [guard_model_contract_valid],
-        "state_error_error_out_decision"_s <= "state_model_contract_decision"_s + completion<EventPrepareRun> [guard_model_contract_invalid] / effect_mark_model_invalid,
-        "state_channel_count_decision"_s <= "state_sample_rate_decision"_s + completion<EventPrepareRun> [guard_sample_rate_valid],
-        "state_error_error_out_decision"_s <= "state_sample_rate_decision"_s + completion<EventPrepareRun> [guard_sample_rate_invalid] / effect_mark_sample_rate_invalid,
-        "state_pcm_shape_decision"_s <= "state_channel_count_decision"_s + completion<EventPrepareRun> [guard_channel_count_valid],
-        "state_error_error_out_decision"_s <= "state_channel_count_decision"_s + completion<EventPrepareRun> [guard_channel_count_invalid] / effect_mark_channel_count_invalid,
-        "state_output_capacity_decision"_s <= "state_pcm_shape_decision"_s + completion<EventPrepareRun> [guard_pcm_shape_valid],
-        "state_error_error_out_decision"_s <= "state_pcm_shape_decision"_s + completion<EventPrepareRun> [guard_pcm_shape_invalid] / effect_mark_pcm_shape_invalid,
-        "state_preparing"_s <= "state_output_capacity_decision"_s + completion<EventPrepareRun> [guard_output_capacity_valid],
-        "state_error_error_out_decision"_s <= "state_output_capacity_decision"_s + completion<EventPrepareRun> [guard_output_capacity_invalid] / effect_mark_capacity_invalid,
-        "state_success_error_out_decision"_s <= "state_preparing"_s + completion<EventPrepareRun> / effect_extract_features,
-        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<EventPrepareRun> [guard_has_error_out] / effect_store_success_error,
-        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<EventPrepareRun> [guard_no_error_out],
-        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<EventPrepareRun> [guard_has_error_out] / effect_store_error_error,
-        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<EventPrepareRun> [guard_no_error_out],
-        "state_done"_s <= "state_success_callback_decision"_s + completion<EventPrepareRun> [guard_has_done_callback] / effect_emit_done,
-        "state_done"_s <= "state_success_callback_decision"_s + completion<EventPrepareRun> [guard_no_done_callback],
-        "state_errored"_s <= "state_error_callback_decision"_s + completion<EventPrepareRun> [guard_has_error_callback] / effect_emit_error,
-        "state_errored"_s <= "state_error_callback_decision"_s + completion<EventPrepareRun> [guard_no_error_callback],
-        "state_ready"_s <= "state_done"_s + completion<EventPrepareRun>,
-        "state_ready"_s <= "state_errored"_s + completion<EventPrepareRun>,
+        "state_model_contract_decision"_s <= *"state_ready"_s + EventPrepareRun(&'dispatch EventPrepareRun<'dispatch>) / effect_begin_prepare,
+        "state_sample_rate_decision"_s <= "state_model_contract_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_model_contract_valid],
+        "state_error_error_out_decision"_s <= "state_model_contract_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_model_contract_invalid] / effect_mark_model_invalid,
+        "state_channel_count_decision"_s <= "state_sample_rate_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_sample_rate_valid],
+        "state_error_error_out_decision"_s <= "state_sample_rate_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_sample_rate_invalid] / effect_mark_sample_rate_invalid,
+        "state_pcm_shape_decision"_s <= "state_channel_count_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_channel_count_valid],
+        "state_error_error_out_decision"_s <= "state_channel_count_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_channel_count_invalid] / effect_mark_channel_count_invalid,
+        "state_output_capacity_decision"_s <= "state_pcm_shape_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_pcm_shape_valid],
+        "state_error_error_out_decision"_s <= "state_pcm_shape_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_pcm_shape_invalid] / effect_mark_pcm_shape_invalid,
+        "state_preparing"_s <= "state_output_capacity_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_output_capacity_valid],
+        "state_error_error_out_decision"_s <= "state_output_capacity_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_output_capacity_invalid] / effect_mark_capacity_invalid,
+        "state_success_error_out_decision"_s <= "state_preparing"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) / effect_extract_features,
+        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_has_error_out] / effect_store_success_error,
+        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_no_error_out],
+        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_has_error_out] / effect_store_error_error,
+        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_no_error_out],
+        "state_done"_s <= "state_success_callback_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_has_done_callback] / effect_emit_done,
+        "state_done"_s <= "state_success_callback_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_no_done_callback],
+        "state_errored"_s <= "state_error_callback_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_has_error_callback] / effect_emit_error,
+        "state_errored"_s <= "state_error_callback_decision"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>) [guard_no_error_callback],
+        "state_ready"_s <= "state_done"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>),
+        "state_ready"_s <= "state_errored"_s + completion<EventPrepareRun<'dispatch>>(&'dispatch EventPrepareRun<'dispatch>),
         "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected_from_state_ready,
         "state_ready"_s <= "state_model_contract_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_model_contract_decision,
         "state_ready"_s <= "state_sample_rate_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_sample_rate_decision,
@@ -241,13 +241,13 @@ pub struct DiarizationSortformerRequestContext {
 }
 
 impl DiarizationSortformerRequestStateMachineContext for DiarizationSortformerRequestContext {
-    fn effect_begin_prepare(&mut self, event: &EventPrepareRun) -> Result<(), ()> {
+    fn effect_begin_prepare(&mut self, event: &EventPrepareRun<'_>) -> Result<(), ()> {
         self.err = Error::None;
         *event.frame_count_out.borrow_mut() = 0;
         *event.feature_bin_count_out.borrow_mut() = 0;
         Ok(())
     }
-    fn effect_emit_done(&mut self, event: &EventPrepareRun) -> Result<(), ()> {
+    fn effect_emit_done(&mut self, event: &EventPrepareRun<'_>) -> Result<(), ()> {
         if let Some(callback) = event.on_done {
             let _ = callback(PrepareDone {
                 frame_count: *event.frame_count_out.borrow(),
@@ -256,13 +256,13 @@ impl DiarizationSortformerRequestStateMachineContext for DiarizationSortformerRe
         }
         Ok(())
     }
-    fn effect_emit_error(&mut self, event: &EventPrepareRun) -> Result<(), ()> {
+    fn effect_emit_error(&mut self, event: &EventPrepareRun<'_>) -> Result<(), ()> {
         if let Some(callback) = event.on_error {
             let _ = callback(PrepareError { error: self.err });
         }
         Ok(())
     }
-    fn effect_extract_features(&mut self, event: &EventPrepareRun) -> Result<(), ()> {
+    fn effect_extract_features(&mut self, event: &EventPrepareRun<'_>) -> Result<(), ()> {
         let mut features = event.features.borrow_mut();
         if let Some(extractor) = event.contract.extract_features {
             if !extractor(event.pcm, event.contract, &mut features[..REQUIRED_FEATURE_COUNT]) {
@@ -276,36 +276,36 @@ impl DiarizationSortformerRequestStateMachineContext for DiarizationSortformerRe
         *event.feature_bin_count_out.borrow_mut() = FEATURE_BIN_COUNT;
         Ok(())
     }
-    fn effect_mark_capacity_invalid(&mut self, _: &EventPrepareRun) -> Result<(), ()> { self.err = Error::Capacity; Ok(()) }
-    fn effect_mark_channel_count_invalid(&mut self, _: &EventPrepareRun) -> Result<(), ()> { self.err = Error::ChannelCount; Ok(()) }
-    fn effect_mark_model_invalid(&mut self, _: &EventPrepareRun) -> Result<(), ()> { self.err = Error::ModelInvalid; Ok(()) }
-    fn effect_mark_pcm_shape_invalid(&mut self, _: &EventPrepareRun) -> Result<(), ()> { self.err = Error::PcmShape; Ok(()) }
-    fn effect_mark_sample_rate_invalid(&mut self, _: &EventPrepareRun) -> Result<(), ()> { self.err = Error::SampleRate; Ok(()) }
-    fn effect_store_error_error(&mut self, event: &EventPrepareRun) -> Result<(), ()> {
+    fn effect_mark_capacity_invalid(&mut self, _: &EventPrepareRun<'_>) -> Result<(), ()> { self.err = Error::Capacity; Ok(()) }
+    fn effect_mark_channel_count_invalid(&mut self, _: &EventPrepareRun<'_>) -> Result<(), ()> { self.err = Error::ChannelCount; Ok(()) }
+    fn effect_mark_model_invalid(&mut self, _: &EventPrepareRun<'_>) -> Result<(), ()> { self.err = Error::ModelInvalid; Ok(()) }
+    fn effect_mark_pcm_shape_invalid(&mut self, _: &EventPrepareRun<'_>) -> Result<(), ()> { self.err = Error::PcmShape; Ok(()) }
+    fn effect_mark_sample_rate_invalid(&mut self, _: &EventPrepareRun<'_>) -> Result<(), ()> { self.err = Error::SampleRate; Ok(()) }
+    fn effect_store_error_error(&mut self, event: &EventPrepareRun<'_>) -> Result<(), ()> {
         if let Some(error_out) = event.error_out.borrow_mut().as_deref_mut() { *error_out = self.err; }
         Ok(())
     }
-    fn effect_store_success_error(&mut self, event: &EventPrepareRun) -> Result<(), ()> {
+    fn effect_store_success_error(&mut self, event: &EventPrepareRun<'_>) -> Result<(), ()> {
         if let Some(error_out) = event.error_out.borrow_mut().as_deref_mut() { *error_out = self.err; }
         Ok(())
     }
 
-    fn guard_channel_count_invalid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.channel_count != CHANNEL_COUNT) }
-    fn guard_channel_count_valid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.channel_count == CHANNEL_COUNT) }
-    fn guard_has_done_callback(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.on_done.is_some()) }
-    fn guard_has_error_callback(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.on_error.is_some()) }
-    fn guard_has_error_out(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.error_out.borrow().is_some()) }
-    fn guard_model_contract_invalid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(!event.contract.model_contract_valid()) }
-    fn guard_model_contract_valid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.contract.model_contract_valid()) }
-    fn guard_no_done_callback(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.on_done.is_none()) }
-    fn guard_no_error_callback(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.on_error.is_none()) }
-    fn guard_no_error_out(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.error_out.borrow().is_none()) }
-    fn guard_output_capacity_invalid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(!self.guard_output_capacity_valid(event)?) }
-    fn guard_output_capacity_valid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.features.borrow().len() >= REQUIRED_FEATURE_COUNT) }
-    fn guard_pcm_shape_invalid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(!self.guard_pcm_shape_valid(event)?) }
-    fn guard_pcm_shape_valid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.pcm.len() == REQUIRED_SAMPLE_COUNT) }
-    fn guard_sample_rate_invalid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.sample_rate != SAMPLE_RATE) }
-    fn guard_sample_rate_valid(&self, event: &EventPrepareRun) -> Result<bool, ()> { Ok(event.sample_rate == SAMPLE_RATE) }
+    fn guard_channel_count_invalid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.channel_count != CHANNEL_COUNT) }
+    fn guard_channel_count_valid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.channel_count == CHANNEL_COUNT) }
+    fn guard_has_done_callback(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.on_done.is_some()) }
+    fn guard_has_error_callback(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.on_error.is_some()) }
+    fn guard_has_error_out(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.error_out.borrow().is_some()) }
+    fn guard_model_contract_invalid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(!event.contract.model_contract_valid()) }
+    fn guard_model_contract_valid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.contract.model_contract_valid()) }
+    fn guard_no_done_callback(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.on_done.is_none()) }
+    fn guard_no_error_callback(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.on_error.is_none()) }
+    fn guard_no_error_out(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.error_out.borrow().is_none()) }
+    fn guard_output_capacity_invalid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(!self.guard_output_capacity_valid(event)?) }
+    fn guard_output_capacity_valid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.features.borrow().len() >= REQUIRED_FEATURE_COUNT) }
+    fn guard_pcm_shape_invalid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(!self.guard_pcm_shape_valid(event)?) }
+    fn guard_pcm_shape_valid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.pcm.len() == REQUIRED_SAMPLE_COUNT) }
+    fn guard_sample_rate_invalid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.sample_rate != SAMPLE_RATE) }
+    fn guard_sample_rate_valid(&self, event: &EventPrepareRun<'_>) -> Result<bool, ()> { Ok(event.sample_rate == SAMPLE_RATE) }
 
     fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
     fn effect_on_unexpected_from_state_model_contract_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
@@ -329,6 +329,6 @@ impl Request {
     /// Dispatches one borrowed request through the complete validation and
     /// preparation graph.
     pub fn prepare<'a>(&mut self, event: EventPrepareRun<'a>) -> bool {
-        self.process_event(event).is_ok()
+        self.process_event(DiarizationSortformerRequestEvents::EventPrepareRun(&event)).is_ok()
     }
 }

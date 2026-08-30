@@ -26,28 +26,28 @@ pub(crate) type EventPlanRuntime = PlanRuntime;
 
 sml! {
     BatchPlannerModesEqual {
-        "state_planning"_s <= *"state_preparing"_s + event<EventPlanRuntime> / effect_begin_planning,
-        "state_planning_mode_decision"_s <= "state_planning"_s + completion<EventPlanRuntime>,
-        "state_planning_fast_input_decision"_s <= "state_planning_mode_decision"_s + completion<EventPlanRuntime> [guard_mode_is_primary_fast_path],
-        "state_planning_general_input_decision"_s <= "state_planning_mode_decision"_s + completion<EventPlanRuntime> [guard_mode_is_general_path],
-        "state_planning_general_capacity_decision"_s <= "state_planning_general_input_decision"_s + completion<EventPlanRuntime> [guard_general_input_valid],
-        "state_planning_failed"_s <= "state_planning_general_input_decision"_s + completion<EventPlanRuntime> [guard_has_invalid_step_size] / effect_reject_invalid_step_size_from_state_planning_general_input_decision,
-        "state_planning_failed"_s <= "state_planning_general_capacity_decision"_s + completion<EventPlanRuntime> [guard_lacks_step_capacity] / effect_reject_output_steps_full_from_state_planning_general_capacity_decision,
-        "state_planning_failed"_s <= "state_planning_general_capacity_decision"_s + completion<EventPlanRuntime> [guard_lacks_index_capacity] / effect_reject_output_indices_full_from_state_planning_general_capacity_decision,
-        "state_planning_general_execute"_s <= "state_planning_general_capacity_decision"_s + completion<EventPlanRuntime> [guard_storage_capacity_valid],
-        "state_planning_general_result_decision"_s <= "state_planning_general_execute"_s + completion<EventPlanRuntime> / effect_plan_equal_batches,
-        "state_planning_failed"_s <= "state_planning_fast_input_decision"_s + completion<EventPlanRuntime> [guard_has_invalid_step_size] / effect_reject_invalid_step_size_from_state_planning_fast_input_decision,
-        "state_planning_failed"_s <= "state_planning_fast_input_decision"_s + completion<EventPlanRuntime> [guard_fast_path_missing_primary_ids] / effect_reject_invalid_sequence_id_from_state_planning_fast_input_decision,
-        "state_planning_failed"_s <= "state_planning_fast_input_decision"_s + completion<EventPlanRuntime> [guard_fast_path_primary_ids_invalid] / effect_reject_invalid_sequence_id_from_state_planning_fast_input_decision,
-        "state_planning_fast_capacity_decision"_s <= "state_planning_fast_input_decision"_s + completion<EventPlanRuntime> [guard_fast_path_input_valid],
-        "state_planning_failed"_s <= "state_planning_fast_capacity_decision"_s + completion<EventPlanRuntime> [guard_lacks_step_capacity] / effect_reject_output_steps_full_from_state_planning_fast_capacity_decision,
-        "state_planning_failed"_s <= "state_planning_fast_capacity_decision"_s + completion<EventPlanRuntime> [guard_lacks_index_capacity] / effect_reject_output_indices_full_from_state_planning_fast_capacity_decision,
-        "state_planning_fast_execute"_s <= "state_planning_fast_capacity_decision"_s + completion<EventPlanRuntime> [guard_storage_capacity_valid],
-        "state_planning_fast_result_decision"_s <= "state_planning_fast_execute"_s + completion<EventPlanRuntime> / effect_plan_equal_primary_batches,
-        "state_planning_done"_s <= "state_planning_general_result_decision"_s + completion<EventPlanRuntime> [guard_planning_succeeded] / effect_emit_plan_done_from_state_planning_general_result_decision,
-        "state_planning_failed"_s <= "state_planning_general_result_decision"_s + completion<EventPlanRuntime> [guard_planning_failed] / effect_reject_planning_progress_stalled_from_state_planning_general_result_decision,
-        "state_planning_done"_s <= "state_planning_fast_result_decision"_s + completion<EventPlanRuntime> [guard_planning_succeeded] / effect_emit_plan_done_from_state_planning_fast_result_decision,
-        "state_planning_failed"_s <= "state_planning_fast_result_decision"_s + completion<EventPlanRuntime> [guard_planning_failed] / effect_reject_planning_progress_stalled_from_state_planning_fast_result_decision,
+        "state_planning"_s <= *"state_preparing"_s + Plan(PlanRuntime) / effect_begin_planning,
+        "state_planning_mode_decision"_s <= "state_planning"_s + completion<Plan>(PlanRuntime),
+        "state_planning_fast_input_decision"_s <= "state_planning_mode_decision"_s + completion<Plan>(PlanRuntime) [guard_mode_is_primary_fast_path],
+        "state_planning_general_input_decision"_s <= "state_planning_mode_decision"_s + completion<Plan>(PlanRuntime) [guard_mode_is_general_path],
+        "state_planning_general_capacity_decision"_s <= "state_planning_general_input_decision"_s + completion<Plan>(PlanRuntime) [guard_general_input_valid],
+        "state_planning_failed"_s <= "state_planning_general_input_decision"_s + completion<Plan>(PlanRuntime) [guard_has_invalid_step_size] / effect_reject_invalid_step_size_from_state_planning_general_input_decision,
+        "state_planning_failed"_s <= "state_planning_general_capacity_decision"_s + completion<Plan>(PlanRuntime) [guard_lacks_step_capacity] / effect_reject_output_steps_full_from_state_planning_general_capacity_decision,
+        "state_planning_failed"_s <= "state_planning_general_capacity_decision"_s + completion<Plan>(PlanRuntime) [guard_lacks_index_capacity] / effect_reject_output_indices_full_from_state_planning_general_capacity_decision,
+        "state_planning_general_execute"_s <= "state_planning_general_capacity_decision"_s + completion<Plan>(PlanRuntime) [guard_storage_capacity_valid],
+        "state_planning_general_result_decision"_s <= "state_planning_general_execute"_s + completion<Plan>(PlanRuntime) / effect_plan_equal_batches,
+        "state_planning_failed"_s <= "state_planning_fast_input_decision"_s + completion<Plan>(PlanRuntime) [guard_has_invalid_step_size] / effect_reject_invalid_step_size_from_state_planning_fast_input_decision,
+        "state_planning_failed"_s <= "state_planning_fast_input_decision"_s + completion<Plan>(PlanRuntime) [guard_fast_path_missing_primary_ids] / effect_reject_invalid_sequence_id_from_state_planning_fast_input_decision,
+        "state_planning_failed"_s <= "state_planning_fast_input_decision"_s + completion<Plan>(PlanRuntime) [guard_fast_path_primary_ids_invalid] / effect_reject_invalid_sequence_id_from_state_planning_fast_input_decision,
+        "state_planning_fast_capacity_decision"_s <= "state_planning_fast_input_decision"_s + completion<Plan>(PlanRuntime) [guard_fast_path_input_valid],
+        "state_planning_failed"_s <= "state_planning_fast_capacity_decision"_s + completion<Plan>(PlanRuntime) [guard_lacks_step_capacity] / effect_reject_output_steps_full_from_state_planning_fast_capacity_decision,
+        "state_planning_failed"_s <= "state_planning_fast_capacity_decision"_s + completion<Plan>(PlanRuntime) [guard_lacks_index_capacity] / effect_reject_output_indices_full_from_state_planning_fast_capacity_decision,
+        "state_planning_fast_execute"_s <= "state_planning_fast_capacity_decision"_s + completion<Plan>(PlanRuntime) [guard_storage_capacity_valid],
+        "state_planning_fast_result_decision"_s <= "state_planning_fast_execute"_s + completion<Plan>(PlanRuntime) / effect_plan_equal_primary_batches,
+        "state_planning_done"_s <= "state_planning_general_result_decision"_s + completion<Plan>(PlanRuntime) [guard_planning_succeeded] / effect_emit_plan_done_from_state_planning_general_result_decision,
+        "state_planning_failed"_s <= "state_planning_general_result_decision"_s + completion<Plan>(PlanRuntime) [guard_planning_failed] / effect_reject_planning_progress_stalled_from_state_planning_general_result_decision,
+        "state_planning_done"_s <= "state_planning_fast_result_decision"_s + completion<Plan>(PlanRuntime) [guard_planning_succeeded] / effect_emit_plan_done_from_state_planning_fast_result_decision,
+        "state_planning_failed"_s <= "state_planning_fast_result_decision"_s + completion<Plan>(PlanRuntime) [guard_planning_failed] / effect_reject_planning_progress_stalled_from_state_planning_fast_result_decision,
         "state_planning_failed"_s <= "state_preparing"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_preparing,
         "state_planning_failed"_s <= "state_planning"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning,
         "state_planning_failed"_s <= "state_planning_mode_decision"_s + unexpected_event<_> / effect_emit_internal_plan_error_from_state_planning_mode_decision,
@@ -304,7 +304,7 @@ fn plan_equal_primary_batches(runtime: &PlanRuntime) {
 }
 
 impl BatchPlannerModesEqualStateMachineContext for BatchPlannerModesEqualContext {
-    fn effect_begin_planning(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
+    fn effect_begin_planning(&mut self, event: PlanRuntime) -> Result<(), ()> {
         event.scratch.borrow_mut().reset();
         Ok(())
     }
@@ -323,101 +323,101 @@ impl BatchPlannerModesEqualStateMachineContext for BatchPlannerModesEqualContext
     fn effect_emit_internal_plan_error_from_state_planning_mode_decision(&mut self) -> Result<(), ()> { Ok(()) }
     fn effect_emit_internal_plan_error_from_state_preparing(&mut self) -> Result<(), ()> { Ok(()) }
 
-    fn effect_emit_plan_done_from_state_planning_fast_result_decision(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> { Ok(()) }
-    fn effect_emit_plan_done_from_state_planning_general_result_decision(&mut self, _event: &EventPlanRuntime) -> Result<(), ()> { Ok(()) }
-    fn effect_plan_equal_batches(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        plan_equal_batches(event);
+    fn effect_emit_plan_done_from_state_planning_fast_result_decision(&mut self, _event: PlanRuntime) -> Result<(), ()> { Ok(()) }
+    fn effect_emit_plan_done_from_state_planning_general_result_decision(&mut self, _event: PlanRuntime) -> Result<(), ()> { Ok(()) }
+    fn effect_plan_equal_batches(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        plan_equal_batches(&event);
         Ok(())
     }
-    fn effect_plan_equal_primary_batches(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        plan_equal_primary_batches(event);
+    fn effect_plan_equal_primary_batches(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        plan_equal_primary_batches(&event);
         Ok(())
     }
-    fn effect_reject_invalid_sequence_id_from_state_planning_fast_input_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::InvalidSequenceId);
+    fn effect_reject_invalid_sequence_id_from_state_planning_fast_input_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::InvalidSequenceId);
         Ok(())
     }
-    fn effect_reject_invalid_step_size_from_state_planning_fast_input_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::InvalidStepSize);
+    fn effect_reject_invalid_step_size_from_state_planning_fast_input_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::InvalidStepSize);
         Ok(())
     }
-    fn effect_reject_invalid_step_size_from_state_planning_general_input_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::InvalidStepSize);
+    fn effect_reject_invalid_step_size_from_state_planning_general_input_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::InvalidStepSize);
         Ok(())
     }
-    fn effect_reject_output_indices_full_from_state_planning_fast_capacity_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::OutputIndicesFull);
+    fn effect_reject_output_indices_full_from_state_planning_fast_capacity_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::OutputIndicesFull);
         Ok(())
     }
-    fn effect_reject_output_indices_full_from_state_planning_general_capacity_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::OutputIndicesFull);
+    fn effect_reject_output_indices_full_from_state_planning_general_capacity_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::OutputIndicesFull);
         Ok(())
     }
-    fn effect_reject_output_steps_full_from_state_planning_fast_capacity_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::OutputStepsFull);
+    fn effect_reject_output_steps_full_from_state_planning_fast_capacity_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::OutputStepsFull);
         Ok(())
     }
-    fn effect_reject_output_steps_full_from_state_planning_general_capacity_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::OutputStepsFull);
+    fn effect_reject_output_steps_full_from_state_planning_general_capacity_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::OutputStepsFull);
         Ok(())
     }
-    fn effect_reject_planning_progress_stalled_from_state_planning_fast_result_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::PlanningProgressStalled);
+    fn effect_reject_planning_progress_stalled_from_state_planning_fast_result_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::PlanningProgressStalled);
         Ok(())
     }
-    fn effect_reject_planning_progress_stalled_from_state_planning_general_result_decision(&mut self, event: &EventPlanRuntime) -> Result<(), ()> {
-        fail(event, PlannerError::PlanningProgressStalled);
+    fn effect_reject_planning_progress_stalled_from_state_planning_general_result_decision(&mut self, event: PlanRuntime) -> Result<(), ()> {
+        fail(&event, PlannerError::PlanningProgressStalled);
         Ok(())
     }
 
-    fn guard_fast_path_input_valid(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_fast_path_input_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(self.guard_has_valid_step_size(event)?
             && self.guard_fast_path_has_primary_ids(event)?
             && self.guard_fast_path_primary_ids_valid(event)?)
     }
-    fn guard_fast_path_missing_primary_ids(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_fast_path_missing_primary_ids(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(!self.guard_fast_path_has_primary_ids(event)?)
     }
-    fn guard_fast_path_primary_ids_invalid(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
-        Ok(self.guard_fast_path_has_primary_ids(event)? && !self.guard_fast_path_primary_ids_valid(event))
+    fn guard_fast_path_primary_ids_invalid(&self, event: &PlanRuntime) -> Result<bool, ()> {
+        Ok(self.guard_fast_path_has_primary_ids(event)? && !self.guard_fast_path_primary_ids_valid(event)?)
     }
-    fn guard_general_input_valid(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_general_input_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
         self.guard_has_valid_step_size(event)
     }
-    fn guard_has_invalid_step_size(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_has_invalid_step_size(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(!self.guard_has_valid_step_size(event)?)
     }
-    fn guard_lacks_index_capacity(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_lacks_index_capacity(&self, event: &PlanRuntime) -> Result<bool, ()> {
         let scratch = event.scratch.borrow();
         Ok(event.request.token_ids.len() > MAX_PLAN_STEPS.saturating_sub(scratch.step_token_indices.len()))
     }
-    fn guard_lacks_step_capacity(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_lacks_step_capacity(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(event.scratch.borrow().step_sizes.len() >= MAX_PLAN_STEPS)
     }
-    fn guard_mode_is_general_path(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_mode_is_general_path(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(!self.guard_mode_is_primary_fast_path(event)?)
     }
-    fn guard_mode_is_primary_fast_path(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_mode_is_primary_fast_path(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(event.request.seq_masks.is_none() && event.request.seq_primary_ids.is_some())
     }
-    fn guard_planning_failed(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_planning_failed(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(!self.guard_planning_succeeded(event)?)
     }
-    fn guard_planning_succeeded(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_planning_succeeded(&self, event: &PlanRuntime) -> Result<bool, ()> {
         let scratch = event.scratch.borrow();
         Ok(scratch.error.is_none()
             && !scratch.step_sizes.is_empty()
             && scratch.step_token_indices.len() == event.request.token_ids.len()
             && scratch.step_token_offsets.len() == scratch.step_sizes.len() + 1)
     }
-    fn guard_storage_capacity_valid(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_storage_capacity_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(!self.guard_lacks_step_capacity(event)? && !self.guard_lacks_index_capacity(event)?)
     }
 
-    fn guard_fast_path_has_primary_ids(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_fast_path_has_primary_ids(&self, event: &PlanRuntime) -> Result<bool, ()> {
         Ok(event.request.seq_primary_ids.is_some())
     }
-    fn guard_fast_path_primary_ids_valid(&self, event: &EventPlanRuntime) -> Result<bool, ()> {
+    fn guard_fast_path_primary_ids_valid(&self, event: &PlanRuntime) -> Result<bool, ()> {
         let Some(ids) = event.request.seq_primary_ids.as_ref() else {
             return Ok(false);
         };

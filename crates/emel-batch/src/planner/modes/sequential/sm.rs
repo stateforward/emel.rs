@@ -115,11 +115,11 @@ impl BatchPlannerModesSequentialStateMachineContext for Context {
         Ok(())
     }
 
-    fn effect_emit_plan_done(&mut self, _event: &PlanRuntime) -> Result<(), ()> {
+    fn effect_emit_plan_done(&mut self, _event: PlanRuntime) -> Result<(), ()> {
         Ok(())
     }
 
-    fn effect_plan_sequential_batches(&mut self, event: &PlanRuntime) -> Result<(), ()> {
+    fn effect_plan_sequential_batches(&mut self, event: PlanRuntime) -> Result<(), ()> {
         let size = event.scratch.borrow().effective_step_size;
         if size == 0 {
             event.scratch.borrow_mut().fail(PlannerError::InvalidStepSize);
@@ -177,24 +177,24 @@ impl BatchPlannerModesSequentialStateMachineContext for Context {
         Ok(())
     }
 
-    fn effect_reject_invalid_step_size(&mut self, event: &PlanRuntime) -> Result<(), ()> {
+    fn effect_reject_invalid_step_size(&mut self, event: PlanRuntime) -> Result<(), ()> {
         event.scratch.borrow_mut().fail(PlannerError::InvalidStepSize);
         Ok(())
     }
 
-    fn effect_reject_output_indices_full(&mut self, event: &PlanRuntime) -> Result<(), ()> {
+    fn effect_reject_output_indices_full(&mut self, event: PlanRuntime) -> Result<(), ()> {
         event.scratch.borrow_mut().fail(PlannerError::OutputIndicesFull);
         Ok(())
     }
 
-    fn effect_reject_output_steps_full(&mut self, event: &PlanRuntime) -> Result<(), ()> {
+    fn effect_reject_output_steps_full(&mut self, event: PlanRuntime) -> Result<(), ()> {
         event.scratch.borrow_mut().fail(PlannerError::OutputStepsFull);
         Ok(())
     }
 
     fn effect_reject_planning_progress_stalled(
         &mut self,
-        event: &PlanRuntime,
+        event: PlanRuntime,
     ) -> Result<(), ()> {
         event
             .scratch
