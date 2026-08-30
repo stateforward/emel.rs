@@ -283,7 +283,6 @@ sml! {
 }
 
 /// Persistent binding context owned by the tokenizer actor.
-#[derive(Debug)]
 pub struct TextTokenizerContext<'event> {
     pub vocab: Option<&'event dyn VocabularyView>,
     pub preprocess_kind: PreprocessorKind,
@@ -311,7 +310,7 @@ impl<'event> TextTokenizerStateMachineContext for TextTokenizerContext<'event> {
     fn begin_tokenize_from_done(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
     fn begin_tokenize_from_errored(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
     fn begin_tokenize_from_unexpected(&mut self, e: &EventTokenizeRuntime<'event>) -> Result<(), ()> { self.begin_tokenize(e) }
-    fn can_bind(&self, e: &EventBindRuntime<'event>) -> Result<bool, ()> { Ok(e.request.vocab.token_count() > 0) }
+    fn can_bind(&self, _e: &EventBindRuntime<'event>) -> Result<bool, ()> { Ok(true) }
     fn can_tokenize(&self, e: &EventTokenizeRuntime<'event>) -> Result<bool, ()> { Ok(self.is_bound && self.vocab.is_some_and(|v| core::ptr::eq(v, e.request.vocab)) && !e.request.token_ids.borrow().is_empty()) }
     fn bind_preprocessor(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { let error = e.request.bind_preprocessor.map_or(TokenizerError::None, |f| f(e.request.vocab, e.request.preprocessor_variant as u8)); e.context.borrow_mut().err = error; Ok(()) }
     fn bind_encoder(&mut self, e: &EventBindRuntime<'event>) -> Result<(), ()> { let error = e.request.bind_encoder.map_or(TokenizerError::None, |f| f(e.request.vocab, e.request.encoder_variant as u8)); e.context.borrow_mut().err = error; Ok(()) }
@@ -345,8 +344,6 @@ impl<'event> TextTokenizerStateMachineContext for TextTokenizerContext<'event> {
     fn set_invalid_id_error_from_prefix_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::ModelInvalid);Ok(())}
     fn set_invalid_id_error_from_encoding_raw_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::ModelInvalid);Ok(())}
     fn set_invalid_id_error_from_suffix_decision(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{set_token_error(e,TokenizerError::ModelInvalid);Ok(())}
-    fn reject_bind_from_unexpected(&mut self,e:&EventBindRuntime<'event>)->Result<(),()>{self.reject_bind(e)}
-    fn reject_invalid_from_unexpected(&mut self,e:&EventTokenizeRuntime<'event>)->Result<(),()>{self.reject_invalid(e)}
     fn bind_preprocessor_error_none(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::None)}
     fn bind_preprocessor_error_invalid_request(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::InvalidRequest)}
     fn bind_preprocessor_error_model_invalid(&self,e:&EventBindRuntime<'event>)->Result<bool,()>{Ok(e.context.borrow().err==TokenizerError::ModelInvalid)}
