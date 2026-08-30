@@ -1,647 +1,489 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Safe, bounded graph-tensor lifecycle actor.
+//!
+//! This module keeps tensor lifecycle decisions in a generated
+//! `stateforward-sml` transition table. The actor owns a fixed-capacity record
+//! table; dispatch is synchronous and does not allocate.
 
-#![allow(
-    clippy::enum_variant_names,
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(private_interfaces)]
+#![allow(clippy::derive_partial_eq_without_eq)]
+
+use core::cell::Cell;
+use core::fmt;
 
 use sml::sml;
 
-// --- machine GraphTensor from emel.cpp/src/emel/graph/tensor/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailCaptureTensorStateRuntime;
+/// Maximum number of tensor records retained by an actor.
+pub const MAX_TENSORS: usize = 65_536;
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailPublishFilledTensorRuntime;
+/// Lifecycle of one graph tensor record.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Lifecycle {
+    /// No reservation exists for this id.
+    #[default]
+    Unallocated = 0,
+    /// Reserved compute storage that is not currently filled.
+    Empty = 1,
+    /// Filled compute storage with live consumer references.
+    Filled = 2,
+    /// Filled leaf storage.
+    LeafFilled = 3,
+    /// A lifecycle operation failed after dispatch.
+    InternalError = 4,
+}
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailReleaseTensorRefRuntime;
+/// Opaque caller-owned storage identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BufferHandle(pub usize);
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailReserveTensorRuntime;
+/// Observable snapshot of a tensor record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TensorState {
+    /// Current lifecycle.
+    pub lifecycle: Lifecycle,
+    /// Whether this record represents a leaf tensor.
+    pub is_leaf: bool,
+    /// Consumer references assigned at reservation.
+    pub seed_refs: u32,
+    /// Consumer references still held by downstream operations.
+    pub live_refs: u32,
+    /// Caller-owned storage identity, when reserved.
+    pub buffer: Option<BufferHandle>,
+    /// Number of bytes supplied at reservation.
+    pub buffer_bytes: u64,
+}
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct DetailResetTensorEpochRuntime;
+/// Typed errors from tensor dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error {
+    /// The request is malformed or outside the bounded actor contract.
+    InvalidRequest,
+    /// A request was well-formed but invalid for its current lifecycle.
+    Internal,
+    /// An event outside the actor's public event set was received.
+    UnexpectedEvent,
+}
 
-sml! {
-    GraphTensor {
-        "reserve_tensor_request_decision"_s <= *"ready"_s + event<DetailReserveTensorRuntime> / begin_reserve_tensor,
-        "reserve_tensor_exec"_s <= "reserve_tensor_request_decision"_s + completion<DetailReserveTensorRuntime> [reserve_tensor_request_valid],
-        "errored"_s <= "reserve_tensor_request_decision"_s + completion<DetailReserveTensorRuntime> [reserve_tensor_request_invalid] / mark_invalid_request_detail_reserve_tensor_runtime,
-        "reserve_tensor_result_decision"_s <= "reserve_tensor_exec"_s + completion<DetailReserveTensorRuntime> / exec_reserve_tensor,
-        "done"_s <= "reserve_tensor_result_decision"_s + completion<DetailReserveTensorRuntime> [operation_succeeded_detail_reserve_tensor_runtime],
-        "errored"_s <= "reserve_tensor_result_decision"_s + completion<DetailReserveTensorRuntime> [operation_failed_internal_detail_reserve_tensor_runtime] / mark_internal_error_detail_reserve_tensor_runtime,
-        "errored"_s <= "reserve_tensor_result_decision"_s + completion<DetailReserveTensorRuntime> [operation_not_dispatched_detail_reserve_tensor_runtime] / mark_internal_error_detail_reserve_tensor_runtime,
-        "publish_filled_tensor_request_decision"_s <= "ready"_s + event<DetailPublishFilledTensorRuntime> / begin_publish_filled_tensor,
-        "publish_filled_tensor_exec"_s <= "publish_filled_tensor_request_decision"_s + completion<DetailPublishFilledTensorRuntime> [publish_filled_tensor_request_valid],
-        "errored"_s <= "publish_filled_tensor_request_decision"_s + completion<DetailPublishFilledTensorRuntime> [publish_filled_tensor_request_invalid] / mark_invalid_request_detail_publish_filled_tensor_runtime,
-        "publish_filled_tensor_result_decision"_s <= "publish_filled_tensor_exec"_s + completion<DetailPublishFilledTensorRuntime> / exec_publish_filled_tensor,
-        "done"_s <= "publish_filled_tensor_result_decision"_s + completion<DetailPublishFilledTensorRuntime> [operation_succeeded_detail_publish_filled_tensor_runtime],
-        "errored"_s <= "publish_filled_tensor_result_decision"_s + completion<DetailPublishFilledTensorRuntime> [operation_failed_internal_detail_publish_filled_tensor_runtime] / mark_internal_error_detail_publish_filled_tensor_runtime,
-        "errored"_s <= "publish_filled_tensor_result_decision"_s + completion<DetailPublishFilledTensorRuntime> [operation_not_dispatched_detail_publish_filled_tensor_runtime] / mark_internal_error_detail_publish_filled_tensor_runtime,
-        "release_tensor_ref_request_decision"_s <= "ready"_s + event<DetailReleaseTensorRefRuntime> / begin_release_tensor_ref,
-        "release_tensor_ref_exec"_s <= "release_tensor_ref_request_decision"_s + completion<DetailReleaseTensorRefRuntime> [release_tensor_ref_request_valid],
-        "errored"_s <= "release_tensor_ref_request_decision"_s + completion<DetailReleaseTensorRefRuntime> [release_tensor_ref_request_invalid] / mark_invalid_request_detail_release_tensor_ref_runtime,
-        "release_tensor_ref_result_decision"_s <= "release_tensor_ref_exec"_s + completion<DetailReleaseTensorRefRuntime> / exec_release_tensor_ref,
-        "done"_s <= "release_tensor_ref_result_decision"_s + completion<DetailReleaseTensorRefRuntime> [operation_succeeded_detail_release_tensor_ref_runtime],
-        "errored"_s <= "release_tensor_ref_result_decision"_s + completion<DetailReleaseTensorRefRuntime> [operation_failed_internal_detail_release_tensor_ref_runtime] / mark_internal_error_detail_release_tensor_ref_runtime,
-        "errored"_s <= "release_tensor_ref_result_decision"_s + completion<DetailReleaseTensorRefRuntime> [operation_not_dispatched_detail_release_tensor_ref_runtime] / mark_internal_error_detail_release_tensor_ref_runtime,
-        "reset_tensor_epoch_request_decision"_s <= "ready"_s + event<DetailResetTensorEpochRuntime> / begin_reset_tensor_epoch,
-        "reset_tensor_epoch_exec"_s <= "reset_tensor_epoch_request_decision"_s + completion<DetailResetTensorEpochRuntime> [reset_tensor_epoch_request_valid],
-        "errored"_s <= "reset_tensor_epoch_request_decision"_s + completion<DetailResetTensorEpochRuntime> [reset_tensor_epoch_request_invalid] / mark_invalid_request_detail_reset_tensor_epoch_runtime,
-        "reset_tensor_epoch_result_decision"_s <= "reset_tensor_epoch_exec"_s + completion<DetailResetTensorEpochRuntime> / exec_reset_tensor_epoch,
-        "done"_s <= "reset_tensor_epoch_result_decision"_s + completion<DetailResetTensorEpochRuntime> [operation_succeeded_detail_reset_tensor_epoch_runtime],
-        "errored"_s <= "reset_tensor_epoch_result_decision"_s + completion<DetailResetTensorEpochRuntime> [operation_failed_internal_detail_reset_tensor_epoch_runtime] / mark_internal_error_detail_reset_tensor_epoch_runtime,
-        "errored"_s <= "reset_tensor_epoch_result_decision"_s + completion<DetailResetTensorEpochRuntime> [operation_not_dispatched_detail_reset_tensor_epoch_runtime] / mark_internal_error_detail_reset_tensor_epoch_runtime,
-        "capture_tensor_state_request_decision"_s <= "ready"_s + event<DetailCaptureTensorStateRuntime> / begin_capture_tensor_state,
-        "capture_tensor_state_exec"_s <= "capture_tensor_state_request_decision"_s + completion<DetailCaptureTensorStateRuntime> [capture_tensor_state_request_valid],
-        "errored"_s <= "capture_tensor_state_request_decision"_s + completion<DetailCaptureTensorStateRuntime> [capture_tensor_state_request_invalid] / mark_invalid_request_detail_capture_tensor_state_runtime,
-        "capture_tensor_state_result_decision"_s <= "capture_tensor_state_exec"_s + completion<DetailCaptureTensorStateRuntime> / exec_capture_tensor_state,
-        "done"_s <= "capture_tensor_state_result_decision"_s + completion<DetailCaptureTensorStateRuntime> [capture_operation_succeeded],
-        "errored"_s <= "capture_tensor_state_result_decision"_s + completion<DetailCaptureTensorStateRuntime> [capture_operation_not_dispatched] / mark_internal_error_detail_capture_tensor_state_runtime,
-        "ready"_s <= "done"_s + completion<DetailReserveTensorRuntime> / publish_done_detail_reserve_tensor_runtime,
-        "ready"_s <= "errored"_s + completion<DetailReserveTensorRuntime> / publish_error_detail_reserve_tensor_runtime,
-        "ready"_s <= "done"_s + completion<DetailPublishFilledTensorRuntime> / publish_done_detail_publish_filled_tensor_runtime,
-        "ready"_s <= "errored"_s + completion<DetailPublishFilledTensorRuntime> / publish_error_detail_publish_filled_tensor_runtime,
-        "ready"_s <= "done"_s + completion<DetailReleaseTensorRefRuntime> / publish_done_detail_release_tensor_ref_runtime,
-        "ready"_s <= "errored"_s + completion<DetailReleaseTensorRefRuntime> / publish_error_detail_release_tensor_ref_runtime,
-        "ready"_s <= "done"_s + completion<DetailResetTensorEpochRuntime> / publish_done_detail_reset_tensor_epoch_runtime,
-        "ready"_s <= "errored"_s + completion<DetailResetTensorEpochRuntime> / publish_error_detail_reset_tensor_epoch_runtime,
-        "ready"_s <= "done"_s + completion<DetailCaptureTensorStateRuntime> / publish_done_detail_capture_tensor_state_runtime,
-        "ready"_s <= "errored"_s + completion<DetailCaptureTensorStateRuntime> / publish_error_detail_capture_tensor_state_runtime,
-        "ready"_s <= "ready"_s + unexpected_event<_> / on_unexpected_from_ready,
-        "ready"_s <= "reserve_tensor_request_decision"_s + unexpected_event<_> / on_unexpected_from_reserve_tensor_request_decision,
-        "ready"_s <= "reserve_tensor_exec"_s + unexpected_event<_> / on_unexpected_from_reserve_tensor_exec,
-        "ready"_s <= "reserve_tensor_result_decision"_s + unexpected_event<_> / on_unexpected_from_reserve_tensor_result_decision,
-        "ready"_s <= "publish_filled_tensor_request_decision"_s + unexpected_event<_> / on_unexpected_from_publish_filled_tensor_request_decision,
-        "ready"_s <= "publish_filled_tensor_exec"_s + unexpected_event<_> / on_unexpected_from_publish_filled_tensor_exec,
-        "ready"_s <= "publish_filled_tensor_result_decision"_s + unexpected_event<_> / on_unexpected_from_publish_filled_tensor_result_decision,
-        "ready"_s <= "release_tensor_ref_request_decision"_s + unexpected_event<_> / on_unexpected_from_release_tensor_ref_request_decision,
-        "ready"_s <= "release_tensor_ref_exec"_s + unexpected_event<_> / on_unexpected_from_release_tensor_ref_exec,
-        "ready"_s <= "release_tensor_ref_result_decision"_s + unexpected_event<_> / on_unexpected_from_release_tensor_ref_result_decision,
-        "ready"_s <= "reset_tensor_epoch_request_decision"_s + unexpected_event<_> / on_unexpected_from_reset_tensor_epoch_request_decision,
-        "ready"_s <= "reset_tensor_epoch_exec"_s + unexpected_event<_> / on_unexpected_from_reset_tensor_epoch_exec,
-        "ready"_s <= "reset_tensor_epoch_result_decision"_s + unexpected_event<_> / on_unexpected_from_reset_tensor_epoch_result_decision,
-        "ready"_s <= "capture_tensor_state_request_decision"_s + unexpected_event<_> / on_unexpected_from_capture_tensor_state_request_decision,
-        "ready"_s <= "capture_tensor_state_exec"_s + unexpected_event<_> / on_unexpected_from_capture_tensor_state_exec,
-        "ready"_s <= "capture_tensor_state_result_decision"_s + unexpected_event<_> / on_unexpected_from_capture_tensor_state_result_decision,
-        "ready"_s <= "done"_s + unexpected_event<_> / on_unexpected_from_done,
-        "ready"_s <= "errored"_s + unexpected_event<_> / on_unexpected_from_errored,
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest => formatter.write_str("invalid tensor request"),
+            Self::Internal => formatter.write_str("internal tensor lifecycle error"),
+            Self::UnexpectedEvent => formatter.write_str("unexpected tensor event"),
+        }
     }
 }
 
-/// Context for `GraphTensor` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
+impl std::error::Error for Error {}
+
+/// Reservation request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReserveTensor {
+    /// Bounded tensor record index.
+    pub tensor_id: usize,
+    /// Caller-owned storage identity.
+    pub buffer: BufferHandle,
+    /// Number of bytes available to the tensor.
+    pub buffer_bytes: u64,
+    /// Number of downstream compute consumers.
+    pub consumer_refs: u32,
+    /// Whether this tensor is a leaf.
+    pub is_leaf: bool,
+}
+
+/// Publish a reserved compute tensor as filled.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublishFilledTensor {
+    /// Bounded tensor record index.
+    pub tensor_id: usize,
+}
+
+/// Release one compute consumer reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReleaseTensorRef {
+    /// Bounded tensor record index.
+    pub tensor_id: usize,
+}
+
+/// Reset one compute tensor for a new graph epoch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResetTensorEpoch {
+    /// Bounded tensor record index.
+    pub tensor_id: usize,
+}
+
+/// Capture one tensor's generated state inspection data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CaptureTensorState {
+    /// Bounded tensor record index.
+    pub tensor_id: usize,
+}
+
+/// Typed public event set.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Event {
+    /// Reserve storage.
+    Reserve(ReserveTensor),
+    /// Publish a compute tensor as filled.
+    PublishFilled(PublishFilledTensor),
+    /// Release one consumer reference.
+    Release(ReleaseTensorRef),
+    /// Reset a tensor epoch.
+    Reset(ResetTensorEpoch),
+    /// Capture current state.
+    Capture(CaptureTensorState),
+}
+
+/// Explicit event used to exercise unexpected-event handling.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct UnexpectedEvent;
+
+/// Successful operation result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Outcome {
+    /// A mutating operation completed.
+    Done,
+    /// A state capture completed.
+    State(TensorState),
+}
+
+struct Runtime<'a> {
+    event: Event,
+    result: &'a Cell<Result<Outcome, Error>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TensorRecord {
+    lifecycle: Lifecycle,
+    is_leaf: bool,
+    seed_refs: u32,
+    live_refs: u32,
+    buffer: Option<BufferHandle>,
+    buffer_bytes: u64,
+}
+
+impl TensorRecord {
+    const fn snapshot(self) -> TensorState {
+        TensorState {
+            lifecycle: self.lifecycle,
+            is_leaf: self.is_leaf,
+            seed_refs: self.seed_refs,
+            live_refs: self.live_refs,
+            buffer: self.buffer,
+            buffer_bytes: self.buffer_bytes,
+        }
+    }
+}
+
+/// Actor-owned bounded tensor storage.
 pub struct GraphTensorContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    records: Box<[TensorRecord]>,
+}
+
+impl fmt::Debug for GraphTensorContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Context")
+            .field("record_count", &self.records.len())
+            .finish()
+    }
+}
+
+impl Default for GraphTensorContext {
+    fn default() -> Self {
+        Self {
+            records: vec![TensorRecord::default(); MAX_TENSORS].into_boxed_slice(),
+        }
+    }
+}
+
+const fn request_valid(_context: &GraphTensorContext, event: Event) -> bool {
+    match event {
+        Event::Reserve(request) => {
+            request.tensor_id < MAX_TENSORS && request.buffer.0 != 0 && request.buffer_bytes != 0
+        }
+        Event::PublishFilled(request) => request.tensor_id < MAX_TENSORS,
+        Event::Release(request) => request.tensor_id < MAX_TENSORS,
+        Event::Reset(request) => request.tensor_id < MAX_TENSORS,
+        Event::Capture(request) => request.tensor_id < MAX_TENSORS,
+    }
+}
+
+sml! {
+    GraphTensor<'dispatch> {
+        "ready"_s <= *"ready"_s + Runtime(Runtime<'dispatch>)
+            [request_valid] / execute_operation,
+        "ready"_s <= "ready"_s + Runtime(Runtime<'dispatch>)
+            [request_invalid] / reject_invalid,
+        "ready"_s <= "ready"_s + Unexpected(UnexpectedEvent)
+            / reject_unexpected,
+        "ready"_s <= "ready"_s + unexpected_event<_> / reject_generic_unexpected,
+    }
+}
+
+/// Single-writer, run-to-completion graph tensor actor.
+pub struct GraphTensor {
+    machine: GraphTensorStateMachine<GraphTensorContext>,
+}
+
+impl fmt::Debug for GraphTensor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GraphTensor")
+            .field("ready", &self.is_ready())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for GraphTensor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphTensor {
+    /// Constructs an actor with fixed-capacity tensor storage.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: GraphTensorStateMachine::new(GraphTensorContext::default()),
+        }
+    }
+
+    /// Dispatches an operation synchronously through the generated machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed request or lifecycle error.
+    pub fn process_event(&mut self, event: Event) -> Result<Outcome, Error> {
+        let result = Cell::new(Err(Error::Internal));
+        self.machine
+            .process_event(GraphTensorEvents::Runtime(Runtime {
+                event,
+                result: &result,
+            }))
+            .map_err(|_| Error::Internal)?;
+        assert!(self.is_ready(), "graph tensor actor must return to ready");
+        result.into_inner()
+    }
+
+    /// Dispatches an explicit unexpected event.
+    pub fn process_unexpected(&mut self, _event: UnexpectedEvent) -> Result<Outcome, Error> {
+        self.machine
+            .process_event(GraphTensorEvents::Unexpected(UnexpectedEvent))
+            .map_err(|_| Error::Internal)?;
+        assert!(self.is_ready(), "graph tensor actor must return to ready");
+        Err(Error::UnexpectedEvent)
+    }
+
+    /// Reports the generated machine's observable ready state.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.machine.is(&GraphTensorStates::Ready)
+    }
 }
 
 impl GraphTensorStateMachineContext for GraphTensorContext {
-    fn begin_capture_tensor_state(
-        &mut self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::begin_capture_tensor_state
-        todo!(
-            "TODO: port action `begin_capture_tensor_state` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn begin_publish_filled_tensor(
-        &mut self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::begin_publish_filled_tensor
-        todo!(
-            "TODO: port action `begin_publish_filled_tensor` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn begin_release_tensor_ref(
-        &mut self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::begin_release_tensor_ref
-        todo!(
-            "TODO: port action `begin_release_tensor_ref` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn begin_reserve_tensor(&mut self, _event: &DetailReserveTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::begin_reserve_tensor
-        todo!(
-            "TODO: port action `begin_reserve_tensor` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn begin_reset_tensor_epoch(
-        &mut self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::begin_reset_tensor_epoch
-        todo!(
-            "TODO: port action `begin_reset_tensor_epoch` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn capture_operation_not_dispatched(
-        &self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::capture_operation_not_dispatched
-        todo!(
-            "TODO: port guard `capture_operation_not_dispatched` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn capture_operation_succeeded(
-        &self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::capture_operation_succeeded
-        todo!(
-            "TODO: port guard `capture_operation_succeeded` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn capture_tensor_state_request_invalid(
-        &self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::capture_tensor_state_request_invalid
-        todo!(
-            "TODO: port guard `capture_tensor_state_request_invalid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn capture_tensor_state_request_valid(
-        &self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::capture_tensor_state_request_valid
-        todo!(
-            "TODO: port guard `capture_tensor_state_request_valid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn exec_capture_tensor_state(
-        &mut self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::exec_capture_tensor_state
-        todo!(
-            "TODO: port action `exec_capture_tensor_state` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn exec_publish_filled_tensor(
-        &mut self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::exec_publish_filled_tensor
-        todo!(
-            "TODO: port action `exec_publish_filled_tensor` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn exec_release_tensor_ref(
-        &mut self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::exec_release_tensor_ref
-        todo!(
-            "TODO: port action `exec_release_tensor_ref` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn exec_reserve_tensor(&mut self, _event: &DetailReserveTensorRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::exec_reserve_tensor
-        todo!(
-            "TODO: port action `exec_reserve_tensor` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn exec_reset_tensor_epoch(
-        &mut self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::exec_reset_tensor_epoch
-        todo!(
-            "TODO: port action `exec_reset_tensor_epoch` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_internal_error_detail_capture_tensor_state_runtime(
-        &mut self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_internal_error
-        todo!(
-            "TODO: port action `mark_internal_error` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_internal_error_detail_publish_filled_tensor_runtime(
-        &mut self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_internal_error
-        todo!(
-            "TODO: port action `mark_internal_error` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_internal_error_detail_release_tensor_ref_runtime(
-        &mut self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_internal_error
-        todo!(
-            "TODO: port action `mark_internal_error` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_internal_error_detail_reserve_tensor_runtime(
-        &mut self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_internal_error
-        todo!(
-            "TODO: port action `mark_internal_error` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_internal_error_detail_reset_tensor_epoch_runtime(
-        &mut self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_internal_error
-        todo!(
-            "TODO: port action `mark_internal_error` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_invalid_request_detail_capture_tensor_state_runtime(
-        &mut self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_invalid_request
-        todo!(
-            "TODO: port action `mark_invalid_request` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_invalid_request_detail_publish_filled_tensor_runtime(
-        &mut self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_invalid_request
-        todo!(
-            "TODO: port action `mark_invalid_request` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_invalid_request_detail_release_tensor_ref_runtime(
-        &mut self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_invalid_request
-        todo!(
-            "TODO: port action `mark_invalid_request` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_invalid_request_detail_reserve_tensor_runtime(
-        &mut self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_invalid_request
-        todo!(
-            "TODO: port action `mark_invalid_request` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn mark_invalid_request_detail_reset_tensor_epoch_runtime(
-        &mut self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::mark_invalid_request
-        todo!(
-            "TODO: port action `mark_invalid_request` from emel.cpp/src/emel/graph/tensor/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_capture_tensor_state_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_capture_tensor_state_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_capture_tensor_state_result_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_publish_filled_tensor_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_publish_filled_tensor_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_publish_filled_tensor_result_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_release_tensor_ref_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_release_tensor_ref_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_release_tensor_ref_result_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_reserve_tensor_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_reserve_tensor_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_reserve_tensor_result_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_reset_tensor_epoch_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_reset_tensor_epoch_request_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn on_unexpected_from_reset_tensor_epoch_result_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::on_unexpected
-        todo!("TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn operation_failed_internal_detail_publish_filled_tensor_runtime(
-        &self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_failed_internal
-        todo!(
-            "TODO: port guard `operation_failed_internal` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_failed_internal_detail_release_tensor_ref_runtime(
-        &self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_failed_internal
-        todo!(
-            "TODO: port guard `operation_failed_internal` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_failed_internal_detail_reserve_tensor_runtime(
-        &self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_failed_internal
-        todo!(
-            "TODO: port guard `operation_failed_internal` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_failed_internal_detail_reset_tensor_epoch_runtime(
-        &self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_failed_internal
-        todo!(
-            "TODO: port guard `operation_failed_internal` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_not_dispatched_detail_publish_filled_tensor_runtime(
-        &self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_not_dispatched
-        todo!(
-            "TODO: port guard `operation_not_dispatched` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_not_dispatched_detail_release_tensor_ref_runtime(
-        &self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_not_dispatched
-        todo!(
-            "TODO: port guard `operation_not_dispatched` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_not_dispatched_detail_reserve_tensor_runtime(
-        &self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_not_dispatched
-        todo!(
-            "TODO: port guard `operation_not_dispatched` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_not_dispatched_detail_reset_tensor_epoch_runtime(
-        &self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_not_dispatched
-        todo!(
-            "TODO: port guard `operation_not_dispatched` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_succeeded_detail_publish_filled_tensor_runtime(
-        &self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_succeeded
-        todo!(
-            "TODO: port guard `operation_succeeded` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_succeeded_detail_release_tensor_ref_runtime(
-        &self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_succeeded
-        todo!(
-            "TODO: port guard `operation_succeeded` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_succeeded_detail_reserve_tensor_runtime(
-        &self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_succeeded
-        todo!(
-            "TODO: port guard `operation_succeeded` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn operation_succeeded_detail_reset_tensor_epoch_runtime(
-        &self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::operation_succeeded
-        todo!(
-            "TODO: port guard `operation_succeeded` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn publish_done_detail_capture_tensor_state_runtime(
-        &mut self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_done
-        todo!("TODO: port action `publish_done` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_done_detail_publish_filled_tensor_runtime(
-        &mut self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_done
-        todo!("TODO: port action `publish_done` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_done_detail_release_tensor_ref_runtime(
-        &mut self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_done
-        todo!("TODO: port action `publish_done` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_done_detail_reserve_tensor_runtime(
-        &mut self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_done
-        todo!("TODO: port action `publish_done` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_done_detail_reset_tensor_epoch_runtime(
-        &mut self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_done
-        todo!("TODO: port action `publish_done` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_error_detail_capture_tensor_state_runtime(
-        &mut self,
-        _event: &DetailCaptureTensorStateRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_error
-        todo!("TODO: port action `publish_error` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_error_detail_publish_filled_tensor_runtime(
-        &mut self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_error
-        todo!("TODO: port action `publish_error` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_error_detail_release_tensor_ref_runtime(
-        &mut self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_error
-        todo!("TODO: port action `publish_error` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_error_detail_reserve_tensor_runtime(
-        &mut self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_error
-        todo!("TODO: port action `publish_error` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_error_detail_reset_tensor_epoch_runtime(
-        &mut self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/actions.hpp::publish_error
-        todo!("TODO: port action `publish_error` from emel.cpp/src/emel/graph/tensor/actions.hpp")
-    }
-    fn publish_filled_tensor_request_invalid(
-        &self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::publish_filled_tensor_request_invalid
-        todo!(
-            "TODO: port guard `publish_filled_tensor_request_invalid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn publish_filled_tensor_request_valid(
-        &self,
-        _event: &DetailPublishFilledTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::publish_filled_tensor_request_valid
-        todo!(
-            "TODO: port guard `publish_filled_tensor_request_valid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn release_tensor_ref_request_invalid(
-        &self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::release_tensor_ref_request_invalid
-        todo!(
-            "TODO: port guard `release_tensor_ref_request_invalid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn release_tensor_ref_request_valid(
-        &self,
-        _event: &DetailReleaseTensorRefRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::release_tensor_ref_request_valid
-        todo!(
-            "TODO: port guard `release_tensor_ref_request_valid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn reserve_tensor_request_invalid(
-        &self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::reserve_tensor_request_invalid
-        todo!(
-            "TODO: port guard `reserve_tensor_request_invalid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn reserve_tensor_request_valid(
-        &self,
-        _event: &DetailReserveTensorRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::reserve_tensor_request_valid
-        todo!(
-            "TODO: port guard `reserve_tensor_request_valid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn reset_tensor_epoch_request_invalid(
-        &self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::reset_tensor_epoch_request_invalid
-        todo!(
-            "TODO: port guard `reset_tensor_epoch_request_invalid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
-    }
-    fn reset_tensor_epoch_request_valid(
-        &self,
-        _event: &DetailResetTensorEpochRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/tensor/guards.hpp::reset_tensor_epoch_request_valid
-        todo!(
-            "TODO: port guard `reset_tensor_epoch_request_valid` from emel.cpp/src/emel/graph/tensor/guards.hpp"
-        )
+    fn request_valid(&self, event: &Runtime<'_>) -> Result<bool, ()> {
+        Ok(request_valid(self, event.event))
+    }
+
+    fn request_invalid(&self, event: &Runtime<'_>) -> Result<bool, ()> {
+        Ok(!request_valid(self, event.event))
+    }
+
+    fn execute_operation(&mut self, event: Runtime<'_>) -> Result<(), ()> {
+        match event.event {
+            Event::Reserve(request) => {
+                let record = self.records.get_mut(request.tensor_id).ok_or(())?;
+                if record.lifecycle != Lifecycle::Unallocated {
+                    record.lifecycle = Lifecycle::InternalError;
+                    event.result.set(Err(Error::Internal));
+                    return Ok(());
+                }
+                record.lifecycle = if request.is_leaf {
+                    Lifecycle::LeafFilled
+                } else {
+                    Lifecycle::Empty
+                };
+                record.is_leaf = request.is_leaf;
+                record.seed_refs = if request.is_leaf {
+                    0
+                } else {
+                    request.consumer_refs
+                };
+                record.live_refs = record.seed_refs;
+                record.buffer = Some(request.buffer);
+                record.buffer_bytes = request.buffer_bytes;
+                event.result.set(Ok(Outcome::Done));
+            }
+            Event::PublishFilled(request) => {
+                let record = self.records.get_mut(request.tensor_id).ok_or(())?;
+                if record.lifecycle == Lifecycle::Empty && !record.is_leaf {
+                    record.lifecycle = Lifecycle::Filled;
+                    event.result.set(Ok(Outcome::Done));
+                } else {
+                    record.lifecycle = Lifecycle::InternalError;
+                    event.result.set(Err(Error::Internal));
+                }
+            }
+            Event::Release(request) => {
+                let record = self.records.get_mut(request.tensor_id).ok_or(())?;
+                match record.lifecycle {
+                    Lifecycle::Filled if record.live_refs > 1 => {
+                        record.live_refs -= 1;
+                        event.result.set(Ok(Outcome::Done));
+                    }
+                    Lifecycle::Filled if record.live_refs == 1 => {
+                        record.live_refs = 0;
+                        record.lifecycle = Lifecycle::Empty;
+                        event.result.set(Ok(Outcome::Done));
+                    }
+                    Lifecycle::LeafFilled => event.result.set(Ok(Outcome::Done)),
+                    _ => {
+                        record.lifecycle = Lifecycle::InternalError;
+                        record.live_refs = 0;
+                        event.result.set(Err(Error::Internal));
+                    }
+                }
+            }
+            Event::Reset(request) => {
+                let record = self.records.get_mut(request.tensor_id).ok_or(())?;
+                if record.lifecycle == Lifecycle::LeafFilled {
+                    event.result.set(Ok(Outcome::Done));
+                } else if !record.is_leaf
+                    && matches!(record.lifecycle, Lifecycle::Empty | Lifecycle::Filled)
+                {
+                    record.lifecycle = Lifecycle::Empty;
+                    record.live_refs = 0;
+                    event.result.set(Ok(Outcome::Done));
+                } else {
+                    record.lifecycle = Lifecycle::InternalError;
+                    record.live_refs = 0;
+                    event.result.set(Err(Error::Internal));
+                }
+            }
+            Event::Capture(request) => {
+                let record = self.records.get(request.tensor_id).copied().ok_or(())?;
+                event.result.set(Ok(Outcome::State(record.snapshot())));
+            }
+        }
+        Ok(())
+    }
+
+    fn reject_invalid(&mut self, event: Runtime<'_>) -> Result<(), ()> {
+        event.result.set(Err(Error::InvalidRequest));
+        Ok(())
+    }
+
+    fn reject_unexpected(&mut self, _event: UnexpectedEvent) -> Result<(), ()> {
+        Ok(())
+    }
+
+    fn reject_generic_unexpected(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+/// Compatibility alias matching the reference actor's public name.
+pub type Tensor = GraphTensor;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BUFFER: BufferHandle = BufferHandle(1);
+
+    #[test]
+    fn reserve_publish_release_and_capture_are_explicit() {
+        let mut actor = GraphTensor::new();
+        assert!(actor.is_ready());
+        assert_eq!(
+            actor.process_event(Event::Reserve(ReserveTensor {
+                tensor_id: 3,
+                buffer: BUFFER,
+                buffer_bytes: 64,
+                consumer_refs: 2,
+                is_leaf: false,
+            })),
+            Ok(Outcome::Done)
+        );
+        assert_eq!(
+            actor.process_event(Event::PublishFilled(PublishFilledTensor { tensor_id: 3 })),
+            Ok(Outcome::Done)
+        );
+        assert_eq!(
+            actor.process_event(Event::Release(ReleaseTensorRef { tensor_id: 3 })),
+            Ok(Outcome::Done)
+        );
+        assert_eq!(
+            actor.process_event(Event::Capture(CaptureTensorState { tensor_id: 3 })),
+            Ok(Outcome::State(TensorState {
+                lifecycle: Lifecycle::Filled,
+                is_leaf: false,
+                seed_refs: 2,
+                live_refs: 1,
+                buffer: Some(BUFFER),
+                buffer_bytes: 64,
+            }))
+        );
+    }
+
+    #[test]
+    fn invalid_request_is_rejected_without_mutation() {
+        let mut actor = GraphTensor::new();
+        assert_eq!(
+            actor.process_event(Event::Reserve(ReserveTensor {
+                tensor_id: MAX_TENSORS,
+                buffer: BUFFER,
+                buffer_bytes: 1,
+                consumer_refs: 0,
+                is_leaf: true,
+            })),
+            Err(Error::InvalidRequest)
+        );
+        assert!(actor.is_ready());
+    }
+
+    #[test]
+    fn rejected_lifecycle_operation_is_reported_and_inspectable() {
+        let mut actor = GraphTensor::new();
+        let request = ReserveTensor {
+            tensor_id: 0,
+            buffer: BUFFER,
+            buffer_bytes: 1,
+            consumer_refs: 0,
+            is_leaf: true,
+        };
+        assert_eq!(
+            actor.process_event(Event::Reserve(request)),
+            Ok(Outcome::Done)
+        );
+        assert_eq!(
+            actor.process_event(Event::Reserve(request)),
+            Err(Error::Internal)
+        );
+        assert_eq!(
+            actor.process_event(Event::Capture(CaptureTensorState { tensor_id: 0 })),
+            Ok(Outcome::State(TensorState {
+                lifecycle: Lifecycle::InternalError,
+                is_leaf: true,
+                seed_refs: 0,
+                live_refs: 0,
+                buffer: Some(BUFFER),
+                buffer_bytes: 1,
+            }))
+        );
+    }
+
+    #[test]
+    fn unexpected_event_is_typed_and_machine_returns_ready() {
+        let mut actor = GraphTensor::new();
+        assert_eq!(
+            actor.process_unexpected(UnexpectedEvent),
+            Err(Error::UnexpectedEvent)
+        );
+        assert!(actor.is_ready());
     }
 }
