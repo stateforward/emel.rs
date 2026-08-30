@@ -561,8 +561,8 @@ impl TextGeneratorActor {
     /// is advanced first; output is copied only after the corresponding phase
     /// succeeds, and overflow is reported without partial copying.
     pub fn generate_into(&mut self, request: GenerateRequest<'_>) -> Result<GenerationResult, GeneratorError> {
-        if request.rendered.len() > request.output.len() || request.rendered.len() > request.generated_token_ids.len().saturating_add(request.output.len()) {
-            self.machine.context_mut().set_error(GeneratorError::OutputCapacity, GeneratorPhase::GenerationError)?;
+        if request.rendered.len() > request.output.len() {
+            let _ = self.machine.context_mut().set_error(GeneratorError::OutputCapacity, GeneratorPhase::GenerationError);
             return Err(GeneratorError::OutputCapacity);
         }
         self.generate(EventGenerateRun { step: GenerateStep::Prefill, valid_request: request.valid_request, backend_available: request.backend_available })?;
@@ -578,7 +578,7 @@ impl TextGeneratorActor {
     /// Publishes one caller-owned stream chunk synchronously.
     pub fn stream_into(&mut self, request: StreamRequest<'_>) -> Result<GenerationResult, GeneratorError> {
         if request.chunk.len() > request.output.len() {
-            self.machine.context_mut().set_error(GeneratorError::OutputCapacity, GeneratorPhase::GenerationError)?;
+            let _ = self.machine.context_mut().set_error(GeneratorError::OutputCapacity, GeneratorPhase::GenerationError);
             return Err(GeneratorError::OutputCapacity);
         }
         self.stream(EventStreamRun { valid_request: request.valid_request, backend_available: request.backend_available, final_chunk: request.final_chunk })?;
