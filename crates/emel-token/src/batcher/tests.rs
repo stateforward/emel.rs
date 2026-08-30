@@ -363,8 +363,8 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
         Err(BatchError::InvalidRequest)
     );
 
-    // C++ has a pointer-plus-count input contract: a short optional input is
-    // not an active mode, so this request follows the default branch.
+    // A present flattened mask input must contain every logical row before
+    // normalization; rejecting it avoids indexing a short payload.
     let short_masks = [u64::MAX];
     let result = batcher.process_event(request(
         &[1, 2],
@@ -378,7 +378,7 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
         &mut [0; 2],
         &mut [0; 2],
     ));
-    assert_eq!(result.unwrap().seq_mask_words, 1);
+    assert_eq!(result, Err(BatchError::InvalidRequest));
 }
 
 #[test]
@@ -564,6 +564,40 @@ fn oversized_output_buffers_are_logically_bounded() {
     assert_eq!(result.outputs_total, 1);
     assert_eq!(total, 1);
     assert_eq!(output, [1, 0, 9, 9]);
+}
+
+#[test]
+fn short_flattened_masks_are_rejected_without_panicking() {
+    let ids = [1, 2];
+    let short_masks = [1_u64];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [0; 2];
+    let mut output = [0; 2];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: Some(&short_masks),
+        seq_mask_words: 1,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result, Err(BatchError::InvalidRequest));
 }
 
 #[test]

@@ -309,8 +309,10 @@ sml! {
         "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
         "positions_publish"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
         "positions_publish"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "positions_publish"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "positions_publish"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "errored"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_invalid] / invalid,
+        "positions_publish"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_ok],
+        "errored"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_invalid] / invalid,
+        "positions_publish"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_ok],
         "positions_mask_publish"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_present] / publish_mask_words,
         "positions_count_decision"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_absent],
         "positions_count_decision"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
@@ -550,6 +552,12 @@ impl TokenBatcherStateMachineContext for Context {
     fn probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.context.error.get() == DispatchError::InvalidRequest)
     }
+    fn generation_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::None)
+    }
+    fn generation_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::InvalidRequest)
+    }
     fn generate_seeded(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         generate_seeded(event);
         Ok(())
@@ -732,11 +740,9 @@ impl TokenBatcherStateMachineContext for Context {
 }
 
 fn has_masks(r: &RequestView<'_>) -> bool {
-    // The C++ event carries a mask pointer and a row count separately. The
-    // flattened Rust slice uses one element per logical row for this presence
-    // test; width validation remains an independent payload guard.
-    r.seq_masks
-        .is_some_and(|values| values.len() >= r.token_ids.len())
+    // `Some` preserves the source pointer-presence decision. The flattened
+    // payload length is validated separately before the mask action runs.
+    r.seq_masks.is_some()
 }
 fn has_primary(r: &RequestView<'_>) -> bool {
     r.seq_primary_ids
@@ -788,9 +794,13 @@ fn seq_payload_valid(r: &RequestView<'_>) -> bool {
     let masks = has_masks(r);
     let primary = has_primary(r);
     let words = effective_mask_words(r);
+    let mask_len = r
+        .token_ids
+        .len()
+        .checked_mul(r.seq_mask_words)
+        .unwrap_or(usize::MAX);
     let masks_ok = !masks
-        || (r.seq_mask_words > 0
-            && r.seq_mask_words <= SEQ_WORDS
+        || (r.seq_masks.is_some_and(|values| values.len() >= mask_len)
             && r.seq_masks
                 .unwrap()
                 .chunks_exact(r.seq_mask_words)
