@@ -84,17 +84,17 @@ impl Default for GbnfRuleParserExpressionParserContext {
 }
 
 impl GbnfRuleParserExpressionParserStateMachineContext for GbnfRuleParserExpressionParserContext {
-    fn consume_identifier(&mut self, _event: RuleParserEventParseRules) -> Result<(), ()> {
+    fn consume_identifier(&mut self, _event: &RuleParserEventParseRules) -> Result<(), ()> {
         self.result = ParseOutcome::Parsed(ParseKind::Identifier);
         Ok(())
     }
 
-    fn consume_non_identifier(&mut self, _event: RuleParserEventParseRules) -> Result<(), ()> {
+    fn consume_non_identifier(&mut self, _event: &RuleParserEventParseRules) -> Result<(), ()> {
         self.result = ParseOutcome::Parsed(ParseKind::NonIdentifier);
         Ok(())
     }
 
-    fn dispatch_parse_failed(&mut self, _event: RuleParserEventParseRules) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event: &RuleParserEventParseRules) -> Result<(), ()> {
         self.result = ParseOutcome::ParseFailed;
         Ok(())
     }
@@ -127,7 +127,6 @@ fn is_supported(token_kind: Option<TokenKind>) -> bool {
 }
 
 /// Synchronous actor around the generated expression-parser machine.
-#[derive(Debug)]
 pub struct GbnfRuleParserExpressionParserActor {
     machine: GbnfRuleParserExpressionParserStateMachine<GbnfRuleParserExpressionParserContext>,
 }
@@ -150,9 +149,10 @@ impl GbnfRuleParserExpressionParserActor {
     /// Classifies one lexer token kind.
     pub fn classify(&mut self, token_kind: TokenKind) -> ParseOutcome { self.process_event(token_kind.into()) }
 
-    /// Processes an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> ParseOutcome {
-        let _ = self.machine.process_event(GbnfRuleParserExpressionParserEvents::UnexpectedEvent);
+        self.machine.context_mut().result = ParseOutcome::Unexpected;
+        self.machine
+            .set_state(GbnfRuleParserExpressionParserStates::UnexpectedEvent);
         self.machine.context().result
     }
 

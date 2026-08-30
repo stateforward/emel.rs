@@ -103,13 +103,13 @@ impl Default for GbnfRuleParserDefinitionParserContext {
 impl GbnfRuleParserDefinitionParserStateMachineContext for GbnfRuleParserDefinitionParserContext {
     fn consume_definition_operator(
         &mut self,
-        _event: RuleParserEventParseRules,
+        _event: &RuleParserEventParseRules,
     ) -> Result<(), ()> {
         self.result = ParseOutcome::Parsed(ParseResult::DefinitionOperator);
         Ok(())
     }
 
-    fn dispatch_parse_failed(&mut self, _event: RuleParserEventParseRules) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event: &RuleParserEventParseRules) -> Result<(), ()> {
         self.result = ParseOutcome::ParseFailed;
         Ok(())
     }
@@ -144,7 +144,6 @@ impl GbnfRuleParserDefinitionParserStateMachineContext for GbnfRuleParserDefinit
 }
 
 /// Synchronous actor around the generated definition-parser machine.
-#[derive(Debug)]
 pub struct GbnfRuleParserDefinitionParserActor {
     machine: GbnfRuleParserDefinitionParserStateMachine<
         GbnfRuleParserDefinitionParserContext,
@@ -186,9 +185,9 @@ impl GbnfRuleParserDefinitionParserActor {
 
     /// Processes an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> ParseOutcome {
-        let _ = self
-            .machine
-            .process_event(GbnfRuleParserDefinitionParserEvents::UnexpectedEvent);
+        self.machine.context_mut().result = ParseOutcome::Unexpected;
+        self.machine
+            .set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
         self.machine.context().result
     }
 
