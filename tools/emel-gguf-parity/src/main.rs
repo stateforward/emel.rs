@@ -730,6 +730,9 @@ fn invalid_fixtures() -> Vec<(&'static str, Vec<u8>)> {
     let mut bad_version = Vec::new();
     append_header(&mut bad_version, VERSION + 1, 0, 0);
 
+    let mut empty_v2 = Vec::new();
+    append_header(&mut empty_v2, VERSION - 1, 0, 0);
+
     let mut impossible_kv_count = Vec::new();
     append_header(&mut impossible_kv_count, VERSION, 0, u64::from(u32::MAX));
 
@@ -820,6 +823,7 @@ fn invalid_fixtures() -> Vec<(&'static str, Vec<u8>)> {
     unsupported_tensor_type.resize(unsupported_tensor_type.len() + 64, 0);
     vec![
         ("invalid-version.gguf", bad_version),
+        ("empty-v2.gguf", empty_v2),
         ("impossible-kv-count.gguf", impossible_kv_count),
         ("impossible-tensor-count.gguf", impossible_tensor_count),
         ("empty-key.gguf", empty_key),
@@ -851,7 +855,6 @@ fn write_fixtures(directory: &Path) -> io::Result<()> {
     fs::create_dir_all(&valid_directory)?;
     fs::create_dir_all(&invalid_directory)?;
     let fixtures: Vec<(&str, Vec<u8>)> = vec![
-        ("empty-v2.gguf", empty_file(2)),
         ("empty-v3.gguf", empty_file(3)),
         ("metadata.gguf", metadata_fixture()),
         ("bool-normalization.gguf", bool_normalization_fixture()),
