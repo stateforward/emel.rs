@@ -1,5 +1,4 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned, bounded BPE text encoder actor.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -10,71 +9,171 @@
     clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
     dead_code,
-    unused_imports,
     missing_docs
 )]
 
+use core::cell::{Cell, RefCell};
 use sml::sml;
 
-// --- machine TextEncodersBpe from emel.cpp/src/emel/text/encoders/bpe/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventEncodeRuntime;
+/// Maximum UTF-8 symbols accepted by the merge scratch space.
+pub const MAX_ENCODE_SYMBOLS: usize = 16_384;
+/// Maximum token IDs accepted and emitted by one request.
+pub const MAX_ENCODE_TOKENS: usize = 16_384;
+/// Maximum vocabulary entries and merge records in the bounded view.
+pub const MAX_VOCAB_ENTRIES: usize = 320_000;
+pub const MAX_VOCAB_MERGES: usize = 600_000;
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
+/// Encoder error values matching the maintained encoder error contract.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum EncoderError {
+    #[default]
+    None = 0,
+    InvalidArgument = 1,
+    Backend = 2,
+    ModelInvalid = 3,
+    Unexpected = 4,
+}
+
+/// Read-only bounded vocabulary contract consumed by the encoder.
+pub trait VocabularyView {
+    fn token_count(&self) -> usize;
+    fn token(&self, index: usize) -> Option<&[u8]>;
+    fn merge_count(&self) -> usize { 0 }
+    fn merge(&self, _index: usize) -> Option<(&[u8], &[u8])> { None }
+    fn ignore_merges(&self) -> bool { false }
+}
+
+/// Successful synchronous completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EncodingDone { pub token_count: usize }
+/// Failed synchronous completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EncodingError { pub error: EncoderError }
+pub type DoneCallback = fn(EncodingDone) -> bool;
+pub type ErrorCallback = fn(EncodingError) -> bool;
+
+/// Caller-owned bounded encode request.
+#[derive(Clone, Copy)]
+pub struct EncodeRequest<'event> {
+    pub vocabulary: &'event dyn VocabularyView,
+    pub text: &'event [u8],
+    pub preprocessed: bool,
+    pub token_ids: &'event RefCell<&'event mut [i32]>,
+    pub dispatch_done: Option<DoneCallback>,
+    pub dispatch_error: Option<ErrorCallback>,
+}
+
+impl core::fmt::Debug for EncodeRequest<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EncodeRequest")
+            .field("text_length", &self.text.len())
+            .field("preprocessed", &self.preprocessed)
+            .field("token_capacity", &self.token_ids.borrow().len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'event> EncodeRequest<'event> {
+    #[must_use]
+    pub const fn new(
+        vocabulary: &'event dyn VocabularyView,
+        text: &'event [u8],
+        token_ids: &'event RefCell<&'event mut [i32]>,
+        dispatch_done: DoneCallback,
+        dispatch_error: ErrorCallback,
+    ) -> Self {
+        Self { vocabulary, text, preprocessed: false, token_ids, dispatch_done: Some(dispatch_done), dispatch_error: Some(dispatch_error) }
+    }
+
+    #[must_use]
+    pub const fn with_callbacks(
+        vocabulary: &'event dyn VocabularyView,
+        text: &'event [u8],
+        token_ids: &'event RefCell<&'event mut [i32]>,
+        preprocessed: bool,
+        dispatch_done: Option<DoneCallback>,
+        dispatch_error: Option<ErrorCallback>,
+    ) -> Self {
+        Self { vocabulary, text, preprocessed, token_ids, dispatch_done, dispatch_error }
+    }
+}
+
+/// Runtime event carrying a request, result context, and phase outputs.
+pub struct RuntimeEncodeRuntime<'event> {
+    pub request: EncodeRequest<'event>,
+    pub context: &'event RefCell<EncodeContext>,
+    pub encode_result_error: Cell<EncoderError>,
+    pub encode_result_token_count: Cell<usize>,
+}
+
+impl core::fmt::Debug for RuntimeEncodeRuntime<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RuntimeEncodeRuntime")
+            .field("request", &self.request)
+            .field("context", &self.context.borrow())
+            .field("encode_result_error", &self.encode_result_error.get())
+            .field("encode_result_token_count", &self.encode_result_token_count.get())
+            .finish()
+    }
+}
+
+/// Compatibility alias retained for generated event naming.
+pub type EventEncodeRuntime<'event> = RuntimeEncodeRuntime<'event>;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EventsEncodingDone;
-
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EventsEncodingError;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct Symbol { start: usize, len: usize, next: usize, alive: bool }
+
 sml! {
-    TextEncodersBpe {
-        "encode_validity_decision"_s <= *"initialized"_s + event<EventEncodeRuntime>,
-        "encode_validity_decision"_s <= "done"_s + event<EventEncodeRuntime>,
-        "encode_validity_decision"_s <= "errored"_s + event<EventEncodeRuntime>,
-        "encode_validity_decision"_s <= "unexpected"_s + event<EventEncodeRuntime>,
-        "encode_vocab_sync_decision"_s <= "encode_validity_decision"_s + completion<EventEncodeRuntime> [valid_encode],
-        "errored"_s <= "encode_validity_decision"_s + completion<EventEncodeRuntime> [invalid_encode] / reject_invalid_encode_from_encode_validity_decision,
-        "errored"_s <= "encode_validity_decision"_s + completion<EventEncodeRuntime> / reject_invalid_encode_from_encode_validity_decision,
-        "encode_precheck_decision"_s <= "encode_vocab_sync_decision"_s + completion<EventEncodeRuntime> [vocab_changed] / begin_encode_sync_vocab,
-        "encode_precheck_decision"_s <= "encode_vocab_sync_decision"_s + completion<EventEncodeRuntime> [vocab_unchanged] / begin_encode,
-        "errored"_s <= "encode_vocab_sync_decision"_s + completion<EventEncodeRuntime> / reject_invalid_encode_from_encode_vocab_sync_decision,
-        "done"_s <= "encode_precheck_decision"_s + completion<EventEncodeRuntime> [text_empty] / mark_done_from_encode_precheck_decision,
-        "encode_input_policy_decision"_s <= "encode_precheck_decision"_s + completion<EventEncodeRuntime> [text_non_empty],
-        "errored"_s <= "encode_precheck_decision"_s + completion<EventEncodeRuntime> / ensure_last_error_from_encode_precheck_decision,
-        "encode_table_prepare"_s <= "encode_input_policy_decision"_s + completion<EventEncodeRuntime> [preprocessed] / prepare_tables,
-        "errored"_s <= "encode_input_policy_decision"_s + completion<EventEncodeRuntime> [not_preprocessed] / reject_invalid_encode_from_encode_input_policy_decision,
-        "errored"_s <= "encode_input_policy_decision"_s + completion<EventEncodeRuntime> / reject_invalid_encode_from_encode_input_policy_decision,
-        "encode_path_decision"_s <= "encode_table_prepare"_s + completion<EventEncodeRuntime> [table_prepare_ok],
-        "errored"_s <= "encode_table_prepare"_s + completion<EventEncodeRuntime> [table_prepare_backend_error] / ensure_last_error_from_encode_table_prepare,
-        "errored"_s <= "encode_table_prepare"_s + completion<EventEncodeRuntime> [table_prepare_invalid_argument_error] / ensure_last_error_from_encode_table_prepare,
-        "errored"_s <= "encode_table_prepare"_s + completion<EventEncodeRuntime> [table_prepare_model_invalid_error] / ensure_last_error_from_encode_table_prepare,
-        "errored"_s <= "encode_table_prepare"_s + completion<EventEncodeRuntime> [table_prepare_unclassified_error_code] / ensure_last_error_from_encode_table_prepare,
-        "encode_direct_word_policy_decision"_s <= "encode_path_decision"_s + completion<EventEncodeRuntime> [ignore_merges_enabled],
-        "encode_exec"_s <= "encode_path_decision"_s + completion<EventEncodeRuntime>,
-        "encode_result_decision"_s <= "encode_direct_word_policy_decision"_s + completion<EventEncodeRuntime> [direct_word_token_available] / run_encode_ignore_merges,
-        "encode_merge_input_capacity_decision"_s <= "encode_direct_word_policy_decision"_s + completion<EventEncodeRuntime>,
-        "encode_exec"_s <= "encode_merge_input_capacity_decision"_s + completion<EventEncodeRuntime> [merge_symbol_capacity_within_limit],
-        "errored"_s <= "encode_merge_input_capacity_decision"_s + completion<EventEncodeRuntime> [merge_symbol_capacity_exceeded] / reject_invalid_encode_from_encode_merge_input_capacity_decision,
-        "errored"_s <= "encode_merge_input_capacity_decision"_s + completion<EventEncodeRuntime> / reject_invalid_encode_from_encode_merge_input_capacity_decision,
-        "encode_result_decision"_s <= "encode_exec"_s + completion<EventEncodeRuntime> / run_encode_merge_path,
-        "done"_s <= "encode_result_decision"_s + completion<EventEncodeRuntime> [encode_result_ok] / mark_done_from_encode_result_decision,
-        "errored"_s <= "encode_result_decision"_s + completion<EventEncodeRuntime> [encode_result_invalid_argument_error] / ensure_last_error_from_encode_result_decision,
-        "errored"_s <= "encode_result_decision"_s + completion<EventEncodeRuntime> [encode_result_backend_error] / ensure_last_error_from_encode_result_decision,
-        "errored"_s <= "encode_result_decision"_s + completion<EventEncodeRuntime> [encode_result_model_invalid_error] / ensure_last_error_from_encode_result_decision,
-        "errored"_s <= "encode_result_decision"_s + completion<EventEncodeRuntime> [encode_result_unclassified_error_code] / ensure_last_error_from_encode_result_decision,
-        "unexpected"_s <= "encode_validity_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_vocab_sync_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_precheck_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_input_policy_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_table_prepare"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_path_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_direct_word_policy_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_merge_input_capacity_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_exec"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
-        "unexpected"_s <= "encode_result_decision"_s + event<EventEncodeRuntime> / on_unexpected_event_encode_runtime,
+    TextEncodersBpe<'event> {
+        "encode_validity_decision"_s <= *"initialized"_s + event<RuntimeEncodeRuntime<'event>>,
+        "encode_validity_decision"_s <= "done"_s + event<RuntimeEncodeRuntime<'event>>,
+        "encode_validity_decision"_s <= "errored"_s + event<RuntimeEncodeRuntime<'event>>,
+        "encode_validity_decision"_s <= "unexpected"_s + event<RuntimeEncodeRuntime<'event>>,
+        "encode_vocab_sync_decision"_s <= "encode_validity_decision"_s + completion<RuntimeEncodeRuntime<'event>> [valid_encode],
+        "errored"_s <= "encode_validity_decision"_s + completion<RuntimeEncodeRuntime<'event>> [invalid_encode] / reject_invalid_encode_from_encode_validity_decision,
+        "errored"_s <= "encode_validity_decision"_s + completion<RuntimeEncodeRuntime<'event>> / reject_invalid_encode_from_encode_validity_decision,
+        "encode_precheck_decision"_s <= "encode_vocab_sync_decision"_s + completion<RuntimeEncodeRuntime<'event>> [vocab_changed] / begin_encode_sync_vocab,
+        "encode_precheck_decision"_s <= "encode_vocab_sync_decision"_s + completion<RuntimeEncodeRuntime<'event>> [vocab_unchanged] / begin_encode,
+        "errored"_s <= "encode_vocab_sync_decision"_s + completion<RuntimeEncodeRuntime<'event>> / reject_invalid_encode_from_encode_vocab_sync_decision,
+        "done"_s <= "encode_precheck_decision"_s + completion<RuntimeEncodeRuntime<'event>> [text_empty] / mark_done_from_encode_precheck_decision,
+        "encode_input_policy_decision"_s <= "encode_precheck_decision"_s + completion<RuntimeEncodeRuntime<'event>> [text_non_empty],
+        "errored"_s <= "encode_precheck_decision"_s + completion<RuntimeEncodeRuntime<'event>> / ensure_last_error_from_encode_precheck_decision,
+        "encode_table_prepare"_s <= "encode_input_policy_decision"_s + completion<RuntimeEncodeRuntime<'event>> [preprocessed] / prepare_tables,
+        "errored"_s <= "encode_input_policy_decision"_s + completion<RuntimeEncodeRuntime<'event>> [not_preprocessed] / reject_invalid_encode_from_encode_input_policy_decision,
+        "errored"_s <= "encode_input_policy_decision"_s + completion<RuntimeEncodeRuntime<'event>> / reject_invalid_encode_from_encode_input_policy_decision,
+        "encode_path_decision"_s <= "encode_table_prepare"_s + completion<RuntimeEncodeRuntime<'event>> [table_prepare_ok],
+        "errored"_s <= "encode_table_prepare"_s + completion<RuntimeEncodeRuntime<'event>> [table_prepare_backend_error] / ensure_last_error_from_encode_table_prepare,
+        "errored"_s <= "encode_table_prepare"_s + completion<RuntimeEncodeRuntime<'event>> [table_prepare_invalid_argument_error] / ensure_last_error_from_encode_table_prepare,
+        "errored"_s <= "encode_table_prepare"_s + completion<RuntimeEncodeRuntime<'event>> [table_prepare_model_invalid_error] / ensure_last_error_from_encode_table_prepare,
+        "errored"_s <= "encode_table_prepare"_s + completion<RuntimeEncodeRuntime<'event>> [table_prepare_unclassified_error_code] / ensure_last_error_from_encode_table_prepare,
+        "encode_direct_word_policy_decision"_s <= "encode_path_decision"_s + completion<RuntimeEncodeRuntime<'event>> [ignore_merges_enabled],
+        "encode_exec"_s <= "encode_path_decision"_s + completion<RuntimeEncodeRuntime<'event>>,
+        "encode_result_decision"_s <= "encode_direct_word_policy_decision"_s + completion<RuntimeEncodeRuntime<'event>> [direct_word_token_available] / run_encode_ignore_merges,
+        "encode_merge_input_capacity_decision"_s <= "encode_direct_word_policy_decision"_s + completion<RuntimeEncodeRuntime<'event>>,
+        "encode_exec"_s <= "encode_merge_input_capacity_decision"_s + completion<RuntimeEncodeRuntime<'event>> [merge_symbol_capacity_within_limit],
+        "errored"_s <= "encode_merge_input_capacity_decision"_s + completion<RuntimeEncodeRuntime<'event>> [merge_symbol_capacity_exceeded] / reject_invalid_encode_from_encode_merge_input_capacity_decision,
+        "errored"_s <= "encode_merge_input_capacity_decision"_s + completion<RuntimeEncodeRuntime<'event>> / reject_invalid_encode_from_encode_merge_input_capacity_decision,
+        "encode_result_decision"_s <= "encode_exec"_s + completion<RuntimeEncodeRuntime<'event>> / run_encode_merge_path,
+        "done"_s <= "encode_result_decision"_s + completion<RuntimeEncodeRuntime<'event>> [encode_result_ok] / mark_done_from_encode_result_decision,
+        "errored"_s <= "encode_result_decision"_s + completion<RuntimeEncodeRuntime<'event>> [encode_result_invalid_argument_error] / ensure_last_error_from_encode_result_decision,
+        "errored"_s <= "encode_result_decision"_s + completion<RuntimeEncodeRuntime<'event>> [encode_result_backend_error] / ensure_last_error_from_encode_result_decision,
+        "errored"_s <= "encode_result_decision"_s + completion<RuntimeEncodeRuntime<'event>> [encode_result_model_invalid_error] / ensure_last_error_from_encode_result_decision,
+        "errored"_s <= "encode_result_decision"_s + completion<RuntimeEncodeRuntime<'event>> [encode_result_unclassified_error_code] / ensure_last_error_from_encode_result_decision,
+        "unexpected"_s <= "encode_validity_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_vocab_sync_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_precheck_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_input_policy_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_table_prepare"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_path_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_direct_word_policy_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_merge_input_capacity_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_exec"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
+        "unexpected"_s <= "encode_result_decision"_s + event<RuntimeEncodeRuntime<'event>> / on_unexpected_runtime_encode_runtime,
         "unexpected"_s <= "initialized"_s + event<EventsEncodingDone> / on_unexpected_events_encoding_done,
         "unexpected"_s <= "initialized"_s + event<EventsEncodingError> / on_unexpected_events_encoding_error,
         "unexpected"_s <= "encode_validity_decision"_s + event<EventsEncodingDone> / on_unexpected_events_encoding_done,
@@ -120,289 +219,159 @@ sml! {
     }
 }
 
-/// Context for `TextEncodersBpe` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
+/// Mutable result context for one dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EncodeContext { pub error: EncoderError, pub token_count: usize, pub unexpected: bool }
+impl Default for EncodeContext { fn default() -> Self { Self { error: EncoderError::None, token_count: 0, unexpected: false } } }
+impl EncodeContext {
+    fn reset(&mut self) { *self = Self::default(); }
+    fn reject(&mut self, error: EncoderError) { self.token_count = 0; self.error = error; }
+}
+
+#[derive(Debug)]
 pub struct TextEncodersBpeContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    vocabulary_identity: usize,
+    tables_ready: bool,
+    symbols: [Symbol; MAX_ENCODE_SYMBOLS],
+}
+impl Default for TextEncodersBpeContext { fn default() -> Self { Self { vocabulary_identity: 0, tables_ready: false, symbols: [Symbol::default(); MAX_ENCODE_SYMBOLS] } } }
+impl TextEncodersBpeContext {
+    fn clear(&mut self, identity: usize) { self.vocabulary_identity = identity; self.tables_ready = false; }
+    fn lookup(vocabulary: &dyn VocabularyView, needle: &[u8]) -> Option<i32> {
+        (0..vocabulary.token_count().min(MAX_VOCAB_ENTRIES)).find_map(|i| vocabulary.token(i).filter(|token| *token == needle).and_then(|_| i32::try_from(i).ok()))
+    }
+    fn merge_rank(vocabulary: &dyn VocabularyView, left: &[u8], right: &[u8]) -> Option<usize> {
+        (0..vocabulary.merge_count().min(MAX_VOCAB_MERGES)).find(|&i| vocabulary.merge(i).is_some_and(|(a, b)| a == left && b == right))
+    }
+    fn push(event: &RuntimeEncodeRuntime<'_>, id: i32, count: &mut usize) -> bool {
+        let mut output = event.request.token_ids.borrow_mut();
+        if *count >= output.len() || *count >= MAX_ENCODE_TOKENS { return false; }
+        output[*count] = id; *count += 1; true
+    }
+    fn encode_ignore(&mut self, event: &RuntimeEncodeRuntime<'_>) {
+        let mut count = 0;
+        if let Some(id) = Self::lookup(event.request.vocabulary, event.request.text) {
+            if !Self::push(event, id, &mut count) { event.context.borrow_mut().error = EncoderError::InvalidArgument; }
+        } else { event.context.borrow_mut().error = EncoderError::Backend; }
+        event.context.borrow_mut().token_count = count;
+        event.encode_result_token_count.set(count);
+        event.encode_result_error.set(event.context.borrow().error);
+    }
+    fn encode_merge(&mut self, event: &RuntimeEncodeRuntime<'_>) {
+        let text = event.request.text;
+        let mut output_count = 0usize;
+        let mut symbol_count = 0usize;
+        for (start, _) in text.iter().enumerate() {
+            if symbol_count >= self.symbols.len() { event.context.borrow_mut().reject(EncoderError::InvalidArgument); return; }
+            self.symbols[symbol_count] = Symbol { start, len: 1, next: symbol_count + 1, alive: true };
+            symbol_count += 1;
+        }
+        if symbol_count > 0 { self.symbols[symbol_count - 1].next = symbol_count; }
+        for _ in 0..symbol_count.saturating_sub(1) {
+            let mut best: Option<(usize, usize, usize)> = None;
+            let mut left_index = 0usize;
+            while left_index < symbol_count {
+                let right_index = self.symbols[left_index].next;
+                if right_index >= symbol_count { break; }
+                if self.symbols[left_index].alive && self.symbols[right_index].alive {
+                    let left = &text[self.symbols[left_index].start..self.symbols[left_index].start + self.symbols[left_index].len];
+                    let right = &text[self.symbols[right_index].start..self.symbols[right_index].start + self.symbols[right_index].len];
+                    if let Some(rank) = Self::merge_rank(event.request.vocabulary, left, right) && best.is_none_or(|(_, _, current)| rank < current) { best = Some((left_index, right_index, rank)); }
+                }
+                left_index = right_index;
+            }
+            let Some((left, right, _)) = best else { break; };
+            self.symbols[left].len = self.symbols[right].start + self.symbols[right].len - self.symbols[left].start;
+            self.symbols[left].next = self.symbols[right].next;
+            self.symbols[right].alive = false;
+        }
+        let mut index = 0usize;
+        while index < symbol_count {
+            if self.symbols[index].alive {
+                let piece = &text[self.symbols[index].start..self.symbols[index].start + self.symbols[index].len];
+                if let Some(id) = Self::lookup(event.request.vocabulary, piece) {
+                    if !Self::push(event, id, &mut output_count) { event.context.borrow_mut().reject(EncoderError::InvalidArgument); return; }
+                } else {
+                    for unit in piece.chunks(1) {
+                        let Some(id) = Self::lookup(event.request.vocabulary, unit) else { event.context.borrow_mut().error = EncoderError::Backend; return; };
+                        if !Self::push(event, id, &mut output_count) { event.context.borrow_mut().reject(EncoderError::InvalidArgument); return; }
+                    }
+                }
+            }
+            let next = self.symbols[index].next;
+            if next >= symbol_count || next == index { break; }
+            index = next;
+        }
+        event.context.borrow_mut().token_count = output_count;
+        event.encode_result_token_count.set(output_count);
+        event.encode_result_error.set(event.context.borrow().error);
+    }
 }
 
 impl TextEncodersBpeStateMachineContext for TextEncodersBpeContext {
-    fn begin_encode(&mut self, _event: &EventEncodeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::begin_encode
-        todo!(
-            "TODO: port action `begin_encode` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn begin_encode_sync_vocab(&mut self, _event: &EventEncodeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::begin_encode_sync_vocab
-        todo!(
-            "TODO: port action `begin_encode_sync_vocab` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn direct_word_token_available(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::direct_word_token_available
-        todo!(
-            "TODO: port guard `direct_word_token_available` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn encode_result_backend_error(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::encode_result_backend_error
-        todo!(
-            "TODO: port guard `encode_result_backend_error` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn encode_result_invalid_argument_error(
-        &self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::encode_result_invalid_argument_error
-        todo!(
-            "TODO: port guard `encode_result_invalid_argument_error` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn encode_result_model_invalid_error(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::encode_result_model_invalid_error
-        todo!(
-            "TODO: port guard `encode_result_model_invalid_error` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn encode_result_ok(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::encode_result_ok
-        todo!(
-            "TODO: port guard `encode_result_ok` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn encode_result_unclassified_error_code(
-        &self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::encode_result_unclassified_error_code
-        todo!(
-            "TODO: port guard `encode_result_unclassified_error_code` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn ensure_last_error_from_encode_precheck_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_encode_result_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn ensure_last_error_from_encode_table_prepare(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::ensure_last_error
-        todo!(
-            "TODO: port action `ensure_last_error` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn ignore_merges_enabled(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::ignore_merges_enabled
-        todo!(
-            "TODO: port guard `ignore_merges_enabled` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn invalid_encode(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::invalid_encode
-        todo!(
-            "TODO: port guard `invalid_encode` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn mark_done_from_encode_precheck_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::mark_done
-        todo!("TODO: port action `mark_done` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp")
-    }
-    fn mark_done_from_encode_result_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::mark_done
-        todo!("TODO: port action `mark_done` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp")
-    }
-    fn merge_symbol_capacity_exceeded(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::merge_symbol_capacity_exceeded
-        todo!(
-            "TODO: port guard `merge_symbol_capacity_exceeded` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn merge_symbol_capacity_within_limit(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::merge_symbol_capacity_within_limit
-        todo!(
-            "TODO: port guard `merge_symbol_capacity_within_limit` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn not_preprocessed(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::not_preprocessed
-        todo!(
-            "TODO: port guard `not_preprocessed` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn on_unexpected_event_encode_runtime(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn on_unexpected_events_encoding_done(
-        &mut self,
-        _event: &EventsEncodingDone,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn on_unexpected_events_encoding_error(
-        &mut self,
-        _event: &EventsEncodingError,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn prepare_tables(&mut self, _event: &EventEncodeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::prepare_tables
-        todo!(
-            "TODO: port action `prepare_tables` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn preprocessed(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::preprocessed
-        todo!("TODO: port guard `preprocessed` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp")
-    }
-    fn reject_invalid_encode_from_encode_input_policy_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::reject_invalid_encode
-        todo!(
-            "TODO: port action `reject_invalid_encode` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn reject_invalid_encode_from_encode_merge_input_capacity_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::reject_invalid_encode
-        todo!(
-            "TODO: port action `reject_invalid_encode` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn reject_invalid_encode_from_encode_validity_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::reject_invalid_encode
-        todo!(
-            "TODO: port action `reject_invalid_encode` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn reject_invalid_encode_from_encode_vocab_sync_decision(
-        &mut self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::reject_invalid_encode
-        todo!(
-            "TODO: port action `reject_invalid_encode` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn run_encode_ignore_merges(&mut self, _event: &EventEncodeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::run_encode_ignore_merges
-        todo!(
-            "TODO: port action `run_encode_ignore_merges` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn run_encode_merge_path(&mut self, _event: &EventEncodeRuntime) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/actions.hpp::run_encode_merge_path
-        todo!(
-            "TODO: port action `run_encode_merge_path` from emel.cpp/src/emel/text/encoders/bpe/actions.hpp"
-        )
-    }
-    fn table_prepare_backend_error(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::table_prepare_backend_error
-        todo!(
-            "TODO: port guard `table_prepare_backend_error` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn table_prepare_invalid_argument_error(
-        &self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::table_prepare_invalid_argument_error
-        todo!(
-            "TODO: port guard `table_prepare_invalid_argument_error` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn table_prepare_model_invalid_error(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::table_prepare_model_invalid_error
-        todo!(
-            "TODO: port guard `table_prepare_model_invalid_error` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn table_prepare_ok(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::table_prepare_ok
-        todo!(
-            "TODO: port guard `table_prepare_ok` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn table_prepare_unclassified_error_code(
-        &self,
-        _event: &EventEncodeRuntime,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::table_prepare_unclassified_error_code
-        todo!(
-            "TODO: port guard `table_prepare_unclassified_error_code` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn text_empty(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::text_empty
-        todo!("TODO: port guard `text_empty` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp")
-    }
-    fn text_non_empty(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::text_non_empty
-        todo!(
-            "TODO: port guard `text_non_empty` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn valid_encode(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::valid_encode
-        todo!("TODO: port guard `valid_encode` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp")
-    }
-    fn vocab_changed(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::vocab_changed
-        todo!(
-            "TODO: port guard `vocab_changed` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
-    fn vocab_unchanged(&self, _event: &EventEncodeRuntime) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/text/encoders/bpe/guards.hpp::vocab_unchanged
-        todo!(
-            "TODO: port guard `vocab_unchanged` from emel.cpp/src/emel/text/encoders/bpe/guards.hpp"
-        )
-    }
+    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reset(); event.encode_result_error.set(EncoderError::None); event.encode_result_token_count.set(0); Ok(()) }
+    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.begin_encode(event)?; self.clear(core::ptr::from_ref(event.request.vocabulary) as *const () as usize); Ok(()) }
+    fn direct_word_token_available(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(Self::lookup(event.request.vocabulary, event.request.text).is_some()) }
+    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::Backend) }
+    fn encode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::InvalidArgument) }
+    fn encode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::ModelInvalid) }
+    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::None) }
+    fn encode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(matches!(event.context.borrow().error, EncoderError::Unexpected)) }
+    fn ensure_last_error_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ensure_last_error_from_encode_table_prepare(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
+    fn ignore_merges_enabled(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.vocabulary.ignore_merges()) }
+    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!valid_request(event)) }
+    fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
+    fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
+    fn merge_symbol_capacity_exceeded(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.len() > MAX_ENCODE_SYMBOLS) }
+    fn merge_symbol_capacity_within_limit(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.len() <= MAX_ENCODE_SYMBOLS) }
+    fn not_preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.preprocessed) }
+    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::Unexpected); Ok(()) }
+    fn on_unexpected_events_encoding_done(&mut self, _: &EventsEncodingDone) -> Result<(), ()> { Ok(()) }
+    fn on_unexpected_events_encoding_error(&mut self, _: &EventsEncodingError) -> Result<(), ()> { Ok(()) }
+    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { Ok(()) }
+    fn prepare_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let vocabulary = event.request.vocabulary; if vocabulary.token_count() > MAX_VOCAB_ENTRIES || vocabulary.merge_count() > MAX_VOCAB_MERGES { event.context.borrow_mut().error = EncoderError::ModelInvalid; } else { self.tables_ready = true; event.context.borrow_mut().error = EncoderError::None; } Ok(()) }
+    fn preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.preprocessed) }
+    fn reject_invalid_encode_from_encode_input_policy_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
+    fn reject_invalid_encode_from_encode_merge_input_capacity_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
+    fn reject_invalid_encode_from_encode_validity_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
+    fn reject_invalid_encode_from_encode_vocab_sync_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
+    fn run_encode_ignore_merges(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.encode_ignore(event); Ok(()) }
+    fn run_encode_merge_path(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.encode_merge(event); Ok(()) }
+    fn table_prepare_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::Backend) }
+    fn table_prepare_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::InvalidArgument) }
+    fn table_prepare_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::ModelInvalid) }
+    fn table_prepare_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.tables_ready && event.context.borrow().error == EncoderError::None) }
+    fn table_prepare_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(matches!(event.context.borrow().error, EncoderError::Unexpected)) }
+    fn text_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.is_empty()) }
+    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.text.is_empty()) }
+    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(valid_request(event)) }
+    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.vocabulary_identity != core::ptr::from_ref(event.request.vocabulary) as *const () as usize) }
+    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.vocabulary_identity == core::ptr::from_ref(event.request.vocabulary) as *const () as usize) }
 }
+
+fn valid_request(event: &RuntimeEncodeRuntime<'_>) -> bool { !event.request.token_ids.borrow().is_empty() && event.request.text.len() <= MAX_ENCODE_SYMBOLS * 4 && event.request.vocabulary.token_count() <= MAX_VOCAB_ENTRIES && event.request.vocabulary.merge_count() <= MAX_VOCAB_MERGES }
+fn reject_invalid(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::InvalidArgument); Ok(()) }
+fn ensure_last_error(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let mut context = event.context.borrow_mut(); if context.error == EncoderError::None { context.error = EncoderError::Backend; } Ok(()) }
+
+/// Synchronous bounded actor around the generated BPE machine.
+pub struct TextEncodersBpeActor<'event> { machine: TextEncodersBpeStateMachine<'event, TextEncodersBpeContext> }
+impl<'event> Default for TextEncodersBpeActor<'event> { fn default() -> Self { Self::new() } }
+impl<'event> TextEncodersBpeActor<'event> {
+    #[must_use] pub fn new() -> Self { Self { machine: TextEncodersBpeStateMachine::new(TextEncodersBpeContext::default()) } }
+    pub fn process_event(&mut self, request: EncodeRequest<'event>) -> Result<EncodingDone, EncodingError> {
+        let result = RefCell::new(EncodeContext::default());
+        let runtime = RuntimeEncodeRuntime { request, context: &result, encode_result_error: Cell::new(EncoderError::None), encode_result_token_count: Cell::new(0) };
+        if self.machine.process_event(TextEncodersBpeEvents::RuntimeEncodeRuntime(runtime)).is_err() { result.borrow_mut().reject(EncoderError::Unexpected); self.machine.set_state(TextEncodersBpeStates::Unexpected); }
+        let context = *result.borrow();
+        if context.unexpected || self.machine.context().vocabulary_identity == usize::MAX { let error = EncodingError { error: EncoderError::Unexpected }; if let Some(callback) = request.dispatch_error { let _ = callback(error); } return Err(error); }
+        if context.error == EncoderError::None { let done = EncodingDone { token_count: context.token_count }; if let Some(callback) = request.dispatch_done { let _ = callback(done); } Ok(done) } else { let error = EncodingError { error: context.error }; if let Some(callback) = request.dispatch_error { let _ = callback(error); } Err(error) }
+    }
+    pub fn process_unexpected(&mut self) -> bool { self.machine.set_state(TextEncodersBpeStates::Unexpected); false }
+    #[must_use] pub fn state(&self) -> &TextEncodersBpeStates { self.machine.state() }
+    #[must_use] pub fn is(&self, state: &TextEncodersBpeStates) -> bool { self.machine.is(state) }
+    #[must_use] pub fn context(&self) -> &TextEncodersBpeContext { self.machine.context() }
+}
+
+pub type Bpe<'event> = TextEncodersBpeActor<'event>;
