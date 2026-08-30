@@ -267,3 +267,4 @@ mod tests {
         assert_eq!(parser.process_unexpected_event(), Err(TermParserError::InternalError));
         assert_eq!(parser.context().error, Some(TermParserError::InternalError));
     }
+}

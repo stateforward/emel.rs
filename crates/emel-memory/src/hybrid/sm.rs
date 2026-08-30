@@ -249,6 +249,7 @@ fn effect_capture_impl(ctx: &mut MemoryHybridContext, e: &EventCaptureViewRuntim
     let mut h = e.context.borrow_mut(); h.kv_accepted = ok; h.kv_error = if ok { 0 } else { *err.borrow() }; Ok(())
 }
 
+impl MemoryHybridStateMachineContext for MemoryHybridContext {
     fn begin_allocate_sequence(&mut self, e: &EventAllocateSequenceRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = AllocateSequenceContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
     fn begin_reserve(&mut self, e: &EventReserveRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = ReserveContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
     fn begin_allocate_slots(&mut self, e: &EventAllocateSlotsRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = AllocateSlotsContext::default(); if let Some(o)=e.block_count_out {*o.borrow_mut()=0;} set_error(e.error_out, HybridError::None); Ok(()) }

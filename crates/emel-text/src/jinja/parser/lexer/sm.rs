@@ -109,7 +109,7 @@ fn emit_token_with_flags<'a,'cb>(cb:Option<&'cb mut DoneCallback<'a>>,c:Cursor<'
 fn at(b:&[u8],p:usize)->Option<u8>{b.get(p).copied()}
 fn word(c:u8)->bool{c.is_ascii_alphanumeric()||c==b'_'}
 fn trim_char(c:u8)->bool{matches!(c,b' '|b'\t'|b'\r'|b'\n')}
-fn space(c:u8)->bool{matches!(c,b' '|b'\t'|b'\r'|b'\n'|b'\f'|b'\x0b')}
+fn space(c:u8)->bool{matches!(c,b' '|b'\t'|b'\r'|b'\n'|b'\x0c'|b'\x0b')}
 fn text_boundary(k:TokenKind)->bool{matches!(k,TokenKind::CloseStatement|TokenKind::CloseExpression|TokenKind::Comment)}
 fn trim_open(s:&str,p:usize)->bool{at(s.as_bytes(),p+2)==Some(b'-')}
 fn find_boundary(s:&str,mut p:usize)->usize{let b=s.as_bytes();while p+1<b.len(){if b[p]==b'{'&&matches!(b[p+1],b'%'|b'{'|b'#'){return p;}p+=1;}b.len()}
