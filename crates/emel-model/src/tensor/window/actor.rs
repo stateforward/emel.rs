@@ -181,70 +181,51 @@ impl Window {
 }
 
 /// Window actor variant with an injected synchronous staged-read actor.
+/// Slot storage is caller-owned for the actor lifetime; this type never allocates it.
 #[derive(Debug)]
-pub struct WindowWithStager<S> {
+pub struct WindowWithStager<'arena, S> {
     window: Window,
     stager: S,
-    slots: Box<[u8]>,
+    slots: &'arena mut [u8],
 }
 
-impl<S: Stager> WindowWithStager<S> {
-    /// Creates a window with a statically dispatched staged-read dependency.
+impl<'arena, S: Stager> WindowWithStager<'arena, S> {
+    /// Creates a window over caller-provided reusable slot storage.
     #[must_use]
-    pub fn new(stager: S) -> Self {
-        Self {
-            window: Window::new(),
-            stager,
-            slots: Vec::new().into_boxed_slice(),
-        }
+    pub fn new(stager: S, slots: &'arena mut [u8]) -> Self {
+        Self { window: Window::new(), stager, slots }
     }
 
-    /// Binds using the core lifecycle actor.
+    /// Binds using the core lifecycle actor without allocating storage.
     pub fn bind<'a>(&mut self, request: Bind<'a>) -> Result<event::BindDone, event::BindError> {
-        let result = self.window.bind(request)?;
-        if result.streaming_active() {
-            let needed =
-                result.window_slots() as usize * self.window.state.slot_capacity_bytes as usize;
-            if needed == 0 {
+        let result = self.window.bind(request);
+        let Ok(done) = result else { return result };
+        if done.streaming_active() {
+            let Some(needed) = done.window_slots().checked_mul(self.window.state.slot_capacity_bytes as u32) else {
+                let _ = self.window.unbind(Unbind::new());
+                return Err(event::BindError::new(event::Error::SlotStorageTooSmall));
+            };
+            if needed == 0 || needed as usize > self.slots.len() {
+                let _ = self.window.unbind(Unbind::new());
                 return Err(event::BindError::new(event::Error::SlotStorageTooSmall));
             }
-            let len =
-                result.window_slots() as usize * self.window.state.slot_capacity_bytes as usize;
-            self.slots = vec![0u8; len].into_boxed_slice();
         }
-        Ok(result)
+        Ok(done)
     }
 
-    /// Acquires a layer and stages each extent synchronously into caller storage.
-    pub fn acquire<'a>(
-        &mut self,
-        request: Acquire<'a>,
-        source: Option<&'a [u8]>,
-        _target_bytes: &'a mut [u8],
-    ) -> Result<event::AcquireDone, event::AcquireError> {
-        if !self.window.state.bound {
-            return self.window.acquire_error(request, event::Error::NotBound);
-        }
-        if !self.window.state.streaming_active {
-            return self
-                .window
-                .acquire_error(request, event::Error::NotStreaming);
-        }
-        if request.layer_index < 0 || request.layer_index as u32 >= self.window.state.layer_count {
-            return self
-                .window
-                .acquire_error(request, event::Error::LayerOutOfRange);
-        }
+    /// Acquires a layer and stages each extent into caller-owned storage.
+    /// `target_bytes` is validated before any staged write.
+    pub fn acquire<'a>(&mut self, request: Acquire<'a>, source: Option<&'a [u8]>, target_bytes: &'a mut [u8]) -> Result<event::AcquireDone, event::AcquireError> {
+        if !self.window.state.bound { return self.window.acquire_error(request, event::Error::NotBound); }
+        if !self.window.state.streaming_active { return self.window.acquire_error(request, event::Error::NotStreaming); }
+        if request.layer_index < 0 || request.layer_index as u32 >= self.window.state.layer_count { return self.window.acquire_error(request, event::Error::LayerOutOfRange); }
         let descriptor = self.window.state.plan[request.layer_index as usize];
+        if target_bytes.len() < descriptor.slot_bytes as usize { return self.window.acquire_error(request, event::Error::SlotStorageTooSmall); }
         let slot = request.layer_index as u32 % self.window.state.slot_count;
         let existing = self.window.state.slots[slot as usize];
-        if existing.layer == request.layer_index
-            && existing.lifecycle == detail::SlotLifecycle::Resident
-        {
+        if existing.layer == request.layer_index && existing.lifecycle == detail::SlotLifecycle::Resident {
             let result = event::AcquireDone::new(request.layer_index, slot, descriptor);
-            if let Some(callback) = request.on_done {
-                callback.publish(result);
-            }
+            if let Some(callback) = request.on_done { callback.publish(result); }
             return Ok(result);
         }
         self.window.state.slots[slot as usize].layer = request.layer_index;
@@ -254,47 +235,25 @@ impl<S: Stager> WindowWithStager<S> {
         let target = Target::new(&mut self.slots[slot_start..slot_end]);
         for index in 0..descriptor.weight_count as usize {
             let extent = descriptor.weights[index];
-            let staged = emel_io::staged_read::event::StageWindow::new(
-                extent.file_offset,
-                extent.byte_size,
-                self.window.state.stage_chunk_bytes,
-                source,
-                &target,
-            );
+            let staged = emel_io::staged_read::event::StageWindow::new(extent.file_offset, extent.byte_size, self.window.state.stage_chunk_bytes, source, &target);
             if self.stager.stage_tensor(staged).is_err() {
                 self.window.state.slots[slot as usize].lifecycle = detail::SlotLifecycle::Failed;
-                return self
-                    .window
-                    .acquire_error(request, event::Error::SlotCopyFailed);
+                return self.window.acquire_error(request, event::Error::SlotCopyFailed);
             }
         }
-        self.window.state.slots[slot as usize].layer = request.layer_index;
         self.window.state.slots[slot as usize].lifecycle = detail::SlotLifecycle::Resident;
-        if let Some(prefetch) = detail::prefetch_layer(&self.window.state, request.layer_index) {
-            let prefetch_slot = prefetch as u32 % self.window.state.slot_count;
-            self.window.state.slots[prefetch_slot as usize].layer = prefetch;
-            self.window.state.slots[prefetch_slot as usize].lifecycle =
-                detail::SlotLifecycle::Loading;
-            self.window.state.next_prefetch_layer = prefetch;
-        }
+        if let Some(prefetch) = detail::prefetch_layer(&self.window.state, request.layer_index) { self.window.state.next_prefetch_layer = prefetch; }
         let result = event::AcquireDone::new(request.layer_index, slot, descriptor);
-        if let Some(callback) = request.on_done {
-            callback.publish(result);
-        }
+        if let Some(callback) = request.on_done { callback.publish(result); }
         Ok(result)
     }
 
-    /// Unbinds and resets the underlying lifecycle actor.
-    pub fn unbind<'a>(
-        &mut self,
-        request: Unbind<'a>,
-    ) -> Result<event::UnbindDone, event::UnbindError> {
-        let result = self.window.unbind(request)?;
-        self.slots = Vec::new().into_boxed_slice();
-        Ok(result)
+    /// Unbinds and resets lifecycle state while retaining caller-owned storage.
+    pub fn unbind<'a>(&mut self, request: Unbind<'a>) -> Result<event::UnbindDone, event::UnbindError> {
+        self.window.unbind(request)
     }
 
-    /// Reads the resident slot bytes synchronously without exposing mutable storage.
+    /// Reads resident slot bytes without exposing mutable storage.
     #[must_use]
     pub fn slot_bytes(&self, slot: u32, length: usize) -> Option<&[u8]> {
         let capacity = self.window.state.slot_capacity_bytes as usize;
@@ -303,16 +262,13 @@ impl<S: Stager> WindowWithStager<S> {
         self.slots.get(start..end)
     }
 
-    /// Returns the next layer marked for prefetch, if any.
+    /// Returns the next layer marked for prefetch.
     #[must_use]
     pub const fn next_prefetch_layer(&self) -> Option<i32> {
-        if self.window.state.next_prefetch_layer >= 0 {
-            Some(self.window.state.next_prefetch_layer)
-        } else {
-            None
-        }
+        if self.window.state.next_prefetch_layer >= 0 { Some(self.window.state.next_prefetch_layer) } else { None }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -518,8 +474,8 @@ mod tests {
 
     #[test]
     fn injected_stager_copies_selected_extent_and_reports_result() {
-        let mut window = WindowWithStager::new(CopyStager);
         let mut slots = [0u8; 512];
+        let mut window = WindowWithStager::new(CopyStager, &mut slots);
         let extents = [
             WeightExtent {
                 tensor_id: 7,
@@ -555,8 +511,8 @@ mod tests {
 
     #[test]
     fn resident_acquire_reuses_slot_without_second_copy() {
-        let mut window = WindowWithStager::new(CopyStager);
         let mut slots = [0u8; 128];
+        let mut window = WindowWithStager::new(CopyStager, &mut slots);
         let extents = [
             WeightExtent {
                 tensor_id: 7,
@@ -594,8 +550,8 @@ mod tests {
 
     #[test]
     fn unbind_clears_residency_and_allows_clean_rebind() {
-        let mut window = WindowWithStager::new(CopyStager);
         let mut slots = [0u8; 128];
+        let mut window = WindowWithStager::new(CopyStager, &mut slots);
         let extents = [
             WeightExtent {
                 tensor_id: 7,
@@ -640,8 +596,8 @@ mod tests {
 
     #[test]
     fn failed_slot_retries_and_commits_on_next_acquire() {
-        let mut window = WindowWithStager::new(FlakyStager { fail: true });
         let mut slots = [0u8; 128];
+        let mut window = WindowWithStager::new(FlakyStager { fail: true }, &mut slots);
         let extents = [
             WeightExtent {
                 tensor_id: 7,
