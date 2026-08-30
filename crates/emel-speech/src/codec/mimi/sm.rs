@@ -214,6 +214,17 @@ impl<'a> EventResetStreamRun<'a> {
     #[must_use]
     pub const fn new(encoder: &'a mut encoder::EncoderStreamingState<'a>, decoder: &'a mut decoder::CodecStreamingState<'a>) -> Self { Self { encoder, decoder } }
 }
+/// Public top-level event accepted by the synchronous facade.
+pub enum MimiEvent<'a> {
+    /// Bind the prepared model and caller-owned arenas.
+    Init(InitRun<'a>),
+    /// Encode one PCM frame.
+    Encode(EncodeRun<'a>),
+    /// Decode one code prefix into one PCM frame.
+    Decode(DecodeRun<'a>),
+    /// Reset both streaming directions.
+    Reset(EventResetStreamRun<'a>),
+}
 
 sml! {
     SpeechCodecMimi {
@@ -394,7 +405,15 @@ impl SpeechCodecMimi {
     /// Constructs an actor in generated `state_uninitialized`.
     #[must_use]
     pub fn new() -> Self { Self { machine: SpeechCodecMimiStateMachine::new(SpeechCodecMimiContext::default()) } }
-    /// Dispatches initialize synchronously.
+    /// Dispatches one top-level event synchronously to completion.
+    pub fn process_event(&mut self, event: MimiEvent<'_>) -> Result<(), MimiError> {
+        match event {
+            MimiEvent::Init(event) => self.process_init(event),
+            MimiEvent::Encode(event) => self.process_encode(event),
+            MimiEvent::Decode(event) => self.process_decode(event),
+            MimiEvent::Reset(event) => self.process_reset(event),
+        }
+    }
     pub fn process_init(&mut self, event: InitRun<'_>) -> Result<(), MimiError> { self.machine.context_mut().clear(); if self.machine.process_event(SpeechCodecMimiEvents::InitRun(&event)).is_err() { self.machine.context_mut().error = MimiError::UnexpectedEvent; } self.result() }
     /// Dispatches encode synchronously.
     pub fn process_encode(&mut self, event: EncodeRun<'_>) -> Result<(), MimiError> { self.machine.context_mut().clear(); if self.machine.process_event(SpeechCodecMimiEvents::EncodeRun(&event)).is_err() { self.machine.context_mut().error = MimiError::UnexpectedEvent; } self.result() }
