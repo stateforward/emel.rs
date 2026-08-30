@@ -331,12 +331,11 @@ impl TextEncodersBpeStateMachineContext for TextEncodersBpeContext {
     fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
     fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
     fn merge_symbol_capacity_exceeded(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.len() > MAX_ENCODE_SYMBOLS) }
+    fn merge_symbol_capacity_within_limit(&self, event: &RuntimeEncodeRuntime<'event>) -> Result<bool, ()> { Ok(!self.merge_symbol_capacity_exceeded(event)?) }
     fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
     fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::Unexpected); self.mark_unexpected(); Ok(()) }
     fn on_unexpected_events_encoding_done(&mut self, _: &EventsEncodingDone) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
     fn on_unexpected_events_encoding_error(&mut self, _: &EventsEncodingError) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
-    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
-    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { Ok(()) }
     fn prepare_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let vocabulary = event.request.vocabulary; if vocabulary.token_count() > MAX_VOCAB_ENTRIES || vocabulary.merge_count() > MAX_VOCAB_MERGES { event.context.borrow_mut().error = EncoderError::ModelInvalid; } else { self.tables_ready = true; event.context.borrow_mut().error = EncoderError::None; } Ok(()) }
     fn preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.preprocessed) }
     fn reject_invalid_encode_from_encode_input_policy_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
@@ -362,7 +361,7 @@ fn reject_invalid(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.co
 fn ensure_last_error(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let mut context = event.context.borrow_mut(); if context.error == EncoderError::None { context.error = EncoderError::Backend; } Ok(()) }
 
 /// Synchronous bounded actor around the generated BPE machine.
-pub struct TextEncodersBpeActor<'event> { machine: TextEncodersBpeStateMachine<'event, TextEncodersBpeContext> }
+pub struct TextEncodersBpeActor<'event> { machine: TextEncodersBpeStateMachine<TextEncodersBpeContext> }
 impl<'event> Default for TextEncodersBpeActor<'event> { fn default() -> Self { Self::new() } }
 impl<'event> TextEncodersBpeActor<'event> {
     #[must_use] pub fn new() -> Self { Self { machine: TextEncodersBpeStateMachine::new(TextEncodersBpeContext::default()) } }

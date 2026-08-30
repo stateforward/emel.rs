@@ -13,7 +13,7 @@
     missing_docs
 )]
 
-use core::cell::RefCell;
+use sml::sml;
 
 /// Maximum bytes inspected in one WPM request.  The source scratch buffers are
 /// fixed-size; requests beyond this bound take the invalid-argument path.
