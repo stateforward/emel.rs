@@ -158,26 +158,26 @@ impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserCon
     fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
 
     // Source mapping: guards.hpp::token_is and guards.hpp::parse_failed.
-    fn parse_failed(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
-        Ok(!self.token_string_literal()?
-            && !self.token_character_class()?
-            && !self.token_rule_reference()?
-            && !self.token_dot()?
-            && !self.token_open_group()?
-            && !self.token_close_group()?
-            && !self.token_quantifier()?
-            && !self.token_alternation()?
-            && !self.token_newline()?)
+    fn parse_failed(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(!self.token_string_literal(event_data)?
+            && !self.token_character_class(event_data)?
+            && !self.token_rule_reference(event_data)?
+            && !self.token_dot(event_data)?
+            && !self.token_open_group(event_data)?
+            && !self.token_close_group(event_data)?
+            && !self.token_quantifier(event_data)?
+            && !self.token_alternation(event_data)?
+            && !self.token_newline(event_data)?)
     }
-    fn token_alternation(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Alternation)) }
-    fn token_character_class(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CharacterClass)) }
-    fn token_close_group(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CloseGroup)) }
-    fn token_dot(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Dot)) }
-    fn token_newline(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Newline)) }
-    fn token_open_group(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::OpenGroup)) }
-    fn token_quantifier(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Quantifier)) }
-    fn token_rule_reference(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::RuleReference)) }
-    fn token_string_literal(&self) -> Result<bool, ()> { Ok(self.token_is(TokenKind::StringLiteral)) }
+    fn token_alternation(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Alternation)) }
+    fn token_character_class(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CharacterClass)) }
+    fn token_close_group(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CloseGroup)) }
+    fn token_dot(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Dot)) }
+    fn token_newline(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Newline)) }
+    fn token_open_group(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::OpenGroup)) }
+    fn token_quantifier(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Quantifier)) }
+    fn token_rule_reference(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::RuleReference)) }
+    fn token_string_literal(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::StringLiteral)) }
 }
 
 
@@ -201,7 +201,8 @@ impl TermParser {
             self.machine.context_mut().error = Some(TermParserError::InternalError);
             return Err(TermParserError::InternalError);
         }
-        if self.machine.process_event(RuleParserEventParseRules { input }).is_err() {
+        self.machine.context_mut().set_input(input);
+        if self.machine.process_event(RuleParserEventParseRules).is_err() {
             self.machine.context_mut().error = Some(TermParserError::InternalError);
             return Err(TermParserError::InternalError);
         }
