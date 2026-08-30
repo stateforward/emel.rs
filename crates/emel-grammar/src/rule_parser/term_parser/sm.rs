@@ -114,7 +114,9 @@ impl GbnfRuleParserTermParserContext {
         self.error = None;
     }
 
-    fn token_is(&self, kind: TokenKind) -> bool { self.error.is_none() && self.has_token && self.token == kind }
+    fn token_is(&self, kind: TokenKind, event_data: &RuleParserEventParseRules) -> bool {
+        self.error.is_none() && event_data.input.has_token && event_data.input.token == kind
+    }
 
     fn consume(&mut self, kind: TermKind) -> Result<(), ()> {
         self.result = kind;
@@ -128,7 +130,6 @@ impl GbnfRuleParserTermParserContext {
         Ok(())
     }
 }
-
 
 impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserContext {
     // Source mapping: actions.hpp::consume_kind<term_kind::...>; actions only
@@ -157,7 +158,7 @@ impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserCon
     fn on_unexpected_from_unexpected_event(&mut self, _event_data: RuleParserEventParseRules) -> Result<(), ()> { self.unexpected() }
 
     // Source mapping: guards.hpp::token_is and guards.hpp::parse_failed.
-    fn parse_failed(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> {
+    fn parse_failed(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
         Ok(!self.token_string_literal(event_data)?
             && !self.token_character_class(event_data)?
             && !self.token_rule_reference(event_data)?
@@ -168,16 +169,17 @@ impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserCon
             && !self.token_alternation(event_data)?
             && !self.token_newline(event_data)?)
     }
-    fn token_alternation(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::Alternation) }
-    fn token_character_class(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::CharacterClass) }
-    fn token_close_group(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::CloseGroup) }
-    fn token_dot(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::Dot) }
-    fn token_newline(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::Newline) }
-    fn token_open_group(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::OpenGroup) }
-    fn token_quantifier(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::Quantifier) }
-    fn token_rule_reference(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::RuleReference) }
-    fn token_string_literal(&self, event_data: RuleParserEventParseRules) -> Result<bool, ()> { Ok(event_data.input.has_token && event_data.input.token == TokenKind::StringLiteral) }
+    fn token_alternation(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Alternation, event_data)) }
+    fn token_character_class(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CharacterClass, event_data)) }
+    fn token_close_group(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CloseGroup, event_data)) }
+    fn token_dot(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Dot, event_data)) }
+    fn token_newline(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Newline, event_data)) }
+    fn token_open_group(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::OpenGroup, event_data)) }
+    fn token_quantifier(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Quantifier, event_data)) }
+    fn token_rule_reference(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::RuleReference, event_data)) }
+    fn token_string_literal(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::StringLiteral, event_data)) }
 }
+
 
 /// Synchronous bounded term-token classifier actor.
 #[derive(Debug)]
