@@ -1,1010 +1,201 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Bounded, synchronous GBNF rule parser.
+//!
+//! The root actor mirrors the pinned rule-parser phases while keeping all
+//! storage inline. Lexing and token classification are delegated to sibling
+//! child actors; one dispatch runs to completion without queues.
 
-#![allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
+#![allow(dead_code, missing_docs, unused_imports)]
 
-use sml::sml;
+use super::lexer::{Cursor, EventScanNext, NextDone, NextError, TokenKind};
+use super::lexer::sm::GbnfRuleParserLexerStateMachine;
+use super::nonterm_parser::sm::{NontermParser, ParseMode, ParseOutcome as NontermOutcome};
+use crate::gbnf::{element, element_type, grammar, k_max_gbnf_elements, k_max_gbnf_rule_elements, k_max_gbnf_rules};
 
-// --- machine GbnfRuleParser from emel.cpp/src/emel/gbnf/rule_parser/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventParseRules;
+/// Maximum source bytes retained by one dispatch.
+pub const MAX_RULE_SOURCE_BYTES: usize = 65_536;
+/// Maximum nested groups accepted by the pinned parser.
+pub const MAX_GROUP_NESTING_DEPTH: usize = 32;
+const MAX_SYMBOL_NAME_BYTES: usize = 128;
+const MAX_REPETITION: usize = 2000;
+const MAX_SYMBOLS: usize = 2048;
 
-sml! {
-    GbnfRuleParser {
-        "expect_rule_name"_s <= *"ready"_s + event<EventParseRules> [valid_parse] / begin_parse,
-        "ready"_s <= "ready"_s + event<EventParseRules> [invalid_parse_with_dispatchable_grammar] / reject_invalid_parse_with_dispatch,
-        "ready"_s <= "ready"_s + event<EventParseRules> [invalid_parse_with_grammar_only] / reject_invalid_parse_with_grammar_only,
-        "ready"_s <= "ready"_s + event<EventParseRules> [invalid_parse_without_grammar] / reject_invalid_parse_without_grammar,
-        "expect_rule_name_decision"_s <= "expect_rule_name"_s + completion<EventParseRules> / request_next_token_from_expect_rule_name,
-        "parse_decision"_s <= "expect_rule_name_decision"_s + completion<EventParseRules> [lexer_failed],
-        "eof_symbols_decision"_s <= "expect_rule_name_decision"_s + completion<EventParseRules> [lexer_at_eof],
-        "nonterm_parser_model"_s <= "expect_rule_name_decision"_s + completion<EventParseRules> [token_identifier] / set_nonterm_mode_definition,
-        "expect_rule_name"_s <= "expect_rule_name_decision"_s + completion<EventParseRules> [token_newline],
-        "parse_decision"_s <= "expect_rule_name_decision"_s + completion<EventParseRules> / consume_token_invalid_from_expect_rule_name_decision,
-        "parse_decision"_s <= "nonterm_parser_model"_s + completion<EventParseRules> [nonterm_failed],
-        "expect_definition"_s <= "nonterm_parser_model"_s + completion<EventParseRules> [nonterm_definition_done] / apply_nonterm_definition,
-        "in_rule_expression_after_term"_s <= "nonterm_parser_model"_s + completion<EventParseRules> [nonterm_reference_done] / apply_nonterm_reference,
-        "parse_decision"_s <= "nonterm_parser_model"_s + completion<EventParseRules> / consume_token_invalid_from_nonterm_parser_model,
-        "expect_definition_decision"_s <= "expect_definition"_s + completion<EventParseRules> / request_next_token_from_expect_definition,
-        "parse_decision"_s <= "expect_definition_decision"_s + completion<EventParseRules> [lexer_failed],
-        "parse_decision"_s <= "expect_definition_decision"_s + completion<EventParseRules> [lexer_at_eof] / fail_eof_in_expect_definition,
-        "definition_parser_model"_s <= "expect_definition_decision"_s + completion<EventParseRules> [lexer_has_token],
-        "parse_decision"_s <= "expect_definition_decision"_s + completion<EventParseRules> / consume_token_invalid_from_expect_definition_decision,
-        "parse_decision"_s <= "definition_parser_model"_s + completion<EventParseRules> [definition_failed],
-        "in_rule_expression_need_term"_s <= "definition_parser_model"_s + completion<EventParseRules> [definition_done] / consume_token_definition_operator,
-        "parse_decision"_s <= "definition_parser_model"_s + completion<EventParseRules> / consume_token_invalid_from_definition_parser_model,
-        "in_rule_expression_need_term_decision"_s <= "in_rule_expression_need_term"_s + completion<EventParseRules> / request_next_token_from_in_rule_expression_need_term,
-        "parse_decision"_s <= "in_rule_expression_need_term_decision"_s + completion<EventParseRules> [lexer_failed],
-        "expression_parser_model"_s <= "in_rule_expression_need_term_decision"_s + completion<EventParseRules> [lexer_has_token] / set_term_origin_need_term,
-        "parse_decision"_s <= "in_rule_expression_need_term_decision"_s + completion<EventParseRules> / consume_token_invalid_from_in_rule_expression_need_term_decision,
-        "in_rule_expression_after_term_decision"_s <= "in_rule_expression_after_term"_s + completion<EventParseRules> / request_next_token_from_in_rule_expression_after_term,
-        "parse_decision"_s <= "in_rule_expression_after_term_decision"_s + completion<EventParseRules> [lexer_failed],
-        "eof_symbols_decision"_s <= "in_rule_expression_after_term_decision"_s + completion<EventParseRules> [eof_can_finalize_active_rule] / finalize_active_rule_on_eof_from_in_rule_expression_after_term_decision,
-        "parse_decision"_s <= "in_rule_expression_after_term_decision"_s + completion<EventParseRules> [eof_cannot_finalize_active_rule] / consume_token_invalid_from_in_rule_expression_after_term_decision,
-        "expression_parser_model"_s <= "in_rule_expression_after_term_decision"_s + completion<EventParseRules> [lexer_has_token] / set_term_origin_after_term,
-        "parse_decision"_s <= "in_rule_expression_after_term_decision"_s + completion<EventParseRules> / consume_token_invalid_from_in_rule_expression_after_term_decision,
-        "parse_decision"_s <= "expression_parser_model"_s + completion<EventParseRules> [expression_failed],
-        "nonterm_parser_model"_s <= "expression_parser_model"_s + completion<EventParseRules> [expression_done_identifier] / set_nonterm_mode_reference,
-        "term_parser_model"_s <= "expression_parser_model"_s + completion<EventParseRules> [expression_done_non_identifier],
-        "parse_decision"_s <= "expression_parser_model"_s + completion<EventParseRules> / consume_token_invalid_from_expression_parser_model,
-        "parse_decision"_s <= "term_parser_model"_s + completion<EventParseRules> [term_failed],
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_need_literal_valid] / consume_token_literal_from_term_parser_model,
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_need_character_class_valid] / consume_token_character_class_from_term_parser_model,
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_literal_valid] / consume_token_literal_from_term_parser_model,
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_character_class_valid] / consume_token_character_class_from_term_parser_model,
-        "rule_reference_decision"_s <= "term_parser_model"_s + completion<EventParseRules> [term_need_rule_reference_candidate],
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_need_dot_valid] / consume_token_dot_from_term_parser_model,
-        "in_rule_expression_need_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_need_open_group_valid] / consume_token_open_group_from_term_parser_model,
-        "in_rule_expression_need_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_need_newline_with_group_depth_nonzero],
-        "parse_decision"_s <= "term_parser_model"_s + completion<EventParseRules> [term_from_need_term] / consume_token_invalid_from_term_parser_model,
-        "rule_reference_decision"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_rule_reference_candidate],
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_dot_valid] / consume_token_dot_from_term_parser_model,
-        "in_rule_expression_need_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_open_group_valid] / consume_token_open_group_from_term_parser_model,
-        "in_rule_expression_need_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_alternation_valid] / consume_token_alternation,
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_newline_with_group_depth_nonzero],
-        "expect_rule_name"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_newline_with_group_depth_zero_valid] / finalize_active_rule_on_eof_from_term_parser_model,
-        "in_rule_expression_after_term"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_close_group_valid] / consume_token_close_group,
-        "quantifier_decision"_s <= "term_parser_model"_s + completion<EventParseRules> [term_after_quantifier_candidate],
-        "parse_decision"_s <= "term_parser_model"_s + completion<EventParseRules> [term_from_after_term] / consume_token_invalid_from_term_parser_model,
-        "rule_reference_plain_exec"_s <= "rule_reference_decision"_s + completion<EventParseRules> [rule_reference_plain_envelope_valid] / consume_token_rule_reference_plain,
-        "rule_reference_negated_exec"_s <= "rule_reference_decision"_s + completion<EventParseRules> [rule_reference_negated_envelope_valid] / consume_token_rule_reference_negated,
-        "parse_decision"_s <= "rule_reference_decision"_s + completion<EventParseRules> / consume_token_invalid_from_rule_reference_decision,
-        "in_rule_expression_after_term"_s <= "rule_reference_plain_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "rule_reference_plain_exec"_s + completion<EventParseRules> / consume_token_invalid_from_rule_reference_plain_exec,
-        "in_rule_expression_after_term"_s <= "rule_reference_negated_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "rule_reference_negated_exec"_s + completion<EventParseRules> / consume_token_invalid_from_rule_reference_negated_exec,
-        "quantifier_star_exec"_s <= "quantifier_decision"_s + completion<EventParseRules> [quantifier_token_star] / consume_token_quantifier_star,
-        "quantifier_plus_exec"_s <= "quantifier_decision"_s + completion<EventParseRules> [quantifier_token_plus] / consume_token_quantifier_plus,
-        "quantifier_question_exec"_s <= "quantifier_decision"_s + completion<EventParseRules> [quantifier_token_question] / consume_token_quantifier_question,
-        "quantifier_braced_exact_exec"_s <= "quantifier_decision"_s + completion<EventParseRules> [quantifier_braced_exact_shape] / consume_token_quantifier_braced_exact,
-        "quantifier_braced_open_exec"_s <= "quantifier_decision"_s + completion<EventParseRules> [quantifier_braced_open_shape] / consume_token_quantifier_braced_open,
-        "quantifier_braced_range_exec"_s <= "quantifier_decision"_s + completion<EventParseRules> [quantifier_braced_range_shape] / consume_token_quantifier_braced_range,
-        "parse_decision"_s <= "quantifier_decision"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_decision,
-        "in_rule_expression_after_term"_s <= "quantifier_star_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "quantifier_star_exec"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_star_exec,
-        "in_rule_expression_after_term"_s <= "quantifier_plus_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "quantifier_plus_exec"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_plus_exec,
-        "in_rule_expression_after_term"_s <= "quantifier_question_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "quantifier_question_exec"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_question_exec,
-        "in_rule_expression_after_term"_s <= "quantifier_braced_exact_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "quantifier_braced_exact_exec"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_braced_exact_exec,
-        "in_rule_expression_after_term"_s <= "quantifier_braced_open_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "quantifier_braced_open_exec"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_braced_open_exec,
-        "in_rule_expression_after_term"_s <= "quantifier_braced_range_exec"_s + completion<EventParseRules> [parse_error_none],
-        "parse_decision"_s <= "quantifier_braced_range_exec"_s + completion<EventParseRules> / consume_token_invalid_from_quantifier_braced_range_exec,
-        "parse_decision"_s <= "eof_symbols_decision"_s + completion<EventParseRules> [eof_can_finalize_symbols],
-        "parse_decision"_s <= "eof_symbols_decision"_s + completion<EventParseRules> [eof_cannot_finalize_symbols] / consume_token_invalid_from_eof_symbols_decision,
-        "ready"_s <= "parse_decision"_s + completion<EventParseRules> [parse_error_none] / dispatch_done,
-        "ready"_s <= "parse_decision"_s + completion<EventParseRules> [parse_error_invalid_request] / dispatch_error_from_parse_decision,
-        "ready"_s <= "parse_decision"_s + completion<EventParseRules> [parse_error_parse_failed] / dispatch_error_from_parse_decision,
-        "ready"_s <= "parse_decision"_s + completion<EventParseRules> [parse_error_internal_error] / dispatch_error_from_parse_decision,
-        "ready"_s <= "parse_decision"_s + completion<EventParseRules> [parse_error_untracked] / dispatch_error_from_parse_decision,
-        "ready"_s <= "parse_decision"_s + completion<EventParseRules> [parse_error_unknown] / dispatch_error_from_parse_decision,
-        "ready"_s <= "ready"_s + unexpected_event<_> / on_unexpected_from_ready,
-        "parse_decision"_s <= "expect_rule_name"_s + unexpected_event<_> / on_unexpected_from_expect_rule_name,
-        "parse_decision"_s <= "expect_rule_name_decision"_s + unexpected_event<_> / on_unexpected_from_expect_rule_name_decision,
-        "parse_decision"_s <= "expect_definition"_s + unexpected_event<_> / on_unexpected_from_expect_definition,
-        "parse_decision"_s <= "expect_definition_decision"_s + unexpected_event<_> / on_unexpected_from_expect_definition_decision,
-        "parse_decision"_s <= "in_rule_expression_need_term"_s + unexpected_event<_> / on_unexpected_from_in_rule_expression_need_term,
-        "parse_decision"_s <= "in_rule_expression_need_term_decision"_s + unexpected_event<_> / on_unexpected_from_in_rule_expression_need_term_decision,
-        "parse_decision"_s <= "in_rule_expression_after_term"_s + unexpected_event<_> / on_unexpected_from_in_rule_expression_after_term,
-        "parse_decision"_s <= "in_rule_expression_after_term_decision"_s + unexpected_event<_> / on_unexpected_from_in_rule_expression_after_term_decision,
-        "parse_decision"_s <= "rule_reference_decision"_s + unexpected_event<_> / on_unexpected_from_rule_reference_decision,
-        "parse_decision"_s <= "rule_reference_plain_exec"_s + unexpected_event<_> / on_unexpected_from_rule_reference_plain_exec,
-        "parse_decision"_s <= "rule_reference_negated_exec"_s + unexpected_event<_> / on_unexpected_from_rule_reference_negated_exec,
-        "parse_decision"_s <= "quantifier_decision"_s + unexpected_event<_> / on_unexpected_from_quantifier_decision,
-        "parse_decision"_s <= "quantifier_star_exec"_s + unexpected_event<_> / on_unexpected_from_quantifier_star_exec,
-        "parse_decision"_s <= "quantifier_plus_exec"_s + unexpected_event<_> / on_unexpected_from_quantifier_plus_exec,
-        "parse_decision"_s <= "quantifier_question_exec"_s + unexpected_event<_> / on_unexpected_from_quantifier_question_exec,
-        "parse_decision"_s <= "quantifier_braced_exact_exec"_s + unexpected_event<_> / on_unexpected_from_quantifier_braced_exact_exec,
-        "parse_decision"_s <= "quantifier_braced_open_exec"_s + unexpected_event<_> / on_unexpected_from_quantifier_braced_open_exec,
-        "parse_decision"_s <= "quantifier_braced_range_exec"_s + unexpected_event<_> / on_unexpected_from_quantifier_braced_range_exec,
-        "parse_decision"_s <= "eof_symbols_decision"_s + unexpected_event<_> / on_unexpected_from_eof_symbols_decision,
-        "ready"_s <= "parse_decision"_s + unexpected_event<_> / on_unexpected_from_parse_decision,
-    }
+/// Root parser request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EventParseRules<'a> { pub source: &'a str }
+
+/// Bounded result of one root parser dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParseOutcome { Parsed, InvalidRequest, ParseFailed, InternalError, Unexpected }
+
+/// Generated topology state inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GbnfRuleParserStates {
+    Ready, ExpectRuleName, ExpectRuleNameDecision, ExpectDefinition,
+    ExpectDefinitionDecision, InRuleExpressionNeedTerm,
+    InRuleExpressionNeedTermDecision, InRuleExpressionAfterTerm,
+    InRuleExpressionAfterTermDecision, RuleReferenceDecision,
+    RuleReferencePlainExec, RuleReferenceNegatedExec, QuantifierDecision,
+    QuantifierStarExec, QuantifierPlusExec, QuantifierQuestionExec,
+    QuantifierBracedExactExec, QuantifierBracedOpenExec,
+    QuantifierBracedRangeExec, EofSymbolsDecision, ParseDecision,
+    UnexpectedEvent,
 }
 
-/// Context for `GbnfRuleParser` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
+struct GroupFrame { sequence_start: u16, generated_rule_id: u16 }
+
+#[derive(Clone, Copy, Debug)]
+struct SymbolEntry { hash: u32, id: u32, len: u16, bytes: [u8; MAX_SYMBOL_NAME_BYTES], occupied: bool, defined: bool }
+impl Default for SymbolEntry {
+    fn default() -> Self { Self { hash: 0, id: 0, len: 0, bytes: [0; MAX_SYMBOL_NAME_BYTES], occupied: false, defined: false } }
+}
+
+/// Context retained by the bounded root actor.
+#[derive(Debug)]
 pub struct GbnfRuleParserContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    source: [u8; MAX_RULE_SOURCE_BYTES], source_len: usize,
+    cursor_offset: u32, cursor_token_count: u32,
+    token_kind: TokenKind, token_start: usize, token_end: usize, has_token: bool,
+    current_rule: [element; k_max_gbnf_rule_elements], repeat_scratch: [element; k_max_gbnf_rule_elements],
+    current_rule_size: usize, current_rule_id: u32, last_sym_start: usize,
+    groups: [GroupFrame; MAX_GROUP_NESTING_DEPTH], group_depth: usize,
+    symbols: [SymbolEntry; MAX_SYMBOLS], symbol_count: usize,
+    rule_defined: [bool; k_max_gbnf_rules], next_symbol_id: u32,
 }
 
-impl GbnfRuleParserStateMachineContext for GbnfRuleParserContext {
-    fn apply_nonterm_definition(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::apply_nonterm_definition
-        todo!(
-            "TODO: port action `apply_nonterm_definition` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn apply_nonterm_reference(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::apply_nonterm_reference
-        todo!(
-            "TODO: port action `apply_nonterm_reference` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn begin_parse(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::begin_parse
-        todo!("TODO: port action `begin_parse` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp")
-    }
-    fn consume_token_alternation(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_alternation
-        todo!(
-            "TODO: port action `consume_token_alternation` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_character_class_from_term_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_character_class
-        todo!(
-            "TODO: port action `consume_token_character_class` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_close_group(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_close_group
-        todo!(
-            "TODO: port action `consume_token_close_group` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_definition_operator(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_definition_operator
-        todo!(
-            "TODO: port action `consume_token_definition_operator` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_dot_from_term_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_dot
-        todo!(
-            "TODO: port action `consume_token_dot` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_definition_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_eof_symbols_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_expect_definition_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_expect_rule_name_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_expression_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_in_rule_expression_after_term_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_in_rule_expression_need_term_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_nonterm_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_braced_exact_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_braced_open_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_braced_range_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_plus_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_question_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_quantifier_star_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_rule_reference_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_rule_reference_negated_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_rule_reference_plain_exec(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_invalid_from_term_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_invalid
-        todo!(
-            "TODO: port action `consume_token_invalid` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_literal_from_term_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_literal
-        todo!(
-            "TODO: port action `consume_token_literal` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_open_group_from_term_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_open_group
-        todo!(
-            "TODO: port action `consume_token_open_group` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_quantifier_braced_exact(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_quantifier_braced_exact
-        todo!(
-            "TODO: port action `consume_token_quantifier_braced_exact` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_quantifier_braced_open(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_quantifier_braced_open
-        todo!(
-            "TODO: port action `consume_token_quantifier_braced_open` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_quantifier_braced_range(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_quantifier_braced_range
-        todo!(
-            "TODO: port action `consume_token_quantifier_braced_range` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_quantifier_plus(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_quantifier_plus
-        todo!(
-            "TODO: port action `consume_token_quantifier_plus` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_quantifier_question(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_quantifier_question
-        todo!(
-            "TODO: port action `consume_token_quantifier_question` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_quantifier_star(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_quantifier_star
-        todo!(
-            "TODO: port action `consume_token_quantifier_star` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_rule_reference_negated(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_rule_reference_negated
-        todo!(
-            "TODO: port action `consume_token_rule_reference_negated` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn consume_token_rule_reference_plain(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::consume_token_rule_reference_plain
-        todo!(
-            "TODO: port action `consume_token_rule_reference_plain` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn definition_done(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::definition_done
-        todo!(
-            "TODO: port guard `definition_done` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn definition_failed(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::definition_failed
-        todo!(
-            "TODO: port guard `definition_failed` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn dispatch_done(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::dispatch_done
-        todo!(
-            "TODO: port action `dispatch_done` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn dispatch_error_from_parse_decision(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::dispatch_error
-        todo!(
-            "TODO: port action `dispatch_error` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn eof_can_finalize_active_rule(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::eof_can_finalize_active_rule
-        todo!(
-            "TODO: port guard `eof_can_finalize_active_rule` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn eof_can_finalize_symbols(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::eof_can_finalize_symbols
-        todo!(
-            "TODO: port guard `eof_can_finalize_symbols` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn eof_cannot_finalize_active_rule(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::eof_cannot_finalize_active_rule
-        todo!(
-            "TODO: port guard `eof_cannot_finalize_active_rule` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn eof_cannot_finalize_symbols(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::eof_cannot_finalize_symbols
-        todo!(
-            "TODO: port guard `eof_cannot_finalize_symbols` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn expression_done_identifier(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::expression_done_identifier
-        todo!(
-            "TODO: port guard `expression_done_identifier` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn expression_done_non_identifier(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::expression_done_non_identifier
-        todo!(
-            "TODO: port guard `expression_done_non_identifier` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn expression_failed(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::expression_failed
-        todo!(
-            "TODO: port guard `expression_failed` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn fail_eof_in_expect_definition(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::fail_eof_in_expect_definition
-        todo!(
-            "TODO: port action `fail_eof_in_expect_definition` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn finalize_active_rule_on_eof_from_in_rule_expression_after_term_decision(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::finalize_active_rule_on_eof
-        todo!(
-            "TODO: port action `finalize_active_rule_on_eof` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn finalize_active_rule_on_eof_from_term_parser_model(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::finalize_active_rule_on_eof
-        todo!(
-            "TODO: port action `finalize_active_rule_on_eof` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn invalid_parse_with_dispatchable_grammar(
-        &self,
-        _event: &EventParseRules,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::invalid_parse_with_dispatchable_grammar
-        todo!(
-            "TODO: port guard `invalid_parse_with_dispatchable_grammar` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn invalid_parse_with_grammar_only(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::invalid_parse_with_grammar_only
-        todo!(
-            "TODO: port guard `invalid_parse_with_grammar_only` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn invalid_parse_without_grammar(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::invalid_parse_without_grammar
-        todo!(
-            "TODO: port guard `invalid_parse_without_grammar` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn lexer_at_eof(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::lexer_at_eof
-        todo!("TODO: port guard `lexer_at_eof` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp")
-    }
-    fn lexer_failed(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::lexer_failed
-        todo!("TODO: port guard `lexer_failed` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp")
-    }
-    fn lexer_has_token(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::lexer_has_token
-        todo!(
-            "TODO: port guard `lexer_has_token` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn nonterm_definition_done(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::nonterm_definition_done
-        todo!(
-            "TODO: port guard `nonterm_definition_done` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn nonterm_failed(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::nonterm_failed
-        todo!(
-            "TODO: port guard `nonterm_failed` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn nonterm_reference_done(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::nonterm_reference_done
-        todo!(
-            "TODO: port guard `nonterm_reference_done` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn on_unexpected_from_eof_symbols_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_expect_definition(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_expect_definition_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_expect_rule_name(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_expect_rule_name_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_in_rule_expression_after_term(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_in_rule_expression_after_term_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_in_rule_expression_need_term(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_in_rule_expression_need_term_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_parse_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_braced_exact_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_braced_open_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_braced_range_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_plus_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_question_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_quantifier_star_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_ready(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_rule_reference_decision(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_rule_reference_negated_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_rule_reference_plain_exec(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn parse_error_internal_error(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::parse_error_internal_error
-        todo!(
-            "TODO: port guard `parse_error_internal_error` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn parse_error_invalid_request(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::parse_error_invalid_request
-        todo!(
-            "TODO: port guard `parse_error_invalid_request` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn parse_error_none(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::parse_error_none
-        todo!(
-            "TODO: port guard `parse_error_none` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn parse_error_parse_failed(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::parse_error_parse_failed
-        todo!(
-            "TODO: port guard `parse_error_parse_failed` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn parse_error_unknown(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::parse_error_unknown
-        todo!(
-            "TODO: port guard `parse_error_unknown` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn parse_error_untracked(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::parse_error_untracked
-        todo!(
-            "TODO: port guard `parse_error_untracked` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn quantifier_braced_exact_shape(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_braced_exact_shape
-        todo!(
-            "TODO: port guard `quantifier_braced_exact_shape` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn quantifier_braced_open_shape(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_braced_open_shape
-        todo!(
-            "TODO: port guard `quantifier_braced_open_shape` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn quantifier_braced_range_shape(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_braced_range_shape
-        todo!(
-            "TODO: port guard `quantifier_braced_range_shape` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn quantifier_token_plus(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_token_plus
-        todo!(
-            "TODO: port guard `quantifier_token_plus` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn quantifier_token_question(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_token_question
-        todo!(
-            "TODO: port guard `quantifier_token_question` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn quantifier_token_star(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::portable::quantifier_token_star
-        todo!(
-            "TODO: port guard `quantifier_token_star` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn reject_invalid_parse_with_dispatch(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::reject_invalid_parse_with_dispatch
-        todo!(
-            "TODO: port action `reject_invalid_parse_with_dispatch` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn reject_invalid_parse_with_grammar_only(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::reject_invalid_parse_with_grammar_only
-        todo!(
-            "TODO: port action `reject_invalid_parse_with_grammar_only` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn reject_invalid_parse_without_grammar(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::reject_invalid_parse_without_grammar
-        todo!(
-            "TODO: port action `reject_invalid_parse_without_grammar` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn request_next_token_from_expect_definition(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::request_next_token
-        todo!(
-            "TODO: port action `request_next_token` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn request_next_token_from_expect_rule_name(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::request_next_token
-        todo!(
-            "TODO: port action `request_next_token` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn request_next_token_from_in_rule_expression_after_term(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::request_next_token
-        todo!(
-            "TODO: port action `request_next_token` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn request_next_token_from_in_rule_expression_need_term(
-        &mut self,
-        _event: &EventParseRules,
-    ) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::request_next_token
-        todo!(
-            "TODO: port action `request_next_token` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn rule_reference_negated_envelope_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::rule_reference_negated_envelope_valid
-        todo!(
-            "TODO: port guard `rule_reference_negated_envelope_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn rule_reference_plain_envelope_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::rule_reference_plain_envelope_valid
-        todo!(
-            "TODO: port guard `rule_reference_plain_envelope_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn set_nonterm_mode_definition(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::set_nonterm_mode_definition
-        todo!(
-            "TODO: port action `set_nonterm_mode_definition` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn set_nonterm_mode_reference(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::set_nonterm_mode_reference
-        todo!(
-            "TODO: port action `set_nonterm_mode_reference` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn set_term_origin_after_term(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::set_term_origin_after_term
-        todo!(
-            "TODO: port action `set_term_origin_after_term` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn set_term_origin_need_term(&mut self, _event: &EventParseRules) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp::set_term_origin_need_term
-        todo!(
-            "TODO: port action `set_term_origin_need_term` from emel.cpp/src/emel/gbnf/rule_parser/actions.hpp"
-        )
-    }
-    fn term_after_alternation_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_alternation_valid
-        todo!(
-            "TODO: port guard `term_after_alternation_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_character_class_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_character_class_valid
-        todo!(
-            "TODO: port guard `term_after_character_class_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_close_group_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_close_group_valid
-        todo!(
-            "TODO: port guard `term_after_close_group_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_dot_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_dot_valid
-        todo!(
-            "TODO: port guard `term_after_dot_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_literal_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_literal_valid
-        todo!(
-            "TODO: port guard `term_after_literal_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_newline_with_group_depth_nonzero(
-        &self,
-        _event: &EventParseRules,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_newline_with_group_depth_nonzero
-        todo!(
-            "TODO: port guard `term_after_newline_with_group_depth_nonzero` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_newline_with_group_depth_zero_valid(
-        &self,
-        _event: &EventParseRules,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_newline_with_group_depth_zero_valid
-        todo!(
-            "TODO: port guard `term_after_newline_with_group_depth_zero_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_open_group_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_open_group_valid
-        todo!(
-            "TODO: port guard `term_after_open_group_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_quantifier_candidate(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_quantifier_candidate
-        todo!(
-            "TODO: port guard `term_after_quantifier_candidate` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_after_rule_reference_candidate(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_after_rule_reference_candidate
-        todo!(
-            "TODO: port guard `term_after_rule_reference_candidate` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_failed(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_failed
-        todo!("TODO: port guard `term_failed` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp")
-    }
-    fn term_from_after_term(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_from_after_term
-        todo!(
-            "TODO: port guard `term_from_after_term` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_from_need_term(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_from_need_term
-        todo!(
-            "TODO: port guard `term_from_need_term` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_need_character_class_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_need_character_class_valid
-        todo!(
-            "TODO: port guard `term_need_character_class_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_need_dot_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_need_dot_valid
-        todo!(
-            "TODO: port guard `term_need_dot_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_need_literal_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_need_literal_valid
-        todo!(
-            "TODO: port guard `term_need_literal_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_need_newline_with_group_depth_nonzero(
-        &self,
-        _event: &EventParseRules,
-    ) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_need_newline_with_group_depth_nonzero
-        todo!(
-            "TODO: port guard `term_need_newline_with_group_depth_nonzero` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_need_open_group_valid(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_need_open_group_valid
-        todo!(
-            "TODO: port guard `term_need_open_group_valid` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn term_need_rule_reference_candidate(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::term_need_rule_reference_candidate
-        todo!(
-            "TODO: port guard `term_need_rule_reference_candidate` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn token_identifier(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::token_identifier
-        todo!(
-            "TODO: port guard `token_identifier` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp"
-        )
-    }
-    fn token_newline(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::token_newline
-        todo!("TODO: port guard `token_newline` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp")
-    }
-    fn valid_parse(&self, _event: &EventParseRules) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp::valid_parse
-        todo!("TODO: port guard `valid_parse` from emel.cpp/src/emel/gbnf/rule_parser/guards.hpp")
+impl Default for GbnfRuleParserContext {
+    fn default() -> Self { Self {
+        source: [0; MAX_RULE_SOURCE_BYTES], source_len: 0, cursor_offset: 0, cursor_token_count: 0,
+        token_kind: TokenKind::Unknown, token_start: 0, token_end: 0, has_token: false,
+        current_rule: [element::default(); k_max_gbnf_rule_elements], repeat_scratch: [element::default(); k_max_gbnf_rule_elements],
+        current_rule_size: 0, current_rule_id: 0, last_sym_start: 0,
+        groups: [GroupFrame::default(); MAX_GROUP_NESTING_DEPTH], group_depth: 0,
+        symbols: [SymbolEntry::default(); MAX_SYMBOLS], symbol_count: 0,
+        rule_defined: [false; k_max_gbnf_rules], next_symbol_id: 0,
+    } }
+}
+
+impl GbnfRuleParserContext {
+    fn reset(&mut self, source: &str) -> bool {
+        if source.is_empty() || source.len() > MAX_RULE_SOURCE_BYTES { return false; }
+        self.source[..source.len()].copy_from_slice(source.as_bytes()); self.source_len = source.len();
+        self.cursor_offset = 0; self.cursor_token_count = 0; self.token_kind = TokenKind::Unknown;
+        self.token_start = 0; self.token_end = 0; self.has_token = false; self.current_rule_size = 0;
+        self.current_rule_id = 0; self.last_sym_start = 0; self.group_depth = 0;
+        self.symbols.fill(SymbolEntry::default()); self.symbol_count = 0;
+        self.rule_defined.fill(false); self.next_symbol_id = 0; true
+    }
+    fn source(&self) -> &str { core::str::from_utf8(&self.source[..self.source_len]).unwrap_or("") }
+    fn text(&self) -> &str { self.source().get(self.token_start..self.token_end).unwrap_or("") }
+    fn push(&mut self, item: element) -> bool {
+        if self.current_rule_size >= k_max_gbnf_rule_elements { false } else { self.current_rule[self.current_rule_size] = item; self.current_rule_size += 1; true }
+    }
+    fn hash(name: &[u8]) -> u32 { let mut h = 2_166_136_261u32; for b in name { h = (h ^ u32::from(*b)).wrapping_mul(16_777_619); } if h == 0 { 1 } else { h } }
+    fn symbol(&mut self, name: &[u8], definition: bool) -> Option<u32> {
+        if name.is_empty() || name.len() > MAX_SYMBOL_NAME_BYTES { return None; }
+        let hash = Self::hash(name);
+        for entry in &mut self.symbols[..self.symbol_count] {
+            if entry.occupied && entry.hash == hash && entry.len as usize == name.len() && entry.bytes[..name.len()] == *name {
+                if definition && entry.defined { return None; }
+                entry.defined |= definition; self.rule_defined[entry.id as usize] |= definition; return Some(entry.id);
+            }
+        }
+        if self.symbol_count >= MAX_SYMBOLS || self.next_symbol_id as usize >= k_max_gbnf_rules { return None; }
+        let id = self.next_symbol_id; self.next_symbol_id += 1;
+        let entry = &mut self.symbols[self.symbol_count]; entry.hash = hash; entry.id = id; entry.len = name.len() as u16; entry.bytes[..name.len()].copy_from_slice(name); entry.occupied = true; entry.defined = definition;
+        self.rule_defined[id as usize] = definition; self.symbol_count += 1; Some(id)
+    }
+    fn append_rule(&mut self, out: &mut grammar, id: u32) -> bool {
+        if id as usize >= k_max_gbnf_rules || self.current_rule_size == 0 || out.rule_lengths[id as usize] != 0 { return false; }
+        let offset = out.element_count as usize; let Some(end) = offset.checked_add(self.current_rule_size) else { return false; }; if end > k_max_gbnf_elements { return false; }
+        out.elements[offset..end].copy_from_slice(&self.current_rule[..self.current_rule_size]); out.rule_offsets[id as usize] = offset as u32; out.rule_lengths[id as usize] = self.current_rule_size as u32; out.element_count = end as u32; out.rule_count = out.rule_count.max(id + 1); true
+    }
+    fn finalize(&mut self, out: &mut grammar) -> bool {
+        if self.group_depth != 0 || self.current_rule_size == 0 || !self.push(element { r#type: element_type::end, value: 0 }) { return false }
+        let ok = self.append_rule(out, self.current_rule_id); self.current_rule_size = 0; self.last_sym_start = 0; ok
     }
 }
+
+/// Synchronous bounded root parser actor.
+pub struct GbnfRuleParserActor { state: GbnfRuleParserStates, context: GbnfRuleParserContext, grammar: grammar, lexer: GbnfRuleParserLexerStateMachine }
+impl Default for GbnfRuleParserActor { fn default() -> Self { Self::new() } }
+impl GbnfRuleParserActor {
+    /// Creates an actor in the generated ready state.
+    #[must_use] pub fn new() -> Self { Self { state: GbnfRuleParserStates::Ready, context: GbnfRuleParserContext::default(), grammar: grammar::default(), lexer: GbnfRuleParserLexerStateMachine::default() } }
+    /// Parses one source in a single run-to-completion dispatch.
+    pub fn process_event(&mut self, event: EventParseRules<'_>) -> ParseOutcome {
+        if self.state != GbnfRuleParserStates::Ready { return ParseOutcome::InternalError; }
+        if !self.context.reset(event.source) { return ParseOutcome::InvalidRequest; }
+        self.grammar.reset(); self.state = GbnfRuleParserStates::ExpectRuleName;
+        let outcome = self.run(); self.state = GbnfRuleParserStates::Ready; outcome
+    }
+    /// Convenience source parser.
+    pub fn parse(&mut self, source: &str) -> ParseOutcome { self.process_event(EventParseRules { source }) }
+    /// Returns generated state inspection.
+    #[must_use] pub fn state(&self) -> &GbnfRuleParserStates { &self.state }
+    /// Tests generated state identity.
+    #[must_use] pub fn is(&self, state: &GbnfRuleParserStates) -> bool { self.state == *state }
+    /// Returns parsed fixed-capacity grammar storage.
+    #[must_use] pub fn grammar(&self) -> &grammar { &self.grammar }
+    /// Returns bounded context inspection.
+    #[must_use] pub fn context(&self) -> &GbnfRuleParserContext { &self.context }
+    /// Reports an explicit unexpected event.
+    pub fn process_unexpected_event(&mut self) -> ParseOutcome { self.state = GbnfRuleParserStates::UnexpectedEvent; ParseOutcome::Unexpected }
+
+    fn next_token(&mut self) -> Result<bool, ParseOutcome> {
+        let cursor = Cursor { input: self.context.source(), offset: self.context.cursor_offset, token_count: self.context.cursor_token_count };
+        let mut got = (false, TokenKind::Unknown, 0usize, 0usize, cursor.offset, cursor.token_count);
+        let mut done = |event: NextDone<'_>| { got = (event.has_token, event.token.kind, event.token.start as usize, event.token.end as usize, event.next_cursor.offset, event.next_cursor.token_count); true };
+        let mut error = |_event: NextError| false;
+        if !self.lexer.process_event(EventScanNext::new(cursor, &mut done, &mut error)) { return Err(ParseOutcome::InternalError); }
+        self.context.has_token = got.0; self.context.token_kind = got.1; self.context.token_start = got.2; self.context.token_end = got.3; self.context.cursor_offset = got.4; self.context.cursor_token_count = got.5; Ok(got.0)
+    }
+    fn classify_nonterm(&mut self, mode: ParseMode) -> Result<u32, ParseOutcome> {
+        let text = self.context.text(); let mut child = NontermParser::new();
+        if !matches!(child.classify(mode, text), NontermOutcome::Parsed { .. }) { return Err(ParseOutcome::ParseFailed); }
+        self.context.symbol(text.as_bytes(), mode == ParseMode::Definition).ok_or(ParseOutcome::ParseFailed)
+    }
+    fn parse_char(bytes: &[u8], pos: usize, end: usize) -> Option<(u32, usize)> {
+        if pos >= end { return None; }
+        if bytes[pos] != b'\\' { let s = core::str::from_utf8(&bytes[pos..end]).ok()?; let c = s.chars().next()?; return Some((c as u32, pos + c.len_utf8())); }
+        if pos + 1 >= end { return None; }
+        match bytes[pos + 1] { b'n' => Some((10, pos+2)), b'r' => Some((13, pos+2)), b't' => Some((9, pos+2)), b'\\'|b'"'|b'['|b']' => Some((bytes[pos+1] as u32, pos+2)), b'x'|b'u'|b'U' => { let count = if bytes[pos+1] == b'x' { 2 } else if bytes[pos+1] == b'u' { 4 } else { 8 }; if pos + 2 + count > end { return None; } let mut value=0u32; let mut i=pos+2; while i < pos+2+count { let d=match bytes[i] { b'0'..=b'9'=>bytes[i]-b'0', b'a'..=b'f'=>bytes[i]-b'a'+10, b'A'..=b'F'=>bytes[i]-b'A'+10, _=>return None }; value=value.checked_mul(16)?.checked_add(u32::from(d))?; i+=1; } Some((value,pos+2+count)) }, _ => None }
+    }
+    fn consume_literal(&mut self) -> bool {
+        let bytes=self.context.text().as_bytes(); if bytes.len()<2 || bytes[0]!=b'"' || bytes[bytes.len()-1]!=b'"' { return false; }
+        self.context.last_sym_start=self.context.current_rule_size; let mut pos=1; while pos+1<bytes.len() { let Some((value,next))=Self::parse_char(bytes,pos,bytes.len()-1) else{return false}; if !self.context.push(element{r#type:element_type::character,value}){return false}; pos=next; } pos==bytes.len()-1
+    }
+    fn consume_class(&mut self) -> bool {
+        let bytes=self.context.text().as_bytes(); if bytes.len()<3 || bytes[0]!=b'[' || bytes[bytes.len()-1]!=b']' { return false; }
+        self.context.last_sym_start=self.context.current_rule_size; let end=bytes.len()-1; let mut pos=1; let negated=bytes[pos]==b'^'; if negated{pos+=1}; let mut first=true;
+        while pos<end { let Some((value,next))=Self::parse_char(bytes,pos,end) else{return false}; if !self.context.push(element{r#type:if negated&&first{element_type::char_not}else{element_type::char_alt},value}){return false}; first=false; pos=next; if pos+1<end&&bytes[pos]==b'-' { pos+=1; let Some((upper,next_upper))=Self::parse_char(bytes,pos,end) else{return false}; if !self.context.push(element{r#type:element_type::char_rng_upper,value:upper}){return false}; pos=next_upper; } }
+        !first
+    }
+    fn quantifier_bounds(text:&str)->Option<(usize,usize)> { if text=="*"{return Some((0,usize::MAX))} if text=="+"{return Some((1,usize::MAX))} if text=="?"{return Some((0,1))} if !text.starts_with('{')||!text.ends_with('}') {return None} let core=&text[1..text.len()-1]; match core.find(',') { None=>{let n=core.parse().ok()?;Some((n,n))}, Some(i)=>{let min=core[..i].parse().ok()?;let max=if i+1==core.len(){usize::MAX}else{core[i+1..].parse().ok()?};Some((min,max))} } }
+    fn apply_quantifier(&mut self) -> bool {
+        let Some((min,max))=Self::quantifier_bounds(self.context.text()) else{return false}; if min>MAX_REPETITION||(max!=usize::MAX&&(max>MAX_REPETITION||max<min))||self.context.last_sym_start==self.context.current_rule_size{return false};
+        let start=self.context.last_sym_start; let len=self.context.current_rule_size-start; self.context.repeat_scratch[..len].copy_from_slice(&self.context.current_rule[start..start+len]);
+        if min==0 {self.context.current_rule_size=start} else {for _ in 1..min {if self.context.current_rule_size+len>k_max_gbnf_rule_elements{return false}; let end=self.context.current_rule_size+len; self.context.current_rule[end-len..end].copy_from_slice(&self.context.repeat_scratch[..len]); self.context.current_rule_size=end;}}
+        let optional=if max==usize::MAX{1}else{max-min}; let mut last=0u32;
+        for index in 0..optional { if self.context.next_symbol_id as usize>=k_max_gbnf_rules{return false}; let id=self.context.next_symbol_id; self.context.next_symbol_id+=1; self.context.rule_defined[id as usize]=true; let mut count=len; if index>0||max==usize::MAX {self.context.repeat_scratch[count]=element{r#type:element_type::rule_ref,value:if max==usize::MAX{id}else{last}};count+=1}; self.context.repeat_scratch[count]=element{r#type:element_type::alt,value:0};count+=1;self.context.repeat_scratch[count]=element{r#type:element_type::end,value:0};count+=1; if self.grammar.element_count as usize+count>k_max_gbnf_elements{return false}; let offset=self.grammar.element_count as usize; self.grammar.elements[offset..offset+count].copy_from_slice(&self.context.repeat_scratch[..count]);self.grammar.rule_offsets[id as usize]=offset as u32;self.grammar.rule_lengths[id as usize]=count as u32;self.grammar.element_count+=count as u32;self.grammar.rule_count=self.grammar.rule_count.max(id+1);last=id; }
+        optional==0 || self.context.push(element{r#type:element_type::rule_ref,value:last})
+    }
+    fn run(&mut self) -> ParseOutcome {
+        loop {
+            let has=match self.next_token(){Ok(x)=>x,Err(e)=>return e};
+            if !has { if self.state==GbnfRuleParserStates::InRuleExpressionAfterTerm&&!self.context.finalize(&mut self.grammar){return ParseOutcome::ParseFailed}; if self.state==GbnfRuleParserStates::ExpectRuleName&&self.grammar.rule_count==0{return ParseOutcome::ParseFailed}; if self.state!=GbnfRuleParserStates::ExpectRuleName&&self.state!=GbnfRuleParserStates::InRuleExpressionAfterTerm{return ParseOutcome::ParseFailed}; for entry in &self.context.symbols[..self.context.symbol_count]{if entry.occupied&&!entry.defined{return ParseOutcome::ParseFailed}} return ParseOutcome::Parsed; }
+            match self.state {
+                GbnfRuleParserStates::ExpectRuleName => match self.context.token_kind { TokenKind::Newline=>{}, TokenKind::Identifier=>match self.classify_nonterm(ParseMode::Definition){Ok(id)=>{self.context.current_rule_id=id;self.state=GbnfRuleParserStates::ExpectDefinition},Err(e)=>return e}, _=>return ParseOutcome::ParseFailed },
+                GbnfRuleParserStates::ExpectDefinition => {if self.context.token_kind!=TokenKind::DefinitionOperator{return ParseOutcome::ParseFailed};self.context.current_rule_size=0;self.context.group_depth=0;self.state=GbnfRuleParserStates::InRuleExpressionNeedTerm},
+                GbnfRuleParserStates::InRuleExpressionNeedTerm => match self.context.token_kind { TokenKind::Newline=>{if self.context.group_depth==0{return ParseOutcome::ParseFailed}}, TokenKind::Identifier=>{let id=match self.classify_nonterm(ParseMode::Reference){Ok(x)=>x,Err(e)=>return e};self.context.last_sym_start=self.context.current_rule_size;if !self.context.push(element{r#type:element_type::rule_ref,value:id}){return ParseOutcome::ParseFailed};self.state=GbnfRuleParserStates::InRuleExpressionAfterTerm},TokenKind::StringLiteral=>{if !self.consume_literal(){return ParseOutcome::ParseFailed};self.state=GbnfRuleParserStates::InRuleExpressionAfterTerm},TokenKind::CharacterClass=>{if !self.consume_class(){return ParseOutcome::ParseFailed};self.state=GbnfRuleParserStates::InRuleExpressionAfterTerm},TokenKind::Dot=>{self.context.last_sym_start=self.context.current_rule_size;if !self.context.push(element{r#type:element_type::char_any,value:0}){return ParseOutcome::ParseFailed};self.state=GbnfRuleParserStates::InRuleExpressionAfterTerm},TokenKind::OpenGroup=>{if self.context.group_depth>=MAX_GROUP_NESTING_DEPTH||self.context.next_symbol_id as usize>=k_max_gbnf_rules{return ParseOutcome::ParseFailed};let id=self.context.next_symbol_id;self.context.next_symbol_id+=1;self.context.rule_defined[id as usize]=true;self.context.groups[self.context.group_depth]=GroupFrame{sequence_start:self.context.current_rule_size as u16,generated_rule_id:id as u16};self.context.group_depth+=1},_=>return ParseOutcome::ParseFailed},
+                GbnfRuleParserStates::InRuleExpressionAfterTerm => match self.context.token_kind { TokenKind::Newline=>{if !self.context.finalize(&mut self.grammar){return ParseOutcome::ParseFailed};self.state=GbnfRuleParserStates::ExpectRuleName},TokenKind::Alternation=>{if !self.context.push(element{r#type:element_type::alt,value:0}){return ParseOutcome::ParseFailed};self.state=GbnfRuleParserStates::InRuleExpressionNeedTerm},TokenKind::Quantifier=>{if !self.apply_quantifier(){return ParseOutcome::ParseFailed}},TokenKind::StringLiteral=>{if !self.consume_literal(){return ParseOutcome::ParseFailed}},TokenKind::CharacterClass=>{if !self.consume_class(){return ParseOutcome::ParseFailed}},TokenKind::Dot=>{self.context.last_sym_start=self.context.current_rule_size;if !self.context.push(element{r#type:element_type::char_any,value:0}){return ParseOutcome::ParseFailed}},TokenKind::Identifier=>{let id=match self.classify_nonterm(ParseMode::Reference){Ok(x)=>x,Err(e)=>return e};self.context.last_sym_start=self.context.current_rule_size;if !self.context.push(element{r#type:element_type::rule_ref,value:id}){return ParseOutcome::ParseFailed}},TokenKind::CloseGroup=>{if self.context.group_depth==0{return ParseOutcome::ParseFailed};let frame=self.context.groups[self.context.group_depth-1];let len=self.context.current_rule_size-frame.sequence_start as usize;if len+1>k_max_gbnf_rule_elements||self.grammar.element_count as usize+len+1>k_max_gbnf_elements{return ParseOutcome::ParseFailed};let offset=self.grammar.element_count as usize;self.grammar.elements[offset..offset+len].copy_from_slice(&self.context.current_rule[frame.sequence_start as usize..self.context.current_rule_size]);self.grammar.elements[offset+len]=element{r#type:element_type::end,value:0};self.grammar.rule_offsets[frame.generated_rule_id as usize]=offset as u32;self.grammar.rule_lengths[frame.generated_rule_id as usize]=(len+1) as u32;self.grammar.element_count+=(len+1) as u32;self.grammar.rule_count=self.grammar.rule_count.max(u32::from(frame.generated_rule_id)+1);self.context.current_rule_size=frame.sequence_start as usize;self.context.last_sym_start=self.context.current_rule_size;if !self.context.push(element{r#type:element_type::rule_ref,value:u32::from(frame.generated_rule_id)}){return ParseOutcome::ParseFailed};self.context.group_depth-=1},_=>return ParseOutcome::ParseFailed},
+                _=>return ParseOutcome::InternalError,
+            }
+        }
+    }
+}
+
+/// Compatibility alias for root parser callers.
+pub type RuleParser = GbnfRuleParserActor;
+/// Compatibility alias naming the root actor.
+pub type GbnfRuleParser = GbnfRuleParserActor;
