@@ -151,9 +151,13 @@ impl GbnfRuleParserActor {
         self.context.has_token = got.0; self.context.token_kind = got.1; self.context.token_start = got.2; self.context.token_end = got.3; self.context.cursor_offset = got.4; self.context.cursor_token_count = got.5; Ok(got.0)
     }
     fn classify_nonterm(&mut self, mode: ParseMode) -> Result<u32, ParseOutcome> {
-        let text = self.context.text(); let mut child = NontermParser::new();
+        let text = self.context.text();
+        let mut name = [0u8; MAX_SYMBOL_NAME_BYTES];
+        if text.len() > name.len() { return Err(ParseOutcome::ParseFailed); }
+        name[..text.len()].copy_from_slice(text.as_bytes());
+        let mut child = NontermParser::new();
         if !matches!(child.classify(mode, text), NontermOutcome::Parsed { .. }) { return Err(ParseOutcome::ParseFailed); }
-        self.context.symbol(text.as_bytes(), mode == ParseMode::Definition).ok_or(ParseOutcome::ParseFailed)
+        self.context.symbol(&name[..text.len()], mode == ParseMode::Definition).ok_or(ParseOutcome::ParseFailed)
     }
     fn parse_char(bytes: &[u8], pos: usize, end: usize) -> Option<(u32, usize)> {
         if pos >= end { return None; }
