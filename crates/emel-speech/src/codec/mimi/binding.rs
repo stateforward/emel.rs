@@ -30,14 +30,12 @@ pub enum RuntimeVariant {
 }
 
 impl RuntimeVariant {
-    fn accepts(self, tensor_type: SerializedType) -> bool {
+    fn accepts(self, tensor_type: SerializedType, projection: bool) -> bool {
         match self {
-            Self::F32 => matches!(tensor_type, SerializedType::F32 | SerializedType::F16),
+            Self::F32 => tensor_type == SerializedType::F32,
             Self::F16 => tensor_type == SerializedType::F16,
-            Self::Q8 => matches!(
-                tensor_type,
-                SerializedType::F32 | SerializedType::F16 | SerializedType::Q8_0
-            ),
+            Self::Q8 if projection => tensor_type == SerializedType::Q8_0,
+            Self::Q8 => matches!(tensor_type, SerializedType::F32 | SerializedType::F16),
         }
     }
 }
@@ -179,23 +177,16 @@ pub enum TensorFamily {
 impl TensorFamily {
     fn from_name(name: &[u8]) -> Option<Self> {
         let families = [
-            (b"mimi.encoder.".as_slice(), Self::Encoder),
-            (
-                b"mimi.encoder_transformer.".as_slice(),
-                Self::EncoderTransformer,
-            ),
-            (b"mimi.downsample.".as_slice(), Self::Downsample),
-            (b"mimi.quantizer.".as_slice(), Self::Quantizer),
-            (b"mimi.upsample.".as_slice(), Self::Upsample),
-            (
-                b"mimi.decoder_transformer.".as_slice(),
-                Self::DecoderTransformer,
-            ),
-            (b"mimi.decoder.".as_slice(), Self::Decoder),
+            (b"mimi.encoder.model.".as_slice(), Self::Encoder),
+            (b"mimi.encoder_transformer.transformer.layers.".as_slice(), Self::EncoderTransformer),
+            (b"mimi.downsample.conv.conv.conv.weight".as_slice(), Self::Downsample),
+            (b"mimi.quantizer.rvq_first.".as_slice(), Self::Quantizer),
+            (b"mimi.quantizer.rvq_rest.".as_slice(), Self::Quantizer),
+            (b"mimi.upsample.convtr.convtr.convtr.weight".as_slice(), Self::Upsample),
+            (b"mimi.decoder_transformer.transformer.layers.".as_slice(), Self::DecoderTransformer),
+            (b"mimi.decoder.model.".as_slice(), Self::Decoder),
         ];
-        families
-            .iter()
-            .find_map(|(prefix, family)| name.starts_with(prefix).then_some(*family))
+        families.iter().find_map(|(prefix, family)| name.starts_with(prefix).then_some(*family))
     }
 
     const fn index(self) -> usize {
@@ -588,7 +579,13 @@ fn validate_tensor_metadata(
         .offset()
         .checked_add(storage.length())
         .ok_or(BindingError::TensorStorageMismatch(index))?;
-    if !variant.accepts(metadata.tensor_type()) {
+    let projection = name.ends_with(b"in_projs.0.weight")
+        || name.ends_with(b"out_projs.0.weight")
+        || name.ends_with(b"linear1.weight")
+        || name.ends_with(b"linear2.weight")
+        || name.ends_with(b"input_proj.weight")
+        || name.ends_with(b"output_proj.weight");
+    if !variant.accepts(metadata.tensor_type(), projection) {
         return Err(BindingError::UnsupportedRuntime(index));
     }
     if metadata.tensor_type() == SerializedType::Q8_0 {
