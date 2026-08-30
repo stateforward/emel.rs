@@ -2,7 +2,10 @@
 
 mod sm;
 
-pub use sm::{BatchError, BatchOutputs, BatchRequest, BatchResult, MAX_SEQ, MAX_TOKENS, SEQ_WORDS};
+pub use sm::{
+    BatchError, BatchOutputs, BatchRequest, BatchResult, MAX_SEQ, MAX_TOKENS, PositionSeedError,
+    PositionSeedFn, SEQ_WORDS,
+};
 
 /// Stateful single-writer token batcher for the bounded validation slice.
 pub struct TokenBatcher {
