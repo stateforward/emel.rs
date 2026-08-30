@@ -867,7 +867,7 @@ impl SpeechGeneratorDuplexModelStateMachineContext for SpeechGeneratorDuplexMode
         &self,
         _event: &InitRun,
     ) -> Result<bool, ()> {
-        Ok(!self.guard_initialize_request_valid(e)?)
+        Ok(!self.guard_initialize_request_valid_dependencies_type(_event)?)
     }
     fn guard_initialize_request_valid_dependencies_type(
         &self,
@@ -903,7 +903,7 @@ impl SpeechGeneratorDuplexModelStateMachineContext for SpeechGeneratorDuplexMode
         &self,
         _event: &StreamRun,
     ) -> Result<bool, ()> {
-        Ok(!self.guard_stream_request_valid(e)?)
+        Ok(!self.guard_stream_request_valid_dependencies_type(_event)?)
     }
     fn guard_stream_request_valid_dependencies_type(&self, _event: &StreamRun) -> Result<bool, ()> {
         Ok(self.initialized && _event.pcm_len == self.frame_samples && _event.output_capacity >= self.frame_samples && _event.token_capacity >= self.codebook_count)
