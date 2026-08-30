@@ -229,10 +229,16 @@ pub enum MimiEvent<'a> {
 sml! {
     SpeechCodecMimi {
         "state_bind_contract_decision"_s <= *"state_uninitialized"_s + InitRun(&'dispatch InitRun<'dispatch>),
-        "state_bind_capacity_decision"_s <= "state_bind_contract_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_bind_contract_valid],
+        "state_bind_f32_capacity_decision"_s <= "state_bind_contract_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_bind_f32_contract_valid],
+        "state_bind_native_capacity_decision"_s <= "state_bind_contract_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_bind_native_contract_valid],
+        "state_bind_q8_capacity_decision"_s <= "state_bind_contract_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_bind_q8_contract_valid],
         "state_init_failed_error_out_decision"_s <= "state_bind_contract_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_bind_contract_invalid] / effect_mark_bind_failed,
-        "state_binding"_s <= "state_bind_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_valid] / effect_bind,
-        "state_init_failed_error_out_decision"_s <= "state_bind_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_invalid] / effect_mark_arena_capacity_invalid,
+        "state_binding"_s <= "state_bind_f32_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_valid] / effect_bind,
+        "state_init_failed_error_out_decision"_s <= "state_bind_f32_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_invalid] / effect_mark_arena_capacity_invalid,
+        "state_binding"_s <= "state_bind_native_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_valid] / effect_bind,
+        "state_init_failed_error_out_decision"_s <= "state_bind_native_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_invalid] / effect_mark_arena_capacity_invalid,
+        "state_binding"_s <= "state_bind_q8_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_valid] / effect_bind,
+        "state_init_failed_error_out_decision"_s <= "state_bind_q8_capacity_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_arena_capacity_invalid] / effect_mark_arena_capacity_invalid,
         "state_init_error_out_decision"_s <= "state_binding"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>),
         "state_init_callback_decision"_s <= "state_init_error_out_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_has_error_out_init_run] / effect_store_error_out_init_run,
         "state_init_callback_decision"_s <= "state_init_error_out_decision"_s + completion<InitRun>(&'dispatch InitRun<'dispatch>) [guard_no_error_out_init_run],
@@ -365,6 +371,9 @@ impl SpeechCodecMimiStateMachineContext for SpeechCodecMimiContext {
     fn effect_store_error_out_encode_run(&mut self, event: &EncodeRun<'_>) -> Result<(), ()> { if let Some(out) = event.error_out.as_deref_mut() { **out = self.error; } Ok(()) }
     fn effect_store_error_out_decode_run(&mut self, event: &DecodeRun<'_>) -> Result<(), ()> { if let Some(out) = event.error_out.as_deref_mut() { **out = self.error; } Ok(()) }
 
+    fn guard_bind_f32_contract_valid(&self, event: &InitRun<'_>) -> Result<bool, ()> { Ok(event.binding.codec_runtime().variant() == binding::RuntimeVariant::F32 && self.guard_bind_contract_valid(event)?) }
+    fn guard_bind_native_contract_valid(&self, event: &InitRun<'_>) -> Result<bool, ()> { Ok(event.binding.codec_runtime().variant() == binding::RuntimeVariant::F16 && self.guard_bind_contract_valid(event)?) }
+    fn guard_bind_q8_contract_valid(&self, event: &InitRun<'_>) -> Result<bool, ()> { Ok(event.binding.codec_runtime().variant() == binding::RuntimeVariant::Q8 && self.guard_bind_contract_valid(event)?) }
     fn guard_bind_contract_valid(&self, event: &InitRun<'_>) -> Result<bool, ()> { let runtime = event.binding.codec_runtime(); let h = runtime.model().hparams(); Ok(runtime.model().component() == emel_model::bridge::MoshiComponent::Mimi && runtime.model().architecture_name() == b"moshi" && runtime.model().tensor_count() > 0 && h.validate().is_ok() && h.dim() > 0 && h.n_q() > 0) }
     fn guard_bind_contract_invalid(&self, event: &InitRun<'_>) -> Result<bool, ()> { Ok(!self.guard_bind_contract_valid(event)?) }
     fn guard_arena_capacity_valid(&self, event: &InitRun<'_>) -> Result<bool, ()> { let needed = event.binding.codec_runtime().arenas(); let h = event.binding.codec_runtime().model().hparams(); Ok(event.prepared.len() >= needed.prepared_floats() && event.state_arena.len() >= needed.state_floats() && event.workspace.len() >= needed.workspace_floats() && event.frame.len() >= needed.frame_floats() && h.dim() > 0 && h.dim() as usize <= MAX_LATENT_FLOATS) }

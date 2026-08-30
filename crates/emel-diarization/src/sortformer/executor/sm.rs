@@ -378,21 +378,55 @@ impl DiarizationSortformerExecutorStateMachineContext for DiarizationSortformerE
 
 /// Generated state-machine alias matching the pinned actor.
 pub type ExecutorStateMachine = DiarizationSortformerExecutorStateMachine;
-/// Source-compatible executor alias.
-pub type Executor = ExecutorStateMachine;
 
-impl ExecutorStateMachine {
+/// Single-writer synchronous Sortformer executor actor.
+pub struct Executor {
+    machine: ExecutorStateMachine,
+}
+
+impl Default for Executor {
+    fn default() -> Self { Self::new() }
+}
+
+impl Executor {
+    /// Constructs an executor in generated `state_ready`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { machine: ExecutorStateMachine::new(DiarizationSortformerExecutorContext::default()) }
+    }
+
     /// Dispatches one borrowed request synchronously through every phase.
     pub fn execute<'a>(&mut self, event: EventExecuteRun<'a>) -> bool {
-        self.process_event(DiarizationSortformerExecutorEvents::EventExecuteRun(&event)).is_ok()
-            && self.context().err == Error::None
+        self.process_event(event)
+    }
+
+    /// Source-compatible process-event spelling for the pinned actor.
+    pub fn process_event<'a>(&mut self, event: EventExecuteRun<'a>) -> bool {
+        if self.machine.process_event(DiarizationSortformerExecutorEvents::EventExecuteRun(&event)).is_err() {
+            self.machine.context_mut().err = Error::Unexpected;
+            return false;
+        }
+        self.machine.context().err == Error::None
     }
 
     /// Explicit unexpected-event path used by lifecycle recovery tests.
     pub fn process_unexpected_event(&mut self) -> bool {
-        self.process_event(DiarizationSortformerExecutorEvents::UnexpectedEvent).is_ok()
+        self.machine.process_event(DiarizationSortformerExecutorEvents::UnexpectedEvent).is_ok()
     }
 
+    /// Returns generated state inspection data.
     #[must_use]
-    pub fn error(&self) -> Error { self.context().err }
+    pub fn state(&self) -> &DiarizationSortformerExecutorStates { self.machine.state() }
+
+    /// Reports whether the generated machine is in `state`.
+    #[must_use]
+    pub fn is(&self, state: &DiarizationSortformerExecutorStates) -> bool { self.machine.is(state) }
+
+    /// Returns the actor-owned bounded context.
+    #[must_use]
+    pub fn context(&self) -> &DiarizationSortformerExecutorContext { self.machine.context() }
+
+    /// Returns the most recent execution error.
+    #[must_use]
+    pub fn error(&self) -> Error { self.machine.context().err }
 }
