@@ -290,7 +290,6 @@ impl TextEncodersUgmStateMachineContext for TextEncodersUgmContext {
     fn valid_encode(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(event.token_capacity > 0) }
     fn vocab_changed(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(!self.tables_ready || self.vocab_identity != event.vocab_identity) }
     fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(self.tables_ready && self.vocab_identity == event.vocab_identity) }
-    fn invalid_encode(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(!self.valid_encode(event)?) }
     fn text_empty(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(event.text().is_empty()) }
     fn text_non_empty(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(!event.text().is_empty()) }
     fn tables_ready(&self, event: &RuntimeEncodeRuntime) -> Result<bool, ()> { Ok(self.tables_ready && self.vocab_identity == event.vocab_identity) }
@@ -320,6 +319,45 @@ impl TextEncodersUgmStateMachineContext for TextEncodersUgmContext {
     fn ensure_last_error_from_normalize_result_decision(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> { self.ensure_last_error_from_encode_precheck_decision(event) }
     fn ensure_last_error_from_input_prepare_result_decision(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> { self.ensure_last_error_from_encode_precheck_decision(event) }
     fn ensure_last_error_from_dp_forward_result_decision(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> { self.ensure_last_error_from_encode_precheck_decision(event) }
+    fn sync_tables(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
+        if self.tables_ready && self.vocab_identity == event.vocab_identity {
+            event.err.set(UgmError::None);
+        } else {
+            self.tables_ready = true;
+            self.vocab_identity = event.vocab_identity;
+            event.err.set(UgmError::None);
+        }
+        Ok(())
+    }
+    fn lookup_unk_id(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
+        event.unk_id.set(self.unk_id);
+        Ok(())
+    }
+    fn resolve_vocab_unk(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
+        event.unk_id.set(self.unk_id);
+        Ok(())
+    }
+    fn prepare_dp_input(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
+        let input_len = event.normalized_len.get();
+        if input_len >= self.best.len() {
+            self.set_error(event, UgmError::InvalidArgument);
+            return Ok(());
+        }
+        for item in self.best.iter_mut().take(input_len + 1) {
+            *item = BestTokenization { token_id: event.unk_id.get(), input_offset: 0, score_sum: f64::NEG_INFINITY };
+        }
+        self.best[0] = BestTokenization { token_id: event.unk_id.get(), input_offset: 0, score_sum: 0.0 };
+        event.traced_count.set(0);
+        Ok(())
+    }
+    fn mark_backtrace_failed(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
+        self.set_error(event, UgmError::InvalidArgument);
+        Ok(())
+    }
+    fn mark_emit_failed(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
+        self.set_error(event, UgmError::InvalidArgument);
+        Ok(())
+    }
 
     fn normalize_input(&mut self, event: &RuntimeEncodeRuntime) -> Result<(), ()> {
         let mut out = 0usize;
