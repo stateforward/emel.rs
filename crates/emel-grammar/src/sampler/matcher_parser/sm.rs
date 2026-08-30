@@ -175,7 +175,7 @@ impl GbnfSamplerMatcherParserContext {
 
 impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserContext {
     // Source mapping: actions.hpp::consume_match_accepted.
-    fn consume_match_accepted(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_match_accepted(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = MatcherParserError::None;
         self.match_result = MatchResult::Accepted;
         self.candidate_allowed = true;
@@ -184,7 +184,7 @@ impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserCon
     }
 
     // Source mapping: actions.hpp::consume_match_rejected.
-    fn consume_match_rejected(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_match_rejected(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = MatcherParserError::None;
         self.match_result = MatchResult::Rejected;
         self.candidate_allowed = false;
@@ -193,7 +193,7 @@ impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserCon
     }
 
     // Source mapping: actions.hpp::dispatch_parse_failed.
-    fn dispatch_parse_failed(&mut self, _event_data: SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn dispatch_parse_failed(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
         self.error = MatcherParserError::ParseFailed;
         self.match_result = MatchResult::Unknown;
         self.candidate_allowed = false;
@@ -228,7 +228,6 @@ impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserCon
 }
 
 /// Synchronous bounded actor around the generated matcher-parser machine.
-#[derive(Debug)]
 pub struct GbnfSamplerMatcherParserActor {
     machine: GbnfSamplerMatcherParserStateMachine<GbnfSamplerMatcherParserContext>,
 }
@@ -263,9 +262,8 @@ impl GbnfSamplerMatcherParserActor {
 
     /// Dispatches an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> Result<MatchResult, MatcherParserError> {
-        if self.machine.process_event(GbnfSamplerMatcherParserEvents::UnexpectedEvent).is_err() {
-            self.machine.context_mut().error = MatcherParserError::InternalError;
-        }
+        let _ = self.machine.context_mut().unexpected();
+        self.machine.set_state(GbnfSamplerMatcherParserStates::UnexpectedEvent);
         self.outcome()
     }
 
