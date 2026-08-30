@@ -200,7 +200,9 @@ impl TensorFamily {
         ];
         families
             .iter()
-            .find_map(|(prefix, family)| name.starts_with(prefix).then_some(*family))
+            .find_map(|(prefix, family)| {
+                (name == *prefix || exact_family_name(name, *prefix)).then_some(*family)
+            })
     }
 
     const fn index(self) -> usize {
@@ -213,6 +215,32 @@ impl TensorFamily {
             Self::DecoderTransformer => 5,
             Self::Decoder => 6,
         }
+    }
+}
+fn exact_family_name(name: &[u8], prefix: &[u8]) -> bool {
+    let Some(rest) = name.strip_prefix(prefix) else { return false; };
+    match prefix {
+        b"mimi.encoder.model." | b"mimi.decoder.model." => {
+            let Some((index, suffix)) = rest.split_once(|byte| *byte == b'.') else { return false; };
+            !index.is_empty() && index.iter().all(u8::is_ascii_digit)
+                && matches!(suffix, b"conv.conv.weight" | b"conv.conv.bias"
+                    | b"block.1.conv.conv.weight" | b"block.1.conv.conv.bias"
+                    | b"block.3.conv.conv.weight" | b"block.3.conv.conv.bias")
+        }
+        b"mimi.encoder_transformer.transformer.layers."
+        | b"mimi.decoder_transformer.transformer.layers." => {
+            let Some((index, suffix)) = rest.split_once(|byte| *byte == b'.') else { return false; };
+            !index.is_empty() && index.iter().all(u8::is_ascii_digit)
+                && matches!(suffix, b"norm1.weight" | b"norm1.bias"
+                    | b"self_attn.in_projs.0.weight" | b"self_attn.out_projs.0.weight"
+                    | b"layer_scale_1.scale" | b"norm2.weight" | b"norm2.bias"
+                    | b"linear1.weight" | b"linear2.weight" | b"layer_scale_2.scale")
+        }
+        b"mimi.quantizer.rvq_first." | b"mimi.quantizer.rvq_rest." => {
+            rest == b"input_proj.weight" || rest == b"output_proj.weight"
+                || (rest.starts_with(b"vq.layers.") && rest.ends_with(b"._codebook.embedding"))
+        }
+        _ => false,
     }
 }
 
@@ -520,40 +548,14 @@ fn validate_model_tensors(
     let mut families = [false; 7];
     let mut saw_q8 = false;
     let count = model.tensor_count();
-    if count == 0 {
-        return Err(BindingError::TensorCountMismatch);
-    }
+    if count == 0 { return Err(BindingError::TensorCountMismatch); }
     for index in 0..count {
-        let tensor = model
-            .tensor(index)
-            .ok_or(BindingError::InvalidTensor(index))?;
-        let metadata = tensor
-            .metadata()
-            .ok_or(BindingError::InvalidTensor(index))?;
-        validate_tensor_metadata(
-            index,
-            tensor.name(),
-            metadata,
-            variant,
-            &mut families,
-            &mut saw_q8,
-        )?;
+        let tensor = model.tensor(index).ok_or(BindingError::InvalidTensor(index))?;
+        let metadata = tensor.metadata().ok_or(BindingError::InvalidTensor(index))?;
+        validate_tensor_metadata(index, tensor.name(), metadata, variant, &mut families, &mut saw_q8)?;
     }
-    if variant == RuntimeVariant::Q8 && !saw_q8 {
-        return Err(BindingError::UnsupportedRuntime(0));
-    }
-    for family in [
-        TensorFamily::Encoder,
-        TensorFamily::EncoderTransformer,
-        TensorFamily::Downsample,
-        TensorFamily::Quantizer,
-        TensorFamily::Upsample,
-        TensorFamily::DecoderTransformer,
-        TensorFamily::Decoder,
-    ] {
-        if !families[family.index()] {
-            return Err(BindingError::MissingTensorFamily(family));
-        }
+    for family in [TensorFamily::Encoder, TensorFamily::EncoderTransformer, TensorFamily::Downsample, TensorFamily::Quantizer, TensorFamily::Upsample, TensorFamily::DecoderTransformer, TensorFamily::Decoder] {
+        if !families[family.index()] { return Err(BindingError::MissingTensorFamily(family)); }
     }
     Ok(count)
 }
@@ -569,42 +571,24 @@ fn validate_tensor_metadata(
     let family = TensorFamily::from_name(name).ok_or(BindingError::UnknownTensorFamily(index))?;
     families[family.index()] = true;
     let dimensions = metadata.dimensions();
-    let dimension_count = usize::try_from(metadata.dimension_count())
-        .map_err(|_| BindingError::InvalidTensor(index))?;
+    let dimension_count = usize::try_from(metadata.dimension_count()).map_err(|_| BindingError::InvalidTensor(index))?;
     if !(1..=4).contains(&dimension_count)
         || dimensions[..dimension_count].contains(&0)
-        || dimensions[dimension_count..]
-            .iter()
-            .any(|dimension| *dimension != 1)
-    {
-        return Err(BindingError::InvalidTensor(index));
-    }
-    let Some(storage) = metadata.storage() else {
-        return Err(BindingError::TensorStorageMismatch(index));
-    };
-    if metadata.data_size() == 0 || storage.length() != metadata.data_size() {
-        return Err(BindingError::TensorStorageMismatch(index));
-    }
-    if storage.offset() != metadata.file_offset() || storage.split_index() != metadata.file_index()
-    {
-        return Err(BindingError::TensorStorageMismatch(index));
-    }
-    storage
-        .offset()
-        .checked_add(storage.length())
-        .ok_or(BindingError::TensorStorageMismatch(index))?;
-    let projection = name.ends_with(b"in_projs.0.weight")
-        || name.ends_with(b"out_projs.0.weight")
-        || name.ends_with(b"linear1.weight")
-        || name.ends_with(b"linear2.weight")
-        || name.ends_with(b"input_proj.weight")
-        || name.ends_with(b"output_proj.weight");
-    if !variant.accepts(metadata.tensor_type(), projection) {
-        return Err(BindingError::UnsupportedRuntime(index));
-    }
-    if metadata.tensor_type() == SerializedType::Q8_0 {
-        *saw_q8 = true;
-    }
+        || dimensions[dimension_count..].iter().any(|dimension| *dimension != 1)
+    { return Err(BindingError::InvalidTensor(index)); }
+    let Some(storage) = metadata.storage() else { return Err(BindingError::TensorStorageMismatch(index)); };
+    if metadata.data_size() == 0 || storage.length() != metadata.data_size()
+        || storage.offset() != metadata.file_offset() || storage.split_index() != metadata.file_index()
+        || storage.offset().checked_add(storage.length()).is_none()
+    { return Err(BindingError::TensorStorageMismatch(index)); }
+    let projection = name.ends_with(b"in_projs.0.weight") || name.ends_with(b"out_projs.0.weight")
+        || name.ends_with(b"linear1.weight") || name.ends_with(b"linear2.weight")
+        || name.ends_with(b"input_proj.weight") || name.ends_with(b"output_proj.weight");
+    if !variant.accepts(metadata.tensor_type(), projection) { return Err(BindingError::UnsupportedRuntime(index)); }
+    if metadata.tensor_type() == SerializedType::Q8_0 { *saw_q8 = true; }
+    if name.ends_with(b"._codebook.embedding")
+        && (dimension_count != 2 || dimensions[0] == 0 || dimensions[1] == 0)
+    { return Err(BindingError::TensorShapeMismatch(index)); }
     Ok(())
 }
 
