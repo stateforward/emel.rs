@@ -1,24 +1,18 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Bounded graph-allocation ordering phase.
+//!
+//! Source mapping: `emel.cpp/src/emel/graph/allocator/ordering_pass/{sm,events,guards,actions}.hpp`.
 
-#![allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
+#![allow(clippy::derive_partial_eq_without_eq, clippy::module_name_repetitions, dead_code, unused_imports, missing_docs)]
 
 use sml::sml;
 
-// --- machine GraphAllocatorOrderingPass from emel.cpp/src/emel/graph/allocator/ordering_pass/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PhaseOutcome { #[default] Unknown = 0, Done = 1, Failed = 2 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AllocationError { #[default] None = 0, InvalidRequest = 1, Capacity = 2, Internal = 4, Untracked = 8 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AllocatorEventAllocateGraphPlan;
 
 sml! {
@@ -39,113 +33,37 @@ sml! {
     }
 }
 
-/// Context for `GraphAllocatorOrderingPass` (TODO: context.hpp / detail.hpp).
 #[derive(Debug, Default)]
 pub struct GraphAllocatorOrderingPassContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    pub outcome: PhaseOutcome,
+    pub error: AllocationError,
+    pub liveness_outcome: PhaseOutcome,
+    pub required_intervals: u32,
+    pub interval_capacity: u32,
+    pub bytes_per_tensor: u64,
+    pub sorted_tensor_count: u32,
+    pub required_buffer_bytes: u64,
 }
-
+impl GraphAllocatorOrderingPassContext {
+    pub fn set_request(&mut self, liveness_outcome: PhaseOutcome, required_intervals: u32, interval_capacity: u32, bytes_per_tensor: u64) { self.outcome=PhaseOutcome::Unknown; self.error=AllocationError::None; self.liveness_outcome=liveness_outcome; self.required_intervals=required_intervals; self.interval_capacity=interval_capacity; self.bytes_per_tensor=bytes_per_tensor; self.sorted_tensor_count=0; self.required_buffer_bytes=0; }
+}
+fn overflow(lhs: u32, rhs: u64) -> bool { lhs != 0 && rhs > u64::MAX / u64::from(lhs) }
 impl GraphAllocatorOrderingPassStateMachineContext for GraphAllocatorOrderingPassContext {
-    fn mark_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_capacity(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_failed_capacity
-        todo!(
-            "TODO: port action `mark_failed_capacity` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_internal(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_failed_internal
-        todo!(
-            "TODO: port action `mark_failed_internal` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_failed_invalid_request
-        todo!(
-            "TODO: port action `mark_failed_invalid_request` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_overflow(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_failed_overflow
-        todo!(
-            "TODO: port action `mark_failed_overflow` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_prefailed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_failed_prefailed
-        todo!(
-            "TODO: port action `mark_failed_prefailed` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_prereq(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::mark_failed_prereq
-        todo!(
-            "TODO: port action `mark_failed_prereq` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_allocate_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_allocated(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/ordering_pass/actions.hpp"
-        )
-    }
-    fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp::phase_capacity_exceeded
-        todo!(
-            "TODO: port guard `phase_capacity_exceeded` from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp"
-        )
-    }
-    fn phase_done(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp::phase_done
-        todo!(
-            "TODO: port guard `phase_done` from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp"
-        )
-    }
-    fn phase_invalid_request(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp::phase_invalid_request
-        todo!(
-            "TODO: port guard `phase_invalid_request` from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp"
-        )
-    }
-    fn phase_overflow(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp::phase_overflow
-        todo!(
-            "TODO: port guard `phase_overflow` from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp"
-        )
-    }
-    fn phase_prefailed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp::phase_prefailed
-        todo!(
-            "TODO: port guard `phase_prefailed` from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp"
-        )
-    }
-    fn phase_prereq_failed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp::phase_prereq_failed
-        todo!(
-            "TODO: port guard `phase_prereq_failed` from emel.cpp/src/emel/graph/allocator/ordering_pass/guards.hpp"
-        )
-    }
+    fn mark_done(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Done; self.sorted_tensor_count=self.required_intervals; self.required_buffer_bytes=u64::from(self.required_intervals)*self.bytes_per_tensor; self.error=AllocationError::None; Ok(()) }
+    fn mark_failed_capacity(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Capacity; Ok(()) }
+    fn mark_failed_internal(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::InvalidRequest; Ok(()) }
+    fn mark_failed_overflow(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Capacity; Ok(()) }
+    fn mark_failed_prefailed(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; Ok(()) }
+    fn mark_failed_prereq(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_allocate_failed(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_allocated(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn phase_capacity_exceeded(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.liveness_outcome==PhaseOutcome::Done && self.required_intervals>self.interval_capacity) }
+    fn phase_done(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.liveness_outcome==PhaseOutcome::Done && self.required_intervals!=0 && self.required_intervals<=self.interval_capacity && self.bytes_per_tensor!=0 && !overflow(self.required_intervals,self.bytes_per_tensor)) }
+    fn phase_invalid_request(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.liveness_outcome==PhaseOutcome::Done && (self.required_intervals==0 || self.bytes_per_tensor==0)) }
+    fn phase_overflow(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.liveness_outcome==PhaseOutcome::Done && self.required_intervals!=0 && self.required_intervals<=self.interval_capacity && self.bytes_per_tensor!=0 && overflow(self.required_intervals,self.bytes_per_tensor)) }
+    fn phase_prefailed(&self) -> Result<bool, ()> { Ok(self.error!=AllocationError::None) }
+    fn phase_prereq_failed(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.liveness_outcome!=PhaseOutcome::Done) }
 }

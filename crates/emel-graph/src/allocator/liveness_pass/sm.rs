@@ -1,24 +1,20 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Bounded graph-allocation liveness phase.
+//!
+//! Source mapping: `emel.cpp/src/emel/graph/allocator/liveness_pass/{sm,events,guards,actions}.hpp`.
 
-#![allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
+#![allow(clippy::derive_partial_eq_without_eq, clippy::module_name_repetitions, dead_code, unused_imports, missing_docs)]
 
 use sml::sml;
 
-// --- machine GraphAllocatorLivenessPass from emel.cpp/src/emel/graph/allocator/liveness_pass/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PhaseOutcome { #[default] Unknown = 0, Done = 1, Failed = 2 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AllocationError { #[default] None = 0, InvalidRequest = 1, Capacity = 2, Internal = 4, Untracked = 8 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AllocatorEventAllocateGraphPlan;
 
 sml! {
@@ -37,89 +33,41 @@ sml! {
     }
 }
 
-/// Context for `GraphAllocatorLivenessPass` (TODO: context.hpp / detail.hpp).
 #[derive(Debug, Default)]
 pub struct GraphAllocatorLivenessPassContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    pub outcome: PhaseOutcome,
+    pub error: AllocationError,
+    pub has_graph_topology: bool,
+    pub node_count: u32,
+    pub tensor_count: u32,
+    pub tensor_capacity: u32,
+    pub required_intervals: u32,
+}
+
+impl GraphAllocatorLivenessPassContext {
+    pub fn set_request(&mut self, has_graph_topology: bool, node_count: u32, tensor_count: u32, tensor_capacity: u32) {
+        self.has_graph_topology = has_graph_topology;
+        self.node_count = node_count;
+        self.tensor_count = tensor_count;
+        self.tensor_capacity = tensor_capacity;
+        self.outcome = PhaseOutcome::Unknown;
+        self.error = AllocationError::None;
+        self.required_intervals = 0;
+    }
 }
 
 impl GraphAllocatorLivenessPassStateMachineContext for GraphAllocatorLivenessPassContext {
-    fn mark_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_capacity(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::mark_failed_capacity
-        todo!(
-            "TODO: port action `mark_failed_capacity` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_internal(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::mark_failed_internal
-        todo!(
-            "TODO: port action `mark_failed_internal` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::mark_failed_invalid_request
-        todo!(
-            "TODO: port action `mark_failed_invalid_request` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_prefailed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::mark_failed_prefailed
-        todo!(
-            "TODO: port action `mark_failed_prefailed` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_allocate_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_allocated(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/liveness_pass/actions.hpp"
-        )
-    }
-    fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp::phase_capacity_exceeded
-        todo!(
-            "TODO: port guard `phase_capacity_exceeded` from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp"
-        )
-    }
-    fn phase_done(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp::phase_done
-        todo!(
-            "TODO: port guard `phase_done` from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp"
-        )
-    }
-    fn phase_invalid_request(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp::phase_invalid_request
-        todo!(
-            "TODO: port guard `phase_invalid_request` from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp"
-        )
-    }
-    fn phase_prefailed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp::phase_prefailed
-        todo!(
-            "TODO: port guard `phase_prefailed` from emel.cpp/src/emel/graph/allocator/liveness_pass/guards.hpp"
-        )
-    }
+    fn mark_done(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Done; self.required_intervals = self.tensor_count; self.error = AllocationError::None; Ok(()) }
+    fn mark_failed_capacity(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::Capacity; Ok(()) }
+    fn mark_failed_internal(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::Internal; Ok(()) }
+    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::InvalidRequest; Ok(()) }
+    fn mark_failed_prefailed(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; Ok(()) }
+    fn on_unexpected_from_allocate_failed(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_allocated(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.outcome = PhaseOutcome::Failed; self.error = AllocationError::Internal; Ok(()) }
+    fn phase_capacity_exceeded(&self) -> Result<bool, ()> { Ok(self.error == AllocationError::None && self.has_graph_topology && self.node_count != 0 && self.tensor_count != 0 && self.tensor_count > self.tensor_capacity) }
+    fn phase_done(&self) -> Result<bool, ()> { Ok(self.error == AllocationError::None && self.has_graph_topology && self.node_count != 0 && self.tensor_count != 0 && self.tensor_count <= self.tensor_capacity) }
+    fn phase_invalid_request(&self) -> Result<bool, ()> { Ok(self.error == AllocationError::None && (!self.has_graph_topology || self.node_count == 0 || self.tensor_count == 0)) }
+    fn phase_prefailed(&self) -> Result<bool, ()> { Ok(self.error != AllocationError::None) }
 }

@@ -1,24 +1,18 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Bounded graph-allocation placement phase.
+//!
+//! Source mapping: `emel.cpp/src/emel/graph/allocator/placement_pass/{sm,events,guards,actions}.hpp`.
 
-#![allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
-    dead_code,
-    unused_imports,
-    missing_docs
-)]
+#![allow(clippy::derive_partial_eq_without_eq, clippy::module_name_repetitions, dead_code, unused_imports, missing_docs)]
 
 use sml::sml;
 
-// --- machine GraphAllocatorPlacementPass from emel.cpp/src/emel/graph/allocator/placement_pass/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PhaseOutcome { #[default] Unknown = 0, Done = 1, Failed = 2 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AllocationError { #[default] None = 0, InvalidRequest = 1, Capacity = 2, Internal = 4, Untracked = 8 }
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AllocatorEventAllocateGraphPlan;
 
 sml! {
@@ -38,101 +32,33 @@ sml! {
     }
 }
 
-/// Context for `GraphAllocatorPlacementPass` (TODO: context.hpp / detail.hpp).
 #[derive(Debug, Default)]
 pub struct GraphAllocatorPlacementPassContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    pub outcome: PhaseOutcome,
+    pub error: AllocationError,
+    pub ordering_outcome: PhaseOutcome,
+    pub sorted_tensor_count: u32,
+    pub required_buffer_bytes: u64,
+    pub workspace_capacity_bytes: u64,
+    pub has_plan_output: bool,
 }
-
+impl GraphAllocatorPlacementPassContext {
+    pub fn set_request(&mut self, ordering_outcome: PhaseOutcome, sorted_tensor_count: u32, required_buffer_bytes: u64, workspace_capacity_bytes: u64, has_plan_output: bool) { self.outcome=PhaseOutcome::Unknown; self.error=AllocationError::None; self.ordering_outcome=ordering_outcome; self.sorted_tensor_count=sorted_tensor_count; self.required_buffer_bytes=required_buffer_bytes; self.workspace_capacity_bytes=workspace_capacity_bytes; self.has_plan_output=has_plan_output; }
+}
 impl GraphAllocatorPlacementPassStateMachineContext for GraphAllocatorPlacementPassContext {
-    fn mark_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_capacity(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::mark_failed_capacity
-        todo!(
-            "TODO: port action `mark_failed_capacity` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_internal(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::mark_failed_internal
-        todo!(
-            "TODO: port action `mark_failed_internal` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::mark_failed_invalid_request
-        todo!(
-            "TODO: port action `mark_failed_invalid_request` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_prefailed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::mark_failed_prefailed
-        todo!(
-            "TODO: port action `mark_failed_prefailed` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn mark_failed_prereq(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::mark_failed_prereq
-        todo!(
-            "TODO: port action `mark_failed_prereq` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_allocate_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_allocated(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/allocator/placement_pass/actions.hpp"
-        )
-    }
-    fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp::phase_capacity_exceeded
-        todo!(
-            "TODO: port guard `phase_capacity_exceeded` from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp"
-        )
-    }
-    fn phase_done(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp::phase_done
-        todo!(
-            "TODO: port guard `phase_done` from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp"
-        )
-    }
-    fn phase_invalid_request(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp::phase_invalid_request
-        todo!(
-            "TODO: port guard `phase_invalid_request` from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp"
-        )
-    }
-    fn phase_prefailed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp::phase_prefailed
-        todo!(
-            "TODO: port guard `phase_prefailed` from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp"
-        )
-    }
-    fn phase_prereq_failed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp::phase_prereq_failed
-        todo!(
-            "TODO: port guard `phase_prereq_failed` from emel.cpp/src/emel/graph/allocator/placement_pass/guards.hpp"
-        )
-    }
+    fn mark_done(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Done; self.error=AllocationError::None; Ok(()) }
+    fn mark_failed_capacity(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Capacity; Ok(()) }
+    fn mark_failed_internal(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::InvalidRequest; Ok(()) }
+    fn mark_failed_prefailed(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; Ok(()) }
+    fn mark_failed_prereq(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_allocate_failed(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_allocated(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.outcome=PhaseOutcome::Failed; self.error=AllocationError::Internal; Ok(()) }
+    fn phase_capacity_exceeded(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.ordering_outcome==PhaseOutcome::Done && self.required_buffer_bytes>self.workspace_capacity_bytes) }
+    fn phase_done(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.ordering_outcome==PhaseOutcome::Done && self.has_plan_output && self.sorted_tensor_count!=0 && self.required_buffer_bytes<=self.workspace_capacity_bytes) }
+    fn phase_invalid_request(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.ordering_outcome==PhaseOutcome::Done && (!self.has_plan_output || self.sorted_tensor_count==0)) }
+    fn phase_prefailed(&self) -> Result<bool, ()> { Ok(self.error!=AllocationError::None) }
+    fn phase_prereq_failed(&self) -> Result<bool, ()> { Ok(self.error==AllocationError::None && self.ordering_outcome!=PhaseOutcome::Done) }
 }
