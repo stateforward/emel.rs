@@ -493,20 +493,22 @@ fn generated_ready_state_survives_success_invalid_and_unexpected_dispatches() {
     let mut masks_out = [0; 1];
     let mut positions_out = [0; 1];
     let mut output_mask = [0; 1];
-    assert!(batcher
-        .process_event(request(
-            &token_ids,
-            32,
-            None,
-            1,
-            None,
-            None,
-            &mut primary_out,
-            &mut masks_out,
-            &mut positions_out,
-            &mut output_mask,
-        ))
-        .is_ok());
+    assert!(
+        batcher
+            .process_event(request(
+                &token_ids,
+                32,
+                None,
+                1,
+                None,
+                None,
+                &mut primary_out,
+                &mut masks_out,
+                &mut positions_out,
+                &mut output_mask,
+            ))
+            .is_ok()
+    );
     assert!(batcher.is_ready());
 
     let mut primary_out = [0; 1];
@@ -703,30 +705,31 @@ fn short_flattened_masks_fall_through_without_panicking() {
     let mut masks = [0; 2];
     let mut positions = [0; 2];
     let mut output = [0; 2];
-    let result = TokenBatcher::new().process_event(BatchRequest {
-        token_ids: &ids,
-        vocab_size: 10,
-        seq_masks: Some(&short_masks),
-        seq_mask_words: 1,
-        seq_primary_ids: None,
-        positions: None,
-        output_mask_input: None,
-        output_all: false,
-        enforce_single_output_per_seq: false,
-        resolve_position_seed: None,
-        seq_mask_words_out: None,
-        positions_count_out: None,
-        outputs_total_out: None,
-        on_done: None,
-        on_error: None,
-        outputs: BatchOutputs {
-            seq_primary_ids: &mut primary,
-            seq_masks: &mut masks,
-            positions: &mut positions,
-            output_mask: &mut output,
-        },
-    })
-    .unwrap();
+    let result = TokenBatcher::new()
+        .process_event(BatchRequest {
+            token_ids: &ids,
+            vocab_size: 10,
+            seq_masks: Some(&short_masks),
+            seq_mask_words: 1,
+            seq_primary_ids: None,
+            positions: None,
+            output_mask_input: None,
+            output_all: false,
+            enforce_single_output_per_seq: false,
+            resolve_position_seed: None,
+            seq_mask_words_out: None,
+            positions_count_out: None,
+            outputs_total_out: None,
+            on_done: None,
+            on_error: None,
+            outputs: BatchOutputs {
+                seq_primary_ids: &mut primary,
+                seq_masks: &mut masks,
+                positions: &mut positions,
+                output_mask: &mut output,
+            },
+        })
+        .unwrap();
     assert_eq!(result.seq_mask_words, 1);
     assert_eq!(primary, [0, 0]);
     assert_eq!(masks, [1, 1]);

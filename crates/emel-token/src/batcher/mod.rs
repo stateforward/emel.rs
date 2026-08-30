@@ -31,7 +31,10 @@ impl TokenBatcher {
     /// contract cannot complete.
     pub fn process_event(&mut self, request: BatchRequest<'_>) -> Result<BatchResult, BatchError> {
         let result = self.machine.dispatch(request);
-        assert!(self.machine.is_ready(), "token batcher must return to ready");
+        assert!(
+            self.machine.is_ready(),
+            "token batcher must return to ready"
+        );
         result
     }
 
@@ -49,7 +52,10 @@ impl TokenBatcher {
     /// ready state.
     pub fn process_unexpected(&mut self) -> Result<(), BatchError> {
         let result = self.machine.dispatch_unexpected();
-        assert!(self.machine.is_ready(), "token batcher must return to ready");
+        assert!(
+            self.machine.is_ready(),
+            "token batcher must return to ready"
+        );
         result
     }
 }

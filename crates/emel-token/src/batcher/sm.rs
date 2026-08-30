@@ -903,16 +903,17 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
         let pos = s.next_pos[primary];
         valid = valid && pos != i32::MAX;
         let row = &e.outputs.seq_masks[i * words..(i + 1) * words];
-        let compatible = valid && row.iter().enumerate().all(|(w, bits)| {
-            let mut b = bits.get();
-            let mut ok = true;
-            while b != 0 {
-                let bit = b.trailing_zeros() as usize;
-                ok &= s.next_pos[w * 64 + bit] == pos;
-                b &= b - 1;
-            }
-            ok
-        });
+        let compatible = valid
+            && row.iter().enumerate().all(|(w, bits)| {
+                let mut b = bits.get();
+                let mut ok = true;
+                while b != 0 {
+                    let bit = b.trailing_zeros() as usize;
+                    ok &= s.next_pos[w * 64 + bit] == pos;
+                    b &= b - 1;
+                }
+                ok
+            });
         valid = valid && compatible;
         let Some(next) = pos.checked_add(1) else {
             continue;

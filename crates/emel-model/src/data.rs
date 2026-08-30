@@ -1682,8 +1682,8 @@ impl Data {
             .map_err(|_| DataError::Capacity)?;
         descriptors.resize_with(count, || None);
         for index in 0..parsed.tensor_count() {
-            let slot = &mut descriptors
-                [usize::try_from(index).map_err(|_| DataError::TooManyTensors)?];
+            let slot =
+                &mut descriptors[usize::try_from(index).map_err(|_| DataError::TooManyTensors)?];
             let result = loader.process_event(emel_gguf::event::WithTensor::new(
                 index,
                 |name: &[u8], descriptor: emel_gguf::event::TensorDescriptor, bytes: &[u8]| {
@@ -1702,7 +1702,7 @@ impl Data {
         for index in 0..parsed.tensor_count() {
             let slot = descriptors
                 [usize::try_from(index).map_err(|_| DataError::TooManyTensors)?]
-                .ok_or(DataError::InvalidTensor)?;
+            .ok_or(DataError::InvalidTensor)?;
             let (descriptor, name_capacity, bytes_capacity) = slot;
             if name_capacity > MAX_NAME_BYTES || bytes_capacity == 0 {
                 return Err(DataError::InvalidTensor);
@@ -1744,8 +1744,7 @@ impl Data {
             let descriptor_size = descriptor.data_size();
             let dimensions = descriptor.dimensions();
             let dimension_count = descriptor.dimension_count();
-            let active =
-                usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
+            let active = usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
             if descriptor_size == 0
                 || u64::try_from(bytes.len()).ok() != Some(descriptor_size)
                 || !(1..=4).contains(&dimension_count)
@@ -2224,9 +2223,7 @@ mod tests {
         let (name_length, descriptor, bytes_length) = loader
             .process_event(WithTensor::new(
                 0,
-                |name: &[u8], descriptor, bytes: &[u8]| {
-                    (name.len(), descriptor, bytes.len())
-                },
+                |name: &[u8], descriptor, bytes: &[u8]| (name.len(), descriptor, bytes.len()),
             ))
             .unwrap()
             .unwrap();
@@ -2265,7 +2262,10 @@ mod tests {
         let data = Data::try_from_gguf_mimi(&mut loader, parsed, hparams).unwrap();
         drop(loader);
         drop(source);
-        assert_eq!(data.tensor_named(b"weight").unwrap().byte_view(), Some(&[7_u8; 128][..]));
+        assert_eq!(
+            data.tensor_named(b"weight").unwrap().byte_view(),
+            Some(&[7_u8; 128][..])
+        );
     }
 
     #[test]

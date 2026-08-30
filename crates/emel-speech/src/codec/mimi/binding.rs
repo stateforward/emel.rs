@@ -178,15 +178,29 @@ impl TensorFamily {
     fn from_name(name: &[u8]) -> Option<Self> {
         let families = [
             (b"mimi.encoder.model.".as_slice(), Self::Encoder),
-            (b"mimi.encoder_transformer.transformer.layers.".as_slice(), Self::EncoderTransformer),
-            (b"mimi.downsample.conv.conv.conv.weight".as_slice(), Self::Downsample),
+            (
+                b"mimi.encoder_transformer.transformer.layers.".as_slice(),
+                Self::EncoderTransformer,
+            ),
+            (
+                b"mimi.downsample.conv.conv.conv.weight".as_slice(),
+                Self::Downsample,
+            ),
             (b"mimi.quantizer.rvq_first.".as_slice(), Self::Quantizer),
             (b"mimi.quantizer.rvq_rest.".as_slice(), Self::Quantizer),
-            (b"mimi.upsample.convtr.convtr.convtr.weight".as_slice(), Self::Upsample),
-            (b"mimi.decoder_transformer.transformer.layers.".as_slice(), Self::DecoderTransformer),
+            (
+                b"mimi.upsample.convtr.convtr.convtr.weight".as_slice(),
+                Self::Upsample,
+            ),
+            (
+                b"mimi.decoder_transformer.transformer.layers.".as_slice(),
+                Self::DecoderTransformer,
+            ),
             (b"mimi.decoder.model.".as_slice(), Self::Decoder),
         ];
-        families.iter().find_map(|(prefix, family)| name.starts_with(prefix).then_some(*family))
+        families
+            .iter()
+            .find_map(|(prefix, family)| name.starts_with(prefix).then_some(*family))
     }
 
     const fn index(self) -> usize {
