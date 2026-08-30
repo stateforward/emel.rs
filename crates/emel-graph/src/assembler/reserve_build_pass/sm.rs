@@ -1,5 +1,8 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Bounded reserve-build phase of the graph assembler.
+//!
+//! Source mapping: `emel.cpp/src/emel/graph/assembler/reserve_build_pass/{sm,context,events,actions,guards}.hpp`.
+//! The event and context contain copied scalar state only; actions are synchronous,
+//! allocation-free, and never perform routing.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -16,10 +19,95 @@
 
 use sml::sml;
 
-// --- machine GraphAssemblerReserveBuildPass from emel.cpp/src/emel/graph/assembler/reserve_build_pass/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct AssemblerEventReserveGraph;
+/// Outcome of an assembler phase, matching the C++ phase outcome values.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PhaseOutcome {
+    #[default]
+    Unknown = 0,
+    Done = 1,
+    Failed = 2,
+}
+
+/// Error values used by the assembler phases.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AssemblerError {
+    #[default]
+    None = 0,
+    InvalidRequest = 1,
+    Capacity = 2,
+    Internal = 4,
+    Untracked = 8,
+}
+
+/// Short alias for callers that use the phase's error type directly.
+pub type Error = AssemblerError;
+
+/// Bounded allocation result copied from the allocator completion context.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AllocationPlan {
+    pub tensor_count: u32,
+    pub interval_count: u32,
+    pub required_buffer_bytes: u64,
+}
+
+/// Copied reserve request consumed by the reserve-build actor.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReserveGraphRequest {
+    pub max_node_count: u32,
+    pub max_tensor_count: u32,
+    pub bytes_per_tensor: u64,
+    pub workspace_capacity_bytes: u64,
+}
+
+/// Runtime event corresponding to C++ `assembler::event::reserve_graph`.
+///
+/// Inputs and prerequisite state are copied before dispatch so the actor never
+/// retains caller references or pointers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AssemblerEventReserveGraph {
+    pub request: ReserveGraphRequest,
+    pub validate_outcome: PhaseOutcome,
+    pub build_outcome: PhaseOutcome,
+    pub alloc_outcome: PhaseOutcome,
+    pub assembled_node_count: u32,
+    pub assembled_tensor_count: u32,
+    pub alloc_plan: AllocationPlan,
+    pub err: AssemblerError,
+}
+
+impl AssemblerEventReserveGraph {
+    /// Creates an event from bounded request scalars and prerequisite outcome.
+    #[must_use]
+    pub const fn new(
+        max_node_count: u32,
+        max_tensor_count: u32,
+        bytes_per_tensor: u64,
+        workspace_capacity_bytes: u64,
+        validate_outcome: PhaseOutcome,
+    ) -> Self {
+        Self {
+            request: ReserveGraphRequest {
+                max_node_count,
+                max_tensor_count,
+                bytes_per_tensor,
+                workspace_capacity_bytes,
+            },
+            validate_outcome,
+            build_outcome: PhaseOutcome::Unknown,
+            alloc_outcome: PhaseOutcome::Unknown,
+            assembled_node_count: 0,
+            assembled_tensor_count: 0,
+            alloc_plan: AllocationPlan {
+                tensor_count: 0,
+                interval_count: 0,
+                required_buffer_bytes: 0,
+            },
+            err: AssemblerError::None,
+        }
+    }
+}
 
 sml! {
     GraphAssemblerReserveBuildPass {
@@ -36,83 +124,174 @@ sml! {
     }
 }
 
-/// Context for `GraphAssemblerReserveBuildPass` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
+/// Context for `GraphAssemblerReserveBuildPass` with bounded copied state.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct GraphAssemblerReserveBuildPassContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    pub request: ReserveGraphRequest,
+    pub validate_outcome: PhaseOutcome,
+    pub build_outcome: PhaseOutcome,
+    pub alloc_outcome: PhaseOutcome,
+    pub assembled_node_count: u32,
+    pub assembled_tensor_count: u32,
+    pub alloc_plan: AllocationPlan,
+    pub err: AssemblerError,
+}
+
+impl GraphAssemblerReserveBuildPassContext {
+    /// Copies an input event into the single-writer actor context.
+    pub fn set_event(&mut self, event: AssemblerEventReserveGraph) {
+        self.request = event.request;
+        self.validate_outcome = event.validate_outcome;
+        self.build_outcome = event.build_outcome;
+        self.alloc_outcome = event.alloc_outcome;
+        self.assembled_node_count = event.assembled_node_count;
+        self.assembled_tensor_count = event.assembled_tensor_count;
+        self.alloc_plan = event.alloc_plan;
+        self.err = event.err;
+    }
 }
 
 impl GraphAssemblerReserveBuildPassStateMachineContext for GraphAssemblerReserveBuildPassContext {
     fn mark_done(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::mark_done
-        todo!(
-            "TODO: port action `mark_done` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Done;
+        self.assembled_node_count = self.request.max_node_count;
+        self.assembled_tensor_count = self.request.max_tensor_count;
+        self.err = AssemblerError::None;
+        Ok(())
     }
     fn mark_failed_capacity(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::mark_failed_capacity
-        todo!(
-            "TODO: port action `mark_failed_capacity` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::Capacity;
+        Ok(())
     }
     fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::mark_failed_invalid_request
-        todo!(
-            "TODO: port action `mark_failed_invalid_request` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::InvalidRequest;
+        Ok(())
     }
     fn mark_failed_prereq(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::mark_failed_prereq
-        todo!(
-            "TODO: port action `mark_failed_prereq` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
     fn on_unexpected_from_assemble_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
     fn on_unexpected_from_assembled(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
     fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
     fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/actions.hpp"
-        )
+        self.build_outcome = PhaseOutcome::Failed;
+        self.err = AssemblerError::Internal;
+        Ok(())
     }
     fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp::phase_capacity_exceeded
-        todo!(
-            "TODO: port guard `phase_capacity_exceeded` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp"
-        )
+        let request = self.request;
+        let overflow = product_overflows_u64(request.max_tensor_count as u64, request.bytes_per_tensor);
+        Ok(self.err == AssemblerError::None
+            && self.validate_outcome == PhaseOutcome::Done
+            && request.max_tensor_count != 0
+            && request.bytes_per_tensor != 0
+            && (overflow
+                || (request.max_tensor_count as u64).saturating_mul(request.bytes_per_tensor)
+                    > request.workspace_capacity_bytes))
     }
     fn phase_done(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp::phase_done
-        todo!(
-            "TODO: port guard `phase_done` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp"
-        )
+        let request = self.request;
+        let overflow = product_overflows_u64(request.max_tensor_count as u64, request.bytes_per_tensor);
+        Ok(self.err == AssemblerError::None
+            && self.validate_outcome == PhaseOutcome::Done
+            && request.max_node_count != 0
+            && request.max_tensor_count != 0
+            && request.bytes_per_tensor != 0
+            && !overflow
+            && (request.max_tensor_count as u64) * request.bytes_per_tensor
+                <= request.workspace_capacity_bytes)
     }
     fn phase_invalid_request(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp::phase_invalid_request
-        todo!(
-            "TODO: port guard `phase_invalid_request` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp"
-        )
+        let request = self.request;
+        Ok(self.err == AssemblerError::None
+            && self.validate_outcome == PhaseOutcome::Done
+            && (request.max_node_count == 0
+                || request.max_tensor_count == 0
+                || request.bytes_per_tensor == 0))
     }
-    fn phase_prereq_failed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp::phase_prereq_failed
-        todo!(
-            "TODO: port guard `phase_prereq_failed` from emel.cpp/src/emel/graph/assembler/reserve_build_pass/guards.hpp"
-        )
+}
+
+fn product_overflows_u64(lhs: u64, rhs: u64) -> bool {
+    lhs != 0 && rhs > u64::MAX / lhs
+}
+
+/// Single-writer, synchronous reserve-build actor.
+pub struct GraphAssemblerReserveBuildPass {
+    machine: GraphAssemblerReserveBuildPassStateMachine<GraphAssemblerReserveBuildPassContext>,
+}
+
+impl Default for GraphAssemblerReserveBuildPass {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GraphAssemblerReserveBuildPass {
+    /// Creates an actor in its generated deciding state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: GraphAssemblerReserveBuildPassStateMachine::new(
+                GraphAssemblerReserveBuildPassContext::default(),
+            ),
+        }
+    }
+
+    /// Processes one copied reserve-graph completion synchronously.
+    pub fn process_event(&mut self, event: AssemblerEventReserveGraph) -> bool {
+        if !self.machine.is(&GraphAssemblerReserveBuildPassStates::Deciding) {
+            self.machine.context_mut().build_outcome = PhaseOutcome::Failed;
+            self.machine.context_mut().err = AssemblerError::Internal;
+            return false;
+        }
+        self.machine.context_mut().set_event(event);
+        self.machine.process_event(event).is_ok()
+    }
+
+    /// Returns the generated machine state.
+    #[must_use]
+    pub fn state(&self) -> GraphAssemblerReserveBuildPassStates {
+        *self.machine.state()
+    }
+
+    /// Returns whether the actor is waiting for the completion event.
+    #[must_use]
+    pub fn is_deciding(&self) -> bool {
+        self.machine.is(&GraphAssemblerReserveBuildPassStates::Deciding)
+    }
+
+    /// Returns whether the build completed successfully.
+    #[must_use]
+    pub fn is_assembled(&self) -> bool {
+        self.machine.is(&GraphAssemblerReserveBuildPassStates::Assembled)
+    }
+
+    /// Returns whether the build failed.
+    #[must_use]
+    pub fn is_assemble_failed(&self) -> bool {
+        self.machine
+            .is(&GraphAssemblerReserveBuildPassStates::AssembleFailed)
+    }
+
+    /// Returns the copied phase context.
+    #[must_use]
+    pub fn context(&self) -> &GraphAssemblerReserveBuildPassContext {
+        self.machine.context()
     }
 }
