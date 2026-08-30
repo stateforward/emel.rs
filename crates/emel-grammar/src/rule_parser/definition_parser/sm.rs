@@ -1,5 +1,4 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned synchronous definition-parser token classifier.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -14,17 +13,70 @@
     missing_docs
 )]
 
+use super::super::lexer::TokenKind;
 use sml::sml;
 
-// --- machine GbnfRuleParserDefinitionParser from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/sm.hpp ---
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct RuleParserEventParseRules;
+/// Values from the pinned definition-parser `parse_result` enum.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ParseResult {
+    /// No supported token classification.
+    #[default]
+    Unknown = 0,
+    /// A definition operator token (`::=`).
+    DefinitionOperator = 1,
+}
+
+/// Owned result produced by one definition-parser dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParseOutcome {
+    /// The token was classified as a definition operator.
+    Parsed(ParseResult),
+    /// Input was absent or was not a definition operator.
+    ParseFailed,
+    /// An event arrived after classification completed.
+    Unexpected,
+}
+
+/// Copied input carrying the lexer token kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuleParserEventParseRules {
+    /// The token kind, or `None` when no token was emitted.
+    pub token_kind: Option<TokenKind>,
+}
+
+impl RuleParserEventParseRules {
+    /// Creates an input from a token kind.
+    #[must_use]
+    pub const fn new(token_kind: TokenKind) -> Self {
+        Self {
+            token_kind: Some(token_kind),
+        }
+    }
+
+    /// Creates an absent-input event.
+    #[must_use]
+    pub const fn absent() -> Self {
+        Self { token_kind: None }
+    }
+}
+
+impl Default for RuleParserEventParseRules {
+    fn default() -> Self {
+        Self::absent()
+    }
+}
+
+impl From<TokenKind> for RuleParserEventParseRules {
+    fn from(token_kind: TokenKind) -> Self {
+        Self::new(token_kind)
+    }
+}
 
 sml! {
     GbnfRuleParserDefinitionParser {
-        "parsed"_s <= *"deciding"_s + completion<RuleParserEventParseRules> [token_definition_operator] / consume_definition_operator,
-        "parse_failed"_s <= "deciding"_s + completion<RuleParserEventParseRules> [parse_failed] / dispatch_parse_failed,
+        "parsed"_s <= *"deciding"_s + event<RuleParserEventParseRules> [token_definition_operator] / consume_definition_operator,
+        "parse_failed"_s <= "deciding"_s + event<RuleParserEventParseRules> [parse_failed] / dispatch_parse_failed,
         "unexpected_event"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
         "unexpected_event"_s <= "parsed"_s + unexpected_event<_> / on_unexpected_from_parsed,
         "unexpected_event"_s <= "parse_failed"_s + unexpected_event<_> / on_unexpected_from_parse_failed,
@@ -34,59 +86,164 @@ sml! {
     }
 }
 
-/// Context for `GbnfRuleParserDefinitionParser` (TODO: context.hpp / detail.hpp).
-#[derive(Debug, Default)]
+/// Context for `GbnfRuleParserDefinitionParser`.
+#[derive(Debug)]
 pub struct GbnfRuleParserDefinitionParserContext {
-    // TODO: port fields from matching context.hpp / detail.hpp in emel.cpp
+    result: ParseOutcome,
+}
+
+impl Default for GbnfRuleParserDefinitionParserContext {
+    fn default() -> Self {
+        Self {
+            result: ParseOutcome::Parsed(ParseResult::Unknown),
+        }
+    }
 }
 
 impl GbnfRuleParserDefinitionParserStateMachineContext for GbnfRuleParserDefinitionParserContext {
-    fn consume_definition_operator(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp::consume_definition_operator
-        todo!(
-            "TODO: port action `consume_definition_operator` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp"
-        )
+    fn consume_definition_operator(
+        &mut self,
+        _event: RuleParserEventParseRules,
+    ) -> Result<(), ()> {
+        self.result = ParseOutcome::Parsed(ParseResult::DefinitionOperator);
+        Ok(())
     }
-    fn dispatch_parse_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp::dispatch_parse_failed
-        todo!(
-            "TODO: port action `dispatch_parse_failed` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp"
-        )
+
+    fn dispatch_parse_failed(&mut self, _event: RuleParserEventParseRules) -> Result<(), ()> {
+        self.result = ParseOutcome::ParseFailed;
+        Ok(())
     }
+
     fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp"
-        )
+        self.result = ParseOutcome::Unexpected;
+        Ok(())
     }
+
     fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp"
-        )
+        self.result = ParseOutcome::Unexpected;
+        Ok(())
     }
+
     fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp"
-        )
+        self.result = ParseOutcome::Unexpected;
+        Ok(())
     }
+
     fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp::on_unexpected
-        todo!(
-            "TODO: port action `on_unexpected` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/actions.hpp"
-        )
+        self.result = ParseOutcome::Unexpected;
+        Ok(())
     }
-    fn parse_failed(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/guards.hpp::parse_failed
-        todo!(
-            "TODO: port guard `parse_failed` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/guards.hpp"
-        )
+
+    fn parse_failed(&self, event: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(!self.token_definition_operator(event)?)
     }
-    fn token_definition_operator(&self) -> Result<bool, ()> {
-        // TODO: convert from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/guards.hpp::token_definition_operator
-        todo!(
-            "TODO: port guard `token_definition_operator` from emel.cpp/src/emel/gbnf/rule_parser/definition_parser/guards.hpp"
-        )
+
+    fn token_definition_operator(&self, event: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(event.token_kind == Some(TokenKind::DefinitionOperator))
+    }
+}
+
+/// Synchronous actor around the generated definition-parser machine.
+#[derive(Debug)]
+pub struct GbnfRuleParserDefinitionParserActor {
+    machine: GbnfRuleParserDefinitionParserStateMachine<
+        GbnfRuleParserDefinitionParserContext,
+    >,
+}
+
+impl Default for GbnfRuleParserDefinitionParserActor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GbnfRuleParserDefinitionParserActor {
+    /// Creates an actor in the generated initial state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: GbnfRuleParserDefinitionParserStateMachine::new(Default::default()),
+        }
+    }
+
+    /// Processes one copied token kind to completion and returns an owned result.
+    pub fn process_event(&mut self, event: RuleParserEventParseRules) -> ParseOutcome {
+        let _ = self.machine.process_event(
+            GbnfRuleParserDefinitionParserEvents::RuleParserEventParseRules(event),
+        );
+        self.machine.context().result
+    }
+
+    /// Classifies one lexer token kind.
+    pub fn classify(&mut self, token_kind: TokenKind) -> ParseOutcome {
+        self.process_event(token_kind.into())
+    }
+
+    /// Processes an absent-input event.
+    pub fn process_absent(&mut self) -> ParseOutcome {
+        self.process_event(RuleParserEventParseRules::absent())
+    }
+
+    /// Processes an explicit unexpected event.
+    pub fn process_unexpected(&mut self) -> ParseOutcome {
+        let _ = self
+            .machine
+            .process_event(GbnfRuleParserDefinitionParserEvents::UnexpectedEvent);
+        self.machine.context().result
+    }
+
+    /// Returns generated state inspection data.
+    #[must_use]
+    pub fn state(&self) -> &GbnfRuleParserDefinitionParserStates {
+        self.machine.state()
+    }
+
+    /// Reports whether the generated machine is in `state`.
+    #[must_use]
+    pub fn is(&self, state: &GbnfRuleParserDefinitionParserStates) -> bool {
+        self.machine.is(state)
+    }
+}
+
+/// Short actor alias for definition-parser callers.
+pub type DefinitionParser = GbnfRuleParserDefinitionParserActor;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_definition_operator() {
+        let mut parser = DefinitionParser::new();
+        assert_eq!(
+            parser.classify(TokenKind::DefinitionOperator),
+            ParseOutcome::Parsed(ParseResult::DefinitionOperator)
+        );
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::Parsed));
+    }
+
+    #[test]
+    fn rejects_unsupported_and_absent_input() {
+        let mut parser = DefinitionParser::new();
+        assert_eq!(
+            parser.classify(TokenKind::Identifier),
+            ParseOutcome::ParseFailed
+        );
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::ParseFailed));
+
+        let mut parser = DefinitionParser::new();
+        assert_eq!(parser.process_absent(), ParseOutcome::ParseFailed);
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::ParseFailed));
+    }
+
+    #[test]
+    fn reports_explicit_unexpected_event() {
+        let mut parser = DefinitionParser::new();
+        assert_eq!(
+            parser.classify(TokenKind::DefinitionOperator),
+            ParseOutcome::Parsed(ParseResult::DefinitionOperator)
+        );
+        assert_eq!(parser.process_unexpected(), ParseOutcome::Unexpected);
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::UnexpectedEvent));
     }
 }
