@@ -1,5 +1,8 @@
-//! State machine scaffold port — not a stable public API.
-//! Bodies are stubs (`todo!`) until contexts/guards/actions are ported from C++.
+//! Source-aligned bounded layer actors from the pinned layer state machines.
+//!
+//! The pinned implementation supplies numerical layer detail through synchronous
+//! callbacks. Actors own sequencing, validation, route guards, and outcomes;
+//! callbacks own the data plane and must not re-enter an actor.
 
 #![allow(
     clippy::enum_variant_names,
@@ -15,19 +18,77 @@
     missing_docs
 )]
 
+use core::cell::Cell;
 use sml::sml;
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventChunk4Run;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum LayerDtype { #[default] Unknown = 0, F32 = 1, F16 = 2, Bf16 = 3, Q8_0 = 4, Q8_K = 5 }
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventChunk8Run;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ResidualRoute { #[default] Attention = 0, Shortconv = 1 }
 
-/// Runtime event shell (TODO: fields from events/detail).
-#[derive(Debug, Default, Clone)]
-pub struct EventScalarRun;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AttentionQkNormRoute { #[default] None = 0, HeadwiseRms = 1 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum AttentionVNormRoute { #[default] None = 0, Rms = 1 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum WindowMode { #[default] Resident = 0, Streamed = 1 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayerOperation { PrepareScalar, Normalize, Attention, Shortconv, FeedForward }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum LayerError { #[default] None = 0, InvalidRequest = 1, Kernel = 2, UnsupportedRoute = 3, Unexpected = 4 }
+
+pub type LayerKernelCallback = fn(LayerOperation, &LayerRequest) -> bool;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayerRequest {
+    pub dtype: LayerDtype, pub hidden_rows: usize, pub hidden_cols: usize,
+    pub q_dim: usize, pub kv_dim: usize, pub ffn_dim: usize,
+    pub layer_index: i32, pub token_base: usize,
+    pub residual: ResidualRoute, pub qk_norm: AttentionQkNormRoute,
+    pub v_norm: AttentionVNormRoute, pub window_mode: WindowMode,
+    pub callback: Option<LayerKernelCallback>,
+}
+
+impl LayerRequest {
+    pub const MAX_DIMENSION: usize = 1 << 20;
+    #[must_use]
+    pub const fn new(dtype: LayerDtype, hidden_rows: usize, hidden_cols: usize, q_dim: usize, kv_dim: usize, ffn_dim: usize, layer_index: i32, token_base: usize) -> Self {
+        Self { dtype, hidden_rows, hidden_cols, q_dim, kv_dim, ffn_dim, layer_index, token_base, residual: ResidualRoute::Attention, qk_norm: AttentionQkNormRoute::None, v_norm: AttentionVNormRoute::None, window_mode: WindowMode::Resident, callback: None }
+    }
+    #[must_use]
+    pub const fn common_valid(self) -> bool {
+        !matches!(self.dtype, LayerDtype::Unknown) && self.hidden_rows != 0 && self.hidden_cols != 0 && self.q_dim != 0 && self.kv_dim != 0 && self.ffn_dim != 0 && self.hidden_rows <= Self::MAX_DIMENSION && self.hidden_cols <= Self::MAX_DIMENSION && self.q_dim <= Self::MAX_DIMENSION && self.kv_dim <= Self::MAX_DIMENSION && self.ffn_dim <= Self::MAX_DIMENSION && self.layer_index >= 0
+    }
+    #[must_use] pub const fn scalar_valid(self) -> bool { self.common_valid() && self.hidden_rows == 1 }
+    #[must_use] pub const fn chunk4_valid(self) -> bool { self.common_valid() && self.hidden_rows == 4 && matches!(self.dtype, LayerDtype::Q8_0 | LayerDtype::Q8_K) }
+    #[must_use] pub const fn chunk8_valid(self) -> bool { self.common_valid() && self.hidden_rows == 8 && self.dtype == LayerDtype::Q8_K }
+}
+
+#[derive(Clone, Debug)]
+pub struct EventScalarRun { pub request: LayerRequest, pub stream_ready: Cell<bool>, pub normalized_ok: Cell<bool>, pub residual_ok: Cell<bool>, pub feed_forward_ok: Cell<bool>, pub succeeded: Cell<bool>, pub failed: Cell<bool>, pub error: Cell<LayerError> }
+impl Default for EventScalarRun { fn default() -> Self { Self::new(LayerRequest::default()) } }
+impl EventScalarRun { #[must_use] pub fn new(request: LayerRequest) -> Self { Self { request, stream_ready: Cell::new(false), normalized_ok: Cell::new(false), residual_ok: Cell::new(false), feed_forward_ok: Cell::new(false), succeeded: Cell::new(false), failed: Cell::new(false), error: Cell::new(LayerError::None) } } }
+
+#[derive(Clone, Debug)]
+pub struct EventChunk4Run { pub request: LayerRequest, pub normalized_ok: Cell<bool>, pub residual_ok: Cell<bool>, pub feed_forward_ok: Cell<bool>, pub succeeded: Cell<bool>, pub failed: Cell<bool>, pub error: Cell<LayerError> }
+impl Default for EventChunk4Run { fn default() -> Self { Self::new(LayerRequest::default()) } }
+impl EventChunk4Run { #[must_use] pub fn new(request: LayerRequest) -> Self { Self { request, normalized_ok: Cell::new(false), residual_ok: Cell::new(false), feed_forward_ok: Cell::new(false), succeeded: Cell::new(false), failed: Cell::new(false), error: Cell::new(LayerError::None) } } }
+
+#[derive(Clone, Debug)]
+pub struct EventChunk8Run { pub request: LayerRequest, pub normalized_ok: Cell<bool>, pub residual_ok: Cell<bool>, pub feed_forward_ok: Cell<bool>, pub succeeded: Cell<bool>, pub failed: Cell<bool>, pub error: Cell<LayerError> }
+impl Default for EventChunk8Run { fn default() -> Self { Self::new(LayerRequest::default()) } }
+impl EventChunk8Run { #[must_use] pub fn new(request: LayerRequest) -> Self { Self { request, normalized_ok: Cell::new(false), residual_ok: Cell::new(false), feed_forward_ok: Cell::new(false), succeeded: Cell::new(false), failed: Cell::new(false), error: Cell::new(LayerError::None) } } }
 
 // --- machine TextGeneratorLayerScalarModel from emel.cpp/src/emel/text/generator/layer/sm.hpp ---
 sml! {
