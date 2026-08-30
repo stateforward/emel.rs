@@ -353,21 +353,8 @@ pub enum ConditionerError {
     Untracked,
 }
 
-/// Formatting request supplied to an injected formatter.
-#[derive(Debug)]
-pub struct FormatRequest<'a> {
-    pub messages: &'a [ChatMessage<'a>],
-    pub add_generation_prompt: bool,
-    pub enable_thinking: bool,
-    pub output: &'a mut [u8],
-    pub output_length: &'a mut usize,
-}
-
-/// Synchronous formatter dependency. It must not retain the request borrows.
-pub trait Formatter {
-    fn format(&mut self, request: FormatRequest<'_>) -> Result<(), ConditionerError>;
-}
-
+/// Canonical stateless formatter contracts and raw implementation.
+pub use formatter::{ChatMessage, FormatRequest, Formatter, format_raw, raw_formatter};
 /// Synchronous tokenizer dependency. It must write only to caller-owned output.
 pub trait Tokenizer {
     fn bind(&mut self) -> Result<(), ConditionerError>;
@@ -458,41 +445,6 @@ pub trait ConditionerObserver {
     fn binding_error(&mut self, error: ConditionerError);
     fn conditioning_done(&mut self, outcome: ConditioningDone);
     fn conditioning_error(&mut self, error: ConditionerError);
-}
-
-/// A role/content pair accepted by the raw formatter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChatMessage<'a> {
-    pub role: &'a [u8],
-    pub content: &'a [u8],
-}
-
-/// Formats messages into caller-owned bytes using the reference raw contract.
-///
-/// # Errors
-///
-/// Returns [`ConditionerError::InvalidArgument`] when the output is too small
-/// or the total message length overflows.
-pub fn format_raw(
-    messages: &[ChatMessage<'_>],
-    output: &mut [u8],
-) -> Result<usize, ConditionerError> {
-    let required = messages
-        .iter()
-        .try_fold(0usize, |total, message| {
-            total.checked_add(message.content.len())
-        })
-        .ok_or(ConditionerError::InvalidArgument)?;
-    if required > output.len() {
-        return Err(ConditionerError::InvalidArgument);
-    }
-    let mut offset = 0;
-    for message in messages {
-        let end = offset + message.content.len();
-        output[offset..end].copy_from_slice(message.content);
-        offset = end;
-    }
-    Ok(required)
 }
 
 impl Conditioner {
@@ -632,8 +584,7 @@ impl Conditioner {
 }
 
 fn default_formatter(request: FormatRequest<'_>) -> Result<(), ConditionerError> {
-    *request.output_length = format_raw(request.messages, request.output)?;
-    Ok(())
+    raw_formatter(request)
 }
 pub(crate) mod conditioner;
 pub(crate) mod detokenizer;
