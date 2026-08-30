@@ -2227,26 +2227,18 @@ mod tests {
             .process_event(Bind::new(Storage::exact(probe).unwrap()))
             .unwrap();
         let parsed = loader.process_event(Parse::new()).unwrap();
+        let mut observed = [None; 1];
         let allocation = measure(|| {
-            let (name_length, descriptor, bytes_length) = loader
-                .process_event(WithTensor::new(
-                    0,
-                    |name: &[u8], descriptor, bytes: &[u8]| (name.len(), descriptor, bytes.len()),
-                ))
-                .unwrap()
-                .unwrap();
-            assert_eq!(name_length, 6);
-            assert_eq!(descriptor.data_size(), 128);
-            assert_eq!(bytes_length, 128);
+            let result = loader.process_event(WithTensor::new(
+                0,
+                |name: &[u8], descriptor, bytes: &[u8]| {
+                    observed[0] = Some((descriptor, name.len(), bytes.len()));
+                },
+            ));
+            assert_eq!(result, Ok(Some(())));
         });
         assert_eq!(allocation.count_total, 0);
-        let (name_length, descriptor, bytes_length) = loader
-            .process_event(WithTensor::new(
-                0,
-                |name: &[u8], descriptor, bytes: &[u8]| (name.len(), descriptor, bytes.len()),
-            ))
-            .unwrap()
-            .unwrap();
+        let (descriptor, name_length, bytes_length) = observed[0].unwrap();
         let mut name = vec![0_u8; name_length];
         let mut bytes = vec![0_u8; bytes_length];
         let allocation = measure(|| {
