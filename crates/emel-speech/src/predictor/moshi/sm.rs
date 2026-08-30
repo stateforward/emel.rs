@@ -234,14 +234,14 @@ sml! {
         "state_uninitialized"_s <= "state_reset_memory_result_decision"_s + completion<ResetRun> [guard_reset_memory_succeeded] / effect_reset_session_from_state_reset_memory_result_decision,
         "state_reset_failed"_s <= "state_reset_memory_result_decision"_s + completion<ResetRun> [guard_reset_memory_failed] / effect_mark_reset_memory_failed,
         "state_uninitialized"_s <= "state_reset_failed"_s + completion<ResetRun> / effect_reset_session_from_state_reset_failed,
-        "state_uninitialized"_s <= "state_uninitialized"_s + unexpectedevent<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_uninitialized,
-        "state_uninitialized"_s <= "state_uninitialized"_s + unexpectedevent<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_uninitialized,
-        "state_session_ready"_s <= "state_session_ready"_s + unexpectedevent<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_session_ready,
-        "state_session_ready"_s <= "state_session_ready"_s + unexpectedevent<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_session_ready,
-        "state_execution_ready"_s <= "state_execution_ready"_s + unexpectedevent<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_execution_ready,
-        "state_execution_ready"_s <= "state_execution_ready"_s + unexpectedevent<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_execution_ready,
-        "state_prediction_ready"_s <= "state_prediction_ready"_s + unexpectedevent<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_prediction_ready,
-        "state_prediction_ready"_s <= "state_prediction_ready"_s + unexpectedevent<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_prediction_ready,
+        "state_uninitialized"_s <= "state_uninitialized"_s + unexpected_event<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_uninitialized,
+        "state_uninitialized"_s <= "state_uninitialized"_s + unexpected_event<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_uninitialized,
+        "state_session_ready"_s <= "state_session_ready"_s + unexpected_event<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_session_ready,
+        "state_session_ready"_s <= "state_session_ready"_s + unexpected_event<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_session_ready,
+        "state_execution_ready"_s <= "state_execution_ready"_s + unexpected_event<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_execution_ready,
+        "state_execution_ready"_s <= "state_execution_ready"_s + unexpected_event<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_execution_ready,
+        "state_prediction_ready"_s <= "state_prediction_ready"_s + unexpected_event<_> [guard_unexpected_error_out_present] / effect_mark_unexpected_and_store_from_state_prediction_ready,
+        "state_prediction_ready"_s <= "state_prediction_ready"_s + unexpected_event<_> [guard_unexpected_error_out_absent] / effect_mark_unexpected_from_state_prediction_ready,
     }
 }
 #[derive(Debug)] pub struct SpeechPredictorMoshiContext{model:ModelContract,voice:VoiceContract,initialized:bool,voice_loaded:bool,voice_ready:bool,prompt_started:bool,prompt_ready:bool,voice_frame_index:i32,pre_remaining:i32,text_remaining:i32,post_remaining:i32,prompt_offset:i64,lmgen_offset:i64,codebook_count:i32,lmgen_delayed_dep_q:i32,lmgen_needed_tokens:i32,lmgen_rows:i32,max_delay:i32,policy_step_size:i32,policy_output_count:i32,embedding_frame_ok:bool,memory_accepted:bool,memory_error:PredictorError,graph_accepted:bool,graph_error:PredictorError,last_error:PredictorError,pending_error_out:bool,prompt_frame_text:i32,sequence_id:i32,last_complete:bool,last_remaining:i32}
