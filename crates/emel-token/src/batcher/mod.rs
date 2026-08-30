@@ -3,8 +3,8 @@
 mod sm;
 
 pub use sm::{
-    BatchError, BatchOutputs, BatchRequest, BatchResult, MAX_SEQ, MAX_TOKENS, PositionSeedError,
-    PositionSeedFn, SEQ_WORDS,
+    BatchError, BatchOutputs, BatchRequest, BatchResult, MAX_SEQ, MAX_TOKENS, PositionSeedContext,
+    PositionSeedError, PositionSeedFn, PositionSeedResolver, SEQ_WORDS,
 };
 
 /// Stateful single-writer token batcher for the bounded validation slice.

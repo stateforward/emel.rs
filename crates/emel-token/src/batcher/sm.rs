@@ -30,8 +30,24 @@ pub enum PositionSeedError {
     InvalidRequest,
 }
 
-/// Synchronous, non-owning position seed provider.
-pub type PositionSeedFn = fn(i32) -> Result<i32, PositionSeedError>;
+/// Request-specific, statically dispatched position-seed context.
+#[derive(Clone, Copy, Debug)]
+pub struct PositionSeedContext<'a> {
+    /// Caller-owned seed positions indexed by sequence identifier.
+    pub seeds: &'a [i32],
+}
+
+/// Safe callback/context shape for position-seed resolution.
+pub type PositionSeedFn = fn(&PositionSeedContext<'_>, i32) -> Result<i32, PositionSeedError>;
+
+/// A borrowed position-seed resolver and its request-specific context.
+#[derive(Clone, Copy, Debug)]
+pub struct PositionSeedResolver<'a> {
+    /// Typed request context.
+    pub context: PositionSeedContext<'a>,
+    /// Statically dispatched resolver.
+    pub resolve: PositionSeedFn,
+}
 
 /// Caller-owned output buffers populated by the batcher.
 pub struct BatchOutputs<'a> {
@@ -63,7 +79,7 @@ pub struct BatchRequest<'a> {
     pub output_mask_input: Option<&'a [i8]>,
     pub output_all: bool,
     pub enforce_single_output_per_seq: bool,
-    pub resolve_position_seed: Option<PositionSeedFn>,
+    pub resolve_position_seed: Option<PositionSeedResolver<'a>>,
     pub seq_mask_words_out: Option<&'a mut usize>,
     pub positions_count_out: Option<&'a mut usize>,
     pub outputs_total_out: Option<&'a mut usize>,
@@ -202,7 +218,7 @@ struct RequestView<'a> {
     output_mask_input: Option<&'a [i8]>,
     output_all: bool,
     enforce_single_output_per_seq: bool,
-    resolve_position_seed: Option<PositionSeedFn>,
+    resolve_position_seed: Option<PositionSeedResolver<'a>>,
     seq_mask_words_out: Option<&'a Cell<usize>>,
     positions_count_out: Option<&'a Cell<usize>>,
     outputs_total_out: Option<&'a Cell<usize>>,
@@ -512,35 +528,46 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(!event.request.output_all && !output_mask_present(&event.request))
     }
     fn set_output_all(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        for o in event.outputs.output_mask {
-            o.set(1);
+        let count = event.request.token_ids.len();
+        for output in event.outputs.output_mask.iter().take(count) {
+            output.set(1);
         }
         Ok(())
     }
     fn copy_output(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         let input = event.request.output_mask_input.ok_or(())?;
-        for (o, i) in event.outputs.output_mask.iter().zip(input) {
-            o.set(*i);
+        let count = event.request.token_ids.len();
+        for (output, input) in event
+            .outputs
+            .output_mask
+            .iter()
+            .take(count)
+            .zip(input.iter().take(count))
+        {
+            output.set(*input);
         }
         Ok(())
     }
     fn set_output_last(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        for o in event.outputs.output_mask {
-            o.set(0);
+        let count = event.request.token_ids.len();
+        for output in event.outputs.output_mask.iter().take(count) {
+            output.set(0);
         }
-        if let Some(o) = event.outputs.output_mask.last() {
-            o.set(1);
+        if let Some(output) = event.outputs.output_mask.get(count.saturating_sub(1)) {
+            output.set(1);
         }
         Ok(())
     }
     fn count_outputs(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        let n = event
+        let count = event.request.token_ids.len();
+        let total = event
             .outputs
             .output_mask
             .iter()
-            .filter(|o| o.get() != 0)
+            .take(count)
+            .filter(|output| output.get() != 0)
             .count();
-        event.context.outputs_total.set(n);
+        event.context.outputs_total.set(total);
         Ok(())
     }
     fn single_output_required(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -744,10 +771,10 @@ fn copy_positions(e: &BatchRuntime<'_>, stride: usize) {
 }
 fn probe_seeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
-    let provider = e.request.resolve_position_seed.unwrap();
+    let resolver = e.request.resolve_position_seed.unwrap();
     for id in 0..MAX_SEQ {
-        match provider(id as i32) {
-            Ok(v) if v >= 0 => {
+        match (resolver.resolve)(&resolver.context, id as i32) {
+            Ok(v) if (0..i32::MAX).contains(&v) => {
                 s.next_pos[id] = v;
                 s.seed_pos[id] = v;
             }
@@ -787,7 +814,11 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
             let mut b = bits.get();
             while b != 0 {
                 let bit = b.trailing_zeros() as usize;
-                s.next_pos[w * 64 + bit] = pos + 1;
+                let Some(next) = pos.checked_add(1) else {
+                    e.context.error.set(DispatchError::InvalidRequest);
+                    return;
+                };
+                s.next_pos[w * 64 + bit] = next;
                 b &= b - 1;
             }
         }
@@ -819,7 +850,11 @@ fn probe_unseeded(e: &BatchRuntime<'_>) {
                 let bit = b.trailing_zeros() as usize;
                 let id = w * 64 + bit;
                 s.seen[id] = true;
-                s.next_pos[id] = pos + 1;
+                let Some(next) = pos.checked_add(1) else {
+                    e.context.error.set(DispatchError::InvalidRequest);
+                    return;
+                };
+                s.next_pos[id] = next;
                 b &= b - 1;
             }
         }
@@ -838,7 +873,11 @@ fn generate_seeded(e: &BatchRuntime<'_>) {
             let mut b = bits.get();
             while b != 0 {
                 let bit = b.trailing_zeros() as usize;
-                s.next_pos[w * 64 + bit] = pos + 1;
+                let Some(next) = pos.checked_add(1) else {
+                    e.context.error.set(DispatchError::InvalidRequest);
+                    return;
+                };
+                s.next_pos[w * 64 + bit] = next;
                 b &= b - 1;
             }
         }
@@ -860,7 +899,11 @@ fn generate_unseeded(e: &BatchRuntime<'_>) {
                 let bit = b.trailing_zeros() as usize;
                 let id = w * 64 + bit;
                 s.seen[id] = true;
-                s.next_pos[id] = pos + 1;
+                let Some(next) = pos.checked_add(1) else {
+                    e.context.error.set(DispatchError::InvalidRequest);
+                    return;
+                };
+                s.next_pos[id] = next;
                 b &= b - 1;
             }
         }

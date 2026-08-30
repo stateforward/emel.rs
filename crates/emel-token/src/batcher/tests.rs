@@ -6,8 +6,11 @@ use super::{
 };
 
 #[allow(clippy::unnecessary_wraps)]
-fn seed_zero(_sequence_id: i32) -> Result<i32, PositionSeedError> {
-    Ok(10)
+fn seed_zero(
+    context: &super::PositionSeedContext<'_>,
+    _sequence_id: i32,
+) -> Result<i32, PositionSeedError> {
+    Ok(context.seeds[0])
 }
 
 #[allow(
@@ -481,7 +484,10 @@ fn seeded_generation_and_output_mask_copy_are_source_branches() {
             output_mask_input: Some(&[1, 0]),
             output_all: false,
             enforce_single_output_per_seq: true,
-            resolve_position_seed: Some(seed_zero),
+            resolve_position_seed: Some(super::PositionSeedResolver {
+                context: super::PositionSeedContext { seeds: &[10] },
+                resolve: seed_zero,
+            }),
             seq_mask_words_out: Some(&mut words),
             positions_count_out: Some(&mut position_count),
             outputs_total_out: Some(&mut total),
@@ -499,6 +505,117 @@ fn seeded_generation_and_output_mask_copy_are_source_branches() {
         (result.outputs_total, words, position_count, total),
         (1, 1, 2, 1)
     );
+}
+
+#[test]
+fn oversized_output_buffers_are_logically_bounded() {
+    let ids = [1, 2];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [0; 2];
+    let mut output = [9, 9, 9, 9];
+    let mut total = 0;
+    let result = TokenBatcher::new()
+        .process_event(BatchRequest {
+            token_ids: &ids,
+            vocab_size: 10,
+            seq_masks: None,
+            seq_mask_words: 1,
+            seq_primary_ids: None,
+            positions: None,
+            output_mask_input: Some(&[1, 0]),
+            output_all: false,
+            enforce_single_output_per_seq: false,
+            resolve_position_seed: None,
+            seq_mask_words_out: None,
+            positions_count_out: None,
+            outputs_total_out: Some(&mut total),
+            outputs: BatchOutputs {
+                seq_primary_ids: &mut primary,
+                seq_masks: &mut masks,
+                positions: &mut positions,
+                output_mask: &mut output,
+            },
+        })
+        .unwrap();
+    assert_eq!(result.outputs_total, 1);
+    assert_eq!(total, 1);
+    assert_eq!(output, [1, 0, 9, 9]);
+}
+
+#[test]
+fn maximum_seed_is_rejected_before_increment() {
+    #[allow(clippy::unnecessary_wraps)]
+    fn max_seed(
+        _context: &super::PositionSeedContext<'_>,
+        _sequence_id: i32,
+    ) -> Result<i32, PositionSeedError> {
+        Ok(i32::MAX)
+    }
+    let ids = [1];
+    let mut primary = [0; 1];
+    let mut masks = [0; 1];
+    let mut positions = [0; 1];
+    let mut output = [0; 1];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: Some(super::PositionSeedResolver {
+            context: super::PositionSeedContext { seeds: &[] },
+            resolve: max_seed,
+        }),
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+}
+
+#[test]
+fn output_last_does_not_touch_oversized_tail() {
+    let ids = [1, 2];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [0; 2];
+    let mut output = [7, 7, 7];
+    let result = TokenBatcher::new()
+        .process_event(BatchRequest {
+            token_ids: &ids,
+            vocab_size: 10,
+            seq_masks: None,
+            seq_mask_words: 1,
+            seq_primary_ids: None,
+            positions: None,
+            output_mask_input: None,
+            output_all: false,
+            enforce_single_output_per_seq: false,
+            resolve_position_seed: None,
+            seq_mask_words_out: None,
+            positions_count_out: None,
+            outputs_total_out: None,
+            outputs: BatchOutputs {
+                seq_primary_ids: &mut primary,
+                seq_masks: &mut masks,
+                positions: &mut positions,
+                output_mask: &mut output,
+            },
+        })
+        .unwrap();
+    assert_eq!(result.outputs_total, 1);
+    assert_eq!(output, [0, 1, 7]);
 }
 
 #[test]
