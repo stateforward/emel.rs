@@ -340,15 +340,13 @@ impl TextGeneratorMatmulContext {
             let mut begin_group = 0usize;
             for lane in 0..lane_count {
                 let lane_groups = groups_per_lane + usize::from(lane < extra_groups);
-    fn effect_reject_parallel_scheduler_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
-        self.err = DecodeWavefrontError::Backend;
-        let mut out = event.out.borrow_mut();
-        out.err = self.err;
-        out.failed_lane = NO_FAILED_LANE;
-        Ok(())
-    }
-PUT 471.=471:
-    machine: TextGeneratorDecodeWavefrontStateMachine<TextGeneratorDecodeWavefrontContext>,
+                let row_begin = begin_group * group_rows.max(1);
+                let row_end = (begin_group + lane_groups) * group_rows.max(1);
+                let slice = RowSlice { row_begin, row_count: row_end.min(event.request.rows) - row_begin };
+                let accepted = callback(&event.request, slice, lane);
+                result.all_lanes_accepted &= accepted;
+                if accepted {
+                    self.lane_kernels[lane].counters.operations = self.lane_kernels[lane].counters.operations.saturating_add(1);
                     self.lane_kernels[lane].counters.rows = self.lane_kernels[lane].counters.rows.saturating_add(slice.row_count as u64);
                 }
                 begin_group += lane_groups;
