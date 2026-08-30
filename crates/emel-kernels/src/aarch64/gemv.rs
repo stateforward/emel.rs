@@ -2,11 +2,13 @@
 //!
 //! The source-backed boundary is deliberately narrow: `src0` is a dense
 //! `[k, m]` F32 matrix, `src1` is one dense `[k]` F32 vector, and the output is
-//! one dense `[m]` F32 vector.  This is the exact single-RHS route selected by
+//! one dense `[m]` F32 vector. This is the exact single-RHS route selected by
 //! `can_run_neon_mul_mat_f32_vector_request`; arbitrary dense matrix routes,
-//! other dtypes, and non-contiguous layouts remain explicit residuals.
+//! other dtypes, and non-contiguous layouts remain explicit residuals. The
+//! execution uses the pinned four-row NEON route when possible, then applies
+//! the same per-row route to the remaining rows.
 //!
-//! Capability detection happens during construction.  The dispatch action
+//! Capability detection happens during construction. The dispatch action
 //! receives a typed `pulp::aarch64::Neon` backend and therefore never performs
 //! runtime backend selection or silently falls back to scalar code.
 
@@ -269,34 +271,93 @@ impl WithSimd for GemvOperation<'_> {
             k,
         } = self;
 
-        for (row_index, output_value) in output.iter_mut().enumerate().take(m) {
-            let row = &lhs[row_index * k..(row_index + 1) * k];
-            let vector_count = (k / 16) * 16;
-            let (row_prefix, row_tail) = row.split_at(vector_count);
-            let (rhs_prefix, rhs_tail) = rhs.split_at(vector_count);
-            let (row_vectors, _) = S::as_simd_f32s(row_prefix);
-            let (rhs_vectors, _) = S::as_simd_f32s(rhs_prefix);
-            let mut sums = [simd.splat_f32s(0.0); 4];
-            let (row_groups, _) = row_vectors.as_chunks::<4>();
-            let (rhs_groups, _) = rhs_vectors.as_chunks::<4>();
-            for (vectors, rhs_vector) in row_groups.iter().zip(rhs_groups) {
-                for (sum, (lhs_vector, rhs_vector)) in
-                    sums.iter_mut().zip(vectors.iter().zip(rhs_vector))
-                {
-                    *sum = simd.mul_add_f32s(*lhs_vector, *rhs_vector, *sum);
-                }
-            }
-            let combined = simd.add_f32s(
-                simd.add_f32s(sums[0], sums[2]),
-                simd.add_f32s(sums[1], sums[3]),
-            );
-            let mut value = simd.reduce_sum_f32s(combined);
-            for (lhs_value, rhs_value) in row_tail.iter().zip(rhs_tail) {
-                value += lhs_value * rhs_value;
-            }
-            *output_value = value;
+        let mut row_index = 0;
+        while row_index + 4 <= m {
+            execute_four_rows(simd, lhs, rhs, output, row_index, k);
+            row_index += 4;
+        }
+        while row_index < m {
+            output[row_index] = execute_one_row(simd, &lhs[row_index * k..(row_index + 1) * k], rhs);
+            row_index += 1;
         }
     }
+}
+
+fn execute_four_rows<S: Simd>(
+    simd: S,
+    lhs: &[f32],
+    rhs: &[f32],
+    output: &mut [f32],
+    row_index: usize,
+    k: usize,
+) {
+    let row0 = &lhs[row_index * k..(row_index + 1) * k];
+    let row1 = &lhs[(row_index + 1) * k..(row_index + 2) * k];
+    let row2 = &lhs[(row_index + 2) * k..(row_index + 3) * k];
+    let row3 = &lhs[(row_index + 3) * k..(row_index + 4) * k];
+    let vector_count = (k / 16) * 16;
+    let (rhs_prefix, rhs_tail) = rhs.split_at(vector_count);
+    let (rhs_vectors, _) = S::as_simd_f32s(rhs_prefix);
+    let (rhs_groups, _) = rhs_vectors.as_chunks::<4>();
+    let mut sums = [[simd.splat_f32s(0.0); 4]; 4];
+
+    for (row, row_sums) in [row0, row1, row2, row3].into_iter().zip(&mut sums) {
+        let (row_prefix, _) = row.split_at(vector_count);
+        let (row_vectors, _) = S::as_simd_f32s(row_prefix);
+        let (row_groups, _) = row_vectors.as_chunks::<4>();
+        for (vectors, rhs_vectors) in row_groups.iter().zip(rhs_groups) {
+            for (sum, (lhs_vector, rhs_vector)) in
+                row_sums.iter_mut().zip(vectors.iter().zip(rhs_vectors))
+            {
+                *sum = simd.mul_add_f32s(*lhs_vector, *rhs_vector, *sum);
+            }
+        }
+    }
+
+    for (row_offset, row_sums) in sums.into_iter().enumerate() {
+        let combined = simd.add_f32s(
+            simd.add_f32s(row_sums[0], row_sums[2]),
+            simd.add_f32s(row_sums[1], row_sums[3]),
+        );
+        let mut value = simd.reduce_sum_f32s(combined);
+        let row = match row_offset {
+            0 => row0,
+            1 => row1,
+            2 => row2,
+            _ => row3,
+        };
+        for (lhs_value, rhs_value) in row[vector_count..].iter().zip(rhs_tail) {
+            value += lhs_value * rhs_value;
+        }
+        output[row_index + row_offset] = value;
+    }
+}
+
+fn execute_one_row<S: Simd>(simd: S, row: &[f32], rhs: &[f32]) -> f32 {
+    let vector_count = (row.len() / 16) * 16;
+    let (row_prefix, row_tail) = row.split_at(vector_count);
+    let (rhs_prefix, rhs_tail) = rhs.split_at(vector_count);
+    let (row_vectors, _) = S::as_simd_f32s(row_prefix);
+    let (rhs_vectors, _) = S::as_simd_f32s(rhs_prefix);
+    let mut sums = [simd.splat_f32s(0.0); 4];
+    let (row_groups, _) = row_vectors.as_chunks::<4>();
+    let (rhs_groups, _) = rhs_vectors.as_chunks::<4>();
+    for (vectors, rhs_vector) in row_groups.iter().zip(rhs_groups) {
+        for (sum, (lhs_vector, rhs_vector)) in
+            sums.iter_mut().zip(vectors.iter().zip(rhs_vector))
+        {
+            *sum = simd.mul_add_f32s(*lhs_vector, *rhs_vector, *sum);
+        }
+    }
+    let combined = simd.add_f32s(
+        simd.add_f32s(sums[0], sums[2]),
+        simd.add_f32s(sums[1], sums[3]),
+    );
+    let mut value = simd.reduce_sum_f32s(combined);
+    for (lhs_value, rhs_value) in row_tail.iter().zip(rhs_tail) {
+        value += lhs_value * rhs_value;
+    }
+    value
 }
 
 #[cfg(test)]
@@ -350,6 +411,54 @@ mod tests {
             super::SCOPE_RESIDUAL,
             "F32 GEMV only (src0[k,m], src1[1,k], dst[1,m]); dense matrix and other dtypes remain unimplemented"
         );
+    }
+
+    #[test]
+    fn four_row_route_matches_pinned_pairing_and_scalar_tail() {
+        let Some(mut kernel) = F32GemvKernel::try_new() else {
+            return;
+        };
+        let k = 17;
+        let lhs = (0..(4 * k))
+            .map(|index| (index as f32) - 20.0)
+            .collect::<Vec<_>>();
+        let rhs = (0..k).map(|index| (index as f32) * 0.25 - 2.0).collect::<Vec<_>>();
+        let mut output = [f32::NAN; 4];
+        assert_eq!(
+            kernel.process_event(OpF32Gemv::new(&lhs, &rhs, 4, k), &mut output),
+            Ok(())
+        );
+        let expected = (0..4)
+            .map(|row| {
+                lhs[row * k..(row + 1) * k]
+                    .iter()
+                    .zip(&rhs)
+                    .map(|(lhs, rhs)| lhs * rhs)
+                    .sum::<f32>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(output.to_vec(), expected);
+        assert!(kernel.is_ready());
+    }
+
+    #[test]
+    fn four_row_reduction_preserves_pinned_cancellation_order() {
+        let Some(mut kernel) = F32GemvKernel::try_new() else {
+            return;
+        };
+        let mut lhs = [0.0_f32; 4 * 32];
+        for row in 0..4 {
+            lhs[row * 32..row * 32 + 8].fill(1.0e20);
+            lhs[row * 32 + 8..row * 32 + 16].fill(-1.0e20);
+            lhs[row * 32 + 16..row * 32 + 32].fill(1.0);
+        }
+        let rhs = [1.0_f32; 32];
+        let mut output = [f32::NAN; 4];
+        assert_eq!(
+            kernel.process_event(OpF32Gemv::new(&lhs, &rhs, 4, 32), &mut output),
+            Ok(())
+        );
+        assert_eq!(output, [16.0; 4]);
     }
 
     #[test]
