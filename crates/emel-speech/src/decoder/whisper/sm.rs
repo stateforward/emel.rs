@@ -340,58 +340,63 @@ fn has_tensor(model: &Data, name: &[u8], dims: &[u64], kind: SerializedType) -> 
         && tensor.bytes().is_some_and(|bytes| !bytes.is_empty())
 }
 
-fn has_decoder_block(model: &Data, block: usize, linear: SerializedType, aux: SerializedType) -> bool {
+fn has_decoder_tensor(model: &Data, block: usize, suffix: &[u8], dims: &[u64], kind: SerializedType) -> bool {
+    let prefix = b"model.decoder.layers.";
     let mut name = [0_u8; 96];
-fn model_valid(request: &EventDecodeRun<'_>) -> bool {
-    let model = request.request.model;
-    let contract = &request.request.contract;
-    contract.vocab_size == VOCAB_SIZE as i32
-        && contract.embedding_length == EMBEDDING_LENGTH as i32
-        && contract.decoder_block_count == DECODER_BLOCK_COUNT as i32
-        && has_tensor(model, b"model.decoder.embed_tokens.weight", &[384, 51865], SerializedType::Q8_0)
-        && (has_tensor(model, b"model.decoder.embed_positions.weight", &[384, 448], SerializedType::Q8_0) || has_tensor(model, b"model.decoder.embed_positions.weight", &[384, 448], SerializedType::F32))
-        && (has_tensor(model, b"model.decoder.layer_norm.weight", &[384], SerializedType::Q8_0) || has_tensor(model, b"model.decoder.layer_norm.weight", &[384], SerializedType::F32))
-        && (has_tensor(model, b"model.decoder.layer_norm.bias", &[384], SerializedType::Q8_0) || has_tensor(model, b"model.decoder.layer_norm.bias", &[384], SerializedType::F32))
-}
-        (b".self_attn.out_proj.weight", &[384, 384], linear),
-        (b".self_attn.out_proj.bias", &[384], aux),
-        (b".self_attn_layer_norm.weight", &[384], aux),
-        (b".self_attn_layer_norm.bias", &[384], aux),
-        (b".encoder_attn.k_proj.weight", &[384, 384], linear),
-        (b".encoder_attn.v_proj.weight", &[384, 384], linear),
-        (b".encoder_attn.v_proj.bias", &[384], aux),
-        (b".encoder_attn.q_proj.weight", &[384, 384], linear),
-        (b".encoder_attn.q_proj.bias", &[384], aux),
-        (b".encoder_attn.out_proj.weight", &[384, 384], linear),
-        (b".encoder_attn.out_proj.bias", &[384], aux),
-        (b".encoder_attn_layer_norm.weight", &[384], aux),
-        (b".encoder_attn_layer_norm.bias", &[384], aux),
-        (b".fc1.weight", &[384, 1536], linear),
-        (b".fc1.bias", &[1536], aux),
-        (b".fc2.weight", &[1536, 384], linear),
-        (b".fc2.bias", &[384], aux),
-        (b".final_layer_norm.weight", &[384], aux),
-        (b".final_layer_norm.bias", &[384], aux),
-    ];
-    let mut index = 0;
-    while index < suffixes.len() {
-        let suffix = suffixes[index];
-        let mut used = 0;
-        for byte in prefix { name[used] = *byte; used += 1; }
-        let mut digits = [0_u8; 3];
-        let mut n = block;
-        let mut count = 0;
-        loop { digits[count] = b'0' + (n % 10) as u8; count += 1; n /= 10; if n == 0 { break; } }
-        while count > 0 { count -= 1; name[used] = digits[count]; used += 1; }
-        for byte in suffix.0 { name[used] = *byte; used += 1; }
-        if !has_tensor(model, &name[..used], suffix.1, suffix.2) { return false; }
-        index += 1;
+    let mut used = prefix.len();
+    name[..used].copy_from_slice(prefix);
+    let mut digits = [0_u8; 20];
+    let mut value = block;
+    let mut digit_count = 0;
+    loop {
+        digits[digit_count] = b'0' + (value % 10) as u8;
+        digit_count += 1;
+        value /= 10;
+        if value == 0 { break; }
     }
-    true
+    while digit_count != 0 {
+        digit_count -= 1;
+        name[used] = digits[digit_count];
+        used += 1;
+    }
+    name[used] = b'.';
+    used += 1;
+    for byte in suffix {
+        name[used] = *byte;
+        used += 1;
+    }
+    has_tensor(model, &name[..used], dims, kind)
 }
 
-fn model_valid(request: &EventDecodeRun<'_, '_>) -> bool {
-    let Some(model) = request.request.contract.model else { return false };
+fn has_decoder_block(model: &Data, block: usize, linear: SerializedType, aux: SerializedType) -> bool {
+    has_decoder_tensor(model, block, b"self_attn.k_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"self_attn.v_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"self_attn.v_proj.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"self_attn.q_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"self_attn.q_proj.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"self_attn.out_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"self_attn.out_proj.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"self_attn_layer_norm.weight", &[384], aux)
+        && has_decoder_tensor(model, block, b"self_attn_layer_norm.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"encoder_attn.k_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"encoder_attn.v_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"encoder_attn.v_proj.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"encoder_attn.q_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"encoder_attn.q_proj.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"encoder_attn.out_proj.weight", &[384, 384], linear)
+        && has_decoder_tensor(model, block, b"encoder_attn.out_proj.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"encoder_attn_layer_norm.weight", &[384], aux)
+        && has_decoder_tensor(model, block, b"encoder_attn_layer_norm.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"fc1.weight", &[384, 1536], linear)
+        && has_decoder_tensor(model, block, b"fc1.bias", &[1536], aux)
+        && has_decoder_tensor(model, block, b"fc2.weight", &[1536, 384], linear)
+        && has_decoder_tensor(model, block, b"fc2.bias", &[384], aux)
+        && has_decoder_tensor(model, block, b"final_layer_norm.weight", &[384], aux)
+        && has_decoder_tensor(model, block, b"final_layer_norm.bias", &[384], aux)
+}
+
+fn model_valid(request: &EventDecodeRun<'_>) -> bool {
+    let model = request.request.model;
     let contract = &request.request.contract;
     contract.vocab_size == VOCAB_SIZE as i32
         && contract.embedding_length == EMBEDDING_LENGTH as i32
@@ -413,7 +418,7 @@ fn required_workspace(frames: i32) -> Option<usize> {
 }
 
 impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
-    fn effect_begin_decode(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> {
+    fn effect_begin_decode(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> {
         self.error = WhisperDecoderError::None;
         self.phase = WhisperDecoderPhase::ModelContractDecision;
         *event.request.token_out = 0;
@@ -422,50 +427,47 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
         *event.request.generated_token_count_out = 0;
         Ok(())
     }
-    fn effect_mark_model_invalid(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::ModelInvalid) }
-    fn effect_mark_encoder_state_invalid(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::EncoderState) }
-    fn effect_mark_decode_policy_invalid(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::DecodePolicy) }
-    fn effect_mark_generated_token_capacity_invalid(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::GeneratedTokenCapacity) }
-    fn effect_mark_logits_capacity_invalid(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::LogitsCapacity) }
-    fn effect_mark_workspace_capacity_invalid(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::WorkspaceCapacity) }
-    fn effect_mark_unsupported_variant(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::UnsupportedVariant) }
-    fn effect_mark_internal_error(&mut self, _: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.mark(WhisperDecoderError::InternalError) }
-
-    fn effect_run_decoder_q8_0_f32_aux(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q8_0F32Aux) }
-    fn effect_run_decoder_q8_0(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q8_0) }
-    fn effect_run_decoder_q4_0(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q4_0) }
-    fn effect_run_decoder_q4_1(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q4_1) }
-
-    fn effect_store_success_error(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { if let Some(error) = event.request.error_out.as_deref_mut() { *error = WhisperDecoderError::None; } Ok(()) }
-    fn effect_store_error_error(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { if let Some(error) = event.request.error_out.as_deref_mut() { *error = self.error; } Ok(()) }
-    fn effect_emit_done(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.phase = WhisperDecoderPhase::Done; if let Some(callback) = event.request.on_done { let _ = callback(DecodeDone { token: *event.request.token_out, confidence_bits: event.request.confidence_out.to_bits(), digest: *event.request.digest_out }); } Ok(()) }
-    fn effect_emit_error(&mut self, event: &EventDecodeRun<'_, '_>) -> Result<(), ()> { self.phase = WhisperDecoderPhase::Errored; if let Some(callback) = event.request.on_error { let _ = callback(DecodeError { error: self.error }); } Ok(()) }
-
-    fn guard_model_contract_valid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(model_valid(event)) }
-    fn guard_model_contract_invalid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!model_valid(event)) }
-    fn guard_encoder_state_valid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { let frames = event.request.encoder_frame_count; Ok(!event.request.encoder_state.is_empty() && (1..=MAX_ENCODER_FRAME_COUNT).contains(&frames) && usize::try_from(frames).ok().and_then(|f| f.checked_mul(EMBEDDING_LENGTH)).is_some_and(|n| event.request.encoder_state.len() >= n)) }
-    fn guard_encoder_state_invalid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!self.guard_encoder_state_valid(event)?) }
-    fn guard_decode_policy_supported(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.policy.supported()) }
-    fn guard_decode_policy_unsupported(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!event.request.policy.supported()) }
-    fn guard_generated_token_capacity_valid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!event.request.generated_tokens.is_empty()) }
-    fn guard_generated_token_capacity_invalid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!self.guard_generated_token_capacity_valid(event)?) }
-    fn guard_logits_capacity_valid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.logits.len() >= VOCAB_SIZE) }
-    fn guard_logits_capacity_invalid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!self.guard_logits_capacity_valid(event)?) }
-    fn guard_workspace_capacity_valid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(required_workspace(event.request.encoder_frame_count).is_some_and(|required| event.request.workspace.len() >= required)) }
-    fn guard_workspace_capacity_invalid(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!self.guard_workspace_capacity_valid(event)?) }
-    fn guard_q8_0_variant(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.contract.model.is_some_and(|m| (0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(m, b, SerializedType::Q8_0, SerializedType::Q8_0)))) }
-    fn guard_q8_0_f32_aux_variant(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.contract.model.is_some_and(|m| (0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(m, b, SerializedType::Q8_0, SerializedType::F32)))) }
-    fn guard_q4_0_variant(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.contract.model.is_some_and(|m| (0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(m, b, SerializedType::Q4_0, SerializedType::Q8_0)))) }
-    fn guard_q4_1_variant(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.contract.model.is_some_and(|m| (0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(m, b, SerializedType::Q4_1, SerializedType::Q8_0)))) }
-    fn guard_unsupported_variant(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(!self.guard_q8_0_variant(event)? && !self.guard_q8_0_f32_aux_variant(event)? && !self.guard_q4_0_variant(event)? && !self.guard_q4_1_variant(event)?) }
-    fn guard_decode_execution_success(&self, _: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(self.error == WhisperDecoderError::None) }
-    fn guard_decode_execution_failure(&self, _: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(self.error != WhisperDecoderError::None) }
-    fn guard_has_error_out(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.error_out.is_some()) }
-    fn guard_no_error_out(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.error_out.is_none()) }
-    fn guard_has_done_callback(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.on_done.is_some()) }
-    fn guard_no_done_callback(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.on_done.is_none()) }
-    fn guard_has_error_callback(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.on_error.is_some()) }
-    fn guard_no_error_callback(&self, event: &EventDecodeRun<'_, '_>) -> Result<bool, ()> { Ok(event.request.on_error.is_none()) }
+    fn effect_mark_model_invalid(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::ModelInvalid) }
+    fn effect_mark_encoder_state_invalid(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::EncoderState) }
+    fn effect_mark_decode_policy_invalid(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::DecodePolicy) }
+    fn effect_mark_generated_token_capacity_invalid(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::GeneratedTokenCapacity) }
+    fn effect_mark_logits_capacity_invalid(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::LogitsCapacity) }
+    fn effect_mark_workspace_capacity_invalid(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::WorkspaceCapacity) }
+    fn effect_mark_unsupported_variant(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::UnsupportedVariant) }
+    fn effect_mark_internal_error(&mut self, _: &EventDecodeRun<'_>) -> Result<(), ()> { self.mark(WhisperDecoderError::InternalError) }
+    fn effect_run_decoder_q8_0_f32_aux(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q8_0F32Aux) }
+    fn effect_run_decoder_q8_0(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q8_0) }
+    fn effect_run_decoder_q4_0(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q4_0) }
+    fn effect_run_decoder_q4_1(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { self.run(event, DecodeVariant::Q4_1) }
+    fn effect_store_success_error(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { if let Some(error) = event.request.error_out.as_deref_mut() { *error = WhisperDecoderError::None; } Ok(()) }
+    fn effect_store_error_error(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { if let Some(error) = event.request.error_out.as_deref_mut() { *error = self.error; } Ok(()) }
+    fn effect_emit_done(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { self.phase = WhisperDecoderPhase::Done; if let Some(callback) = event.request.on_done { let _ = callback(DecodeDone { token: *event.request.token_out, confidence_bits: event.request.confidence_out.to_bits(), digest: *event.request.digest_out }); } Ok(()) }
+    fn effect_emit_error(&mut self, event: &EventDecodeRun<'_>) -> Result<(), ()> { self.phase = WhisperDecoderPhase::Errored; if let Some(callback) = event.request.on_error { let _ = callback(DecodeError { error: self.error }); } Ok(()) }
+    fn guard_model_contract_valid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(model_valid(event)) }
+    fn guard_model_contract_invalid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!model_valid(event)) }
+    fn guard_encoder_state_valid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { let frames = event.request.encoder_frame_count; Ok(!event.request.encoder_state.is_empty() && (1..=MAX_ENCODER_FRAME_COUNT).contains(&frames) && usize::try_from(frames).ok().and_then(|f| f.checked_mul(EMBEDDING_LENGTH)).is_some_and(|n| event.request.encoder_state.len() >= n)) }
+    fn guard_encoder_state_invalid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!self.guard_encoder_state_valid(event)?) }
+    fn guard_decode_policy_supported(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.policy.supported()) }
+    fn guard_decode_policy_unsupported(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!event.request.policy.supported()) }
+    fn guard_generated_token_capacity_valid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!event.request.generated_tokens.is_empty()) }
+    fn guard_generated_token_capacity_invalid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!self.guard_generated_token_capacity_valid(event)?) }
+    fn guard_logits_capacity_valid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.logits.len() >= VOCAB_SIZE) }
+    fn guard_logits_capacity_invalid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!self.guard_logits_capacity_valid(event)?) }
+    fn guard_workspace_capacity_valid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(required_workspace(event.request.encoder_frame_count).is_some_and(|required| event.request.workspace.len() >= required)) }
+    fn guard_workspace_capacity_invalid(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!self.guard_workspace_capacity_valid(event)?) }
+    fn guard_q8_0_variant(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok((0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(event.request.model, b, SerializedType::Q8_0, SerializedType::Q8_0))) }
+    fn guard_q8_0_f32_aux_variant(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok((0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(event.request.model, b, SerializedType::Q8_0, SerializedType::F32))) }
+    fn guard_q4_0_variant(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok((0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(event.request.model, b, SerializedType::Q4_0, SerializedType::Q8_0))) }
+    fn guard_q4_1_variant(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok((0..DECODER_BLOCK_COUNT).all(|b| has_decoder_block(event.request.model, b, SerializedType::Q4_1, SerializedType::Q8_0))) }
+    fn guard_unsupported_variant(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(!self.guard_q8_0_variant(event)? && !self.guard_q8_0_f32_aux_variant(event)? && !self.guard_q4_0_variant(event)? && !self.guard_q4_1_variant(event)?) }
+    fn guard_decode_execution_success(&self, _: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(self.error == WhisperDecoderError::None) }
+    fn guard_decode_execution_failure(&self, _: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(self.error != WhisperDecoderError::None) }
+    fn guard_has_error_out(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.error_out.is_some()) }
+    fn guard_no_error_out(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.error_out.is_none()) }
+    fn guard_has_done_callback(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.on_done.is_some()) }
+    fn guard_no_done_callback(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.on_done.is_none()) }
+    fn guard_has_error_callback(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.on_error.is_some()) }
+    fn guard_no_error_callback(&self, event: &EventDecodeRun<'_>) -> Result<bool, ()> { Ok(event.request.on_error.is_none()) }
 
     fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> { self.unexpected() }
     fn effect_on_unexpected_from_state_model_contract_decision(&mut self) -> Result<(), ()> { self.unexpected() }
@@ -488,7 +490,7 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
 }
 
 impl SpeechDecoderWhisperContext {
-    fn run(&mut self, event: &EventDecodeRun<'_, '_>, variant: DecodeVariant) -> Result<(), ()> {
+    fn run(&mut self, event: &EventDecodeRun<'_>, variant: DecodeVariant) -> Result<(), ()> {
         self.phase = match variant { DecodeVariant::Q8_0F32Aux => WhisperDecoderPhase::RunningQ8F32, DecodeVariant::Q8_0 => WhisperDecoderPhase::RunningQ8, DecodeVariant::Q4_0 => WhisperDecoderPhase::RunningQ4_0, DecodeVariant::Q4_1 => WhisperDecoderPhase::RunningQ4_1 };
         let Some(decode) = event.request.decode else { self.error = WhisperDecoderError::InternalError; return Ok(()) };
         let accepted = decode(DecodeKernelRequest { variant, contract: &event.request.contract, encoder_state: event.request.encoder_state, encoder_frame_count: event.request.encoder_frame_count, policy: event.request.policy, generated_tokens: event.request.generated_tokens, generated_token_count_out: event.request.generated_token_count_out, workspace: event.request.workspace, logits: event.request.logits, token_out: event.request.token_out, confidence_out: event.request.confidence_out, digest_out: event.request.digest_out });
