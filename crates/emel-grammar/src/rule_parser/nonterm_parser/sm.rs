@@ -295,6 +295,10 @@ impl GbnfRuleParserNontermParserContext {
 
     fn lookup_candidate(&mut self) {
         let Some(name) = self.name() else { self.lookup_can_insert = false; return; };
+        let name_len = name.len();
+        let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
+        copied_name[..name_len].copy_from_slice(name);
+        let name = &copied_name[..name_len];
         let hash = SymbolTable::hash(name);
         let found = self.symbols.find(name, hash);
         self.lookup_hash = hash;
@@ -304,6 +308,62 @@ impl GbnfRuleParserNontermParserContext {
             && self.next_symbol_id < k_max_gbnf_rules as u32
             && self.symbols.count < k_max_gbnf_symbols as u32
             && self.symbols.has_insert_slot(name, hash);
+    }
+    fn consume_definition_new(&mut self) -> Result<(), ()> {
+        let id = self.next_symbol_id;
+        let Some(name) = self.name() else { return self.fail(); };
+        let name_len = name.len();
+        let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
+        copied_name[..name_len].copy_from_slice(name);
+        if id as usize >= k_max_gbnf_rules || self.symbols.count as usize >= k_max_gbnf_symbols || !self.symbols.insert(&copied_name[..name_len], self.lookup_hash, id) {
+            return self.fail();
+        }
+        self.next_symbol_id += 1;
+        self.rule_defined[id as usize] = true;
+        self.consume(id)
+    }
+
+    fn consume_reference_existing(&mut self) -> Result<(), ()> { self.consume(self.lookup_rule_id) }
+
+    fn consume_reference_new(&mut self) -> Result<(), ()> {
+        let id = self.next_symbol_id;
+        let Some(name) = self.name() else { return self.fail(); };
+        let name_len = name.len();
+        let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
+        copied_name[..name_len].copy_from_slice(name);
+        if id as usize >= k_max_gbnf_rules || self.symbols.count as usize >= k_max_gbnf_symbols || !self.symbols.insert(&copied_name[..name_len], self.lookup_hash, id) {
+            return self.fail();
+        }
+        self.next_symbol_id += 1;
+        self.consume(id)
+    }
+
+PUT 422.=425:
+pub struct GbnfRuleParserNontermParserActor {
+    machine: GbnfRuleParserNontermParserStateMachine<GbnfRuleParserNontermParserContext>,
+}
+
+PUT 460.=465:
+    pub fn process_unexpected_event(&mut self) -> ParseOutcome {
+        self.machine.context_mut().error = Some(NontermParserError::InternalError);
+        self.machine.context_mut().outcome = ParseOutcome::InternalError;
+        self.machine.set_state(GbnfRuleParserNontermParserStates::UnexpectedEvent);
+        self.machine.context().outcome
+    }
+
+
+PUT 374.=378:
+/// Synchronous bounded nonterminal parser child actor.
+pub struct GbnfRuleParserNontermParserActor {
+    machine: GbnfRuleParserNontermParserStateMachine<GbnfRuleParserNontermParserContext>,
+}
+
+PUT 413.=418:
+    pub fn process_unexpected_event(&mut self) -> ParseOutcome {
+        self.machine.context_mut().error = Some(NontermParserError::InternalError);
+        self.machine.context_mut().outcome = ParseOutcome::InternalError;
+        self.machine.set_state(GbnfRuleParserNontermParserStates::UnexpectedEvent);
+        self.machine.context().outcome
     }
 }
 
@@ -371,11 +431,6 @@ impl GbnfRuleParserNontermParserStateMachineContext for GbnfRuleParserNontermPar
     }
 }
 
-/// Synchronous bounded nonterminal parser child actor.
-#[derive(Debug)]
-pub struct GbnfRuleParserNontermParserActor {
-    machine: GbnfRuleParserNontermParserStateMachine<GbnfRuleParserNontermParserContext>,
-}
 
 impl Default for GbnfRuleParserNontermParserActor {
     fn default() -> Self { Self::new() }
@@ -410,12 +465,6 @@ impl GbnfRuleParserNontermParserActor {
     pub fn process_absent(&mut self) -> ParseOutcome { self.process_event(RuleParserEventParseRules::absent()) }
 
     /// Processes an explicit unexpected event.
-    pub fn process_unexpected_event(&mut self) -> ParseOutcome {
-        if self.machine.process_event(GbnfRuleParserNontermParserEvents::UnexpectedEvent).is_err() {
-            self.machine.context_mut().error = Some(NontermParserError::InternalError);
-            self.machine.context_mut().outcome = ParseOutcome::InternalError;
-        }
-        self.machine.context().outcome
     }
 
     /// Returns generated state inspection data.

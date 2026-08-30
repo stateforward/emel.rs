@@ -162,7 +162,7 @@ impl<'a> EventExecuteRun<'a> {
 sml! {
     DiarizationSortformerExecutor {
         "state_model_contract_decision"_s <= *"state_ready"_s + EventExecuteRun(&'dispatch EventExecuteRun<'dispatch>) / effect_begin_execute,
-        "state_tensor_contract_decision"_s <= "state_model_contract_decision"_s + completion<EventExecuteRun<'dispatch>>(&'dispatch EventExecuteRun<'dispatch>) [guard_model_contract_valid],
+        "state_tensor_contract_decision"_s <= "state_model_contract_decision"_s + completion<EventExecuteRun>(&'dispatch EventExecuteRun<'dispatch>) [guard_model_contract_valid],
         "state_error_error_out_decision"_s <= "state_model_contract_decision"_s + completion<EventExecuteRun<'dispatch>>(&'dispatch EventExecuteRun<'dispatch>) [guard_model_contract_invalid] / effect_mark_model_invalid,
         "state_input_shape_decision"_s <= "state_tensor_contract_decision"_s + completion<EventExecuteRun<'dispatch>>(&'dispatch EventExecuteRun<'dispatch>) [guard_tensor_contract_valid],
         "state_error_error_out_decision"_s <= "state_tensor_contract_decision"_s + completion<EventExecuteRun<'dispatch>>(&'dispatch EventExecuteRun<'dispatch>) [guard_tensor_contract_invalid] / effect_mark_tensor_contract_invalid,
