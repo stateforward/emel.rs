@@ -256,8 +256,16 @@ impl<'arena, S: Stager> WindowWithStager<'arena, S> {
     /// Reads resident slot bytes without exposing mutable storage.
     #[must_use]
     pub fn slot_bytes(&self, slot: u32, length: usize) -> Option<&[u8]> {
+        let slot_index = usize::try_from(slot).ok()?;
+        if !self.window.state.bound
+            || slot >= self.window.state.slot_count
+            || self.window.state.slots.get(slot_index)?.lifecycle
+                != detail::SlotLifecycle::Resident
+        {
+            return None;
+        }
         let capacity = self.window.state.slot_capacity_bytes as usize;
-        let start = slot as usize * capacity;
+        let start = slot_index.checked_mul(capacity)?;
         let end = start.checked_add(length)?;
         self.slots.get(start..end)
     }
