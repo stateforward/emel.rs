@@ -174,23 +174,31 @@ sml! {
         "unexpected"_s <= "errored"_s + unexpected_event<EventDetokenize>,
         "unexpected"_s <= "unexpected"_s + unexpected_event<EventBind>,
         "unexpected"_s <= "unexpected"_s + unexpected_event<EventDetokenize>,
-        // Pinned internal reentry rows retained as typed topology records; generated
-        // SML rejects duplicate source/event combinations with differing destinations.
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
-        // unexpected_event<EventBind> unexpected_event<EventDetokenize>
+        "unexpected"_s <= "uninitialized"_s + unexpected_event<_>,
+        "unexpected"_s <= "binding"_s + unexpected_event<_>,
+        "unexpected"_s <= "binding_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "binding_done_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "binding_done_callback"_s + unexpected_event<_>,
+        "unexpected"_s <= "binding_error_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "binding_error_callback"_s + unexpected_event<_>,
+        "unexpected"_s <= "idle"_s + unexpected_event<_>,
+        "unexpected"_s <= "decoding"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_token_validation"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_piece_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_byte_capacity_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_byte_pending_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_byte_pending_write"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_text_pending_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_text_pending_write"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_text_write"_s + unexpected_event<_>,
+        "unexpected"_s <= "decode_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "detokenize_done_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "detokenize_done_callback"_s + unexpected_event<_>,
+        "unexpected"_s <= "detokenize_error_decision"_s + unexpected_event<_>,
+        "unexpected"_s <= "detokenize_error_callback"_s + unexpected_event<_>,
+        "unexpected"_s <= "done"_s + unexpected_event<_>,
+        "unexpected"_s <= "errored"_s + unexpected_event<_>,
+        "unexpected"_s <= "unexpected"_s + unexpected_event<_>,
     }
 }
 
