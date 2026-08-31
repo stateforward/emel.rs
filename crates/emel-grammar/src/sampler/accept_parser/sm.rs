@@ -31,12 +31,14 @@ pub enum AcceptParserError {
     /// No error was reported by the preceding sampler stage.
     #[default]
     None = 0,
-    /// The preceding sampler stage failed to parse its input.
-    ParseFailed = 1,
-    /// An event was delivered outside the supported machine contract.
-    InternalError = 2,
     /// The caller supplied an invalid request.
-    InvalidRequest = 4,
+    InvalidRequest = 1,
+    /// The preceding sampler stage failed to parse its input.
+    ParseFailed = 2,
+    /// An event was delivered outside the supported machine contract.
+    InternalError = 4,
+    /// The source pipeline reported an untracked error.
+    Untracked = 8,
 }
 
 /// Result values from the pinned accept-parser `accept_result` enum.
@@ -225,12 +227,16 @@ impl GbnfSamplerAcceptParserActor {
 
     /// Dispatches one copied runtime event to completion.
     pub fn process_event(&mut self, input: AcceptInput) -> Result<AcceptResult, AcceptParserError> {
+        if !self.machine.is(&GbnfSamplerAcceptParserStates::Deciding) {
+            self.machine.context_mut().error = AcceptParserError::InternalError;
+            self.machine.context_mut().accept_result = AcceptResult::Unknown;
+            return self.outcome();
+        }
         self.machine.context_mut().set_input(input);
-        if self
-            .machine
-            .process_event(GbnfSamplerAcceptParserEvents::SamplerEventSampleRuntime(input.into()))
-            .is_err()
-        {
+        if self.machine.process_event(GbnfSamplerAcceptParserEvents::SamplerEventSampleRuntime(input.into())).is_err() {
+            self.machine.context_mut().error = AcceptParserError::InternalError;
+            self.machine.context_mut().accept_result = AcceptResult::Unknown;
+        } else if self.machine.initialize().is_err() {
             self.machine.context_mut().error = AcceptParserError::InternalError;
             self.machine.context_mut().accept_result = AcceptResult::Unknown;
         }
@@ -251,6 +257,7 @@ impl GbnfSamplerAcceptParserActor {
             error => Err(error),
         }
     }
+
 
     /// Returns generated state inspection data.
     #[must_use]
@@ -276,7 +283,7 @@ mod tests {
     fn accepts_token_in_bounded_grammar_range() {
         let mut parser = AcceptParser::new();
         assert_eq!(parser.process_event(AcceptInput::new(4, 3)), Ok(AcceptResult::Accepted));
-        assert!(parser.is(&GbnfSamplerAcceptParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerAcceptParserStates::X));
         assert_eq!(parser.context().accept_result, AcceptResult::Accepted);
     }
 
@@ -286,7 +293,7 @@ mod tests {
         assert_eq!(parser.process_event(AcceptInput::new(4, -1)), Ok(AcceptResult::Rejected));
         let mut parser = AcceptParser::new();
         assert_eq!(parser.process_event(AcceptInput::new(4, 4)), Ok(AcceptResult::Rejected));
-        assert!(parser.is(&GbnfSamplerAcceptParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerAcceptParserStates::X));
     }
 
     #[test]
@@ -294,7 +301,7 @@ mod tests {
         for input in [AcceptInput::failed(AcceptParserError::ParseFailed), AcceptInput::invalid()] {
             let mut parser = AcceptParser::new();
             assert_eq!(parser.process_event(input), Err(AcceptParserError::ParseFailed));
-            assert!(parser.is(&GbnfSamplerAcceptParserStates::ParseFailed));
+            assert!(parser.is(&GbnfSamplerAcceptParserStates::X));
             assert_eq!(parser.context().accept_result, AcceptResult::Unknown);
         }
     }

@@ -61,9 +61,10 @@ impl From<TokenKind> for RuleParserEventParseRules {
 
 sml! {
     GbnfRuleParserExpressionParser {
-        "parsed_identifier"_s <= *"deciding"_s + event<RuleParserEventParseRules> [token_identifier] / consume_identifier,
-        "parsed_non_identifier"_s <= "deciding"_s + event<RuleParserEventParseRules> [token_non_identifier] / consume_non_identifier,
-        "parse_failed"_s <= "deciding"_s + event<RuleParserEventParseRules> [parse_failed] / dispatch_parse_failed,
+        *"deciding"_s + event<RuleParserEventParseRules>,
+        "parsed_identifier"_s <= "deciding"_s + completion<RuleParserEventParseRules> [token_identifier] / consume_identifier,
+        "parsed_non_identifier"_s <= "deciding"_s + completion<RuleParserEventParseRules> [token_non_identifier] / consume_non_identifier,
+        "parse_failed"_s <= "deciding"_s + completion<RuleParserEventParseRules> [parse_failed] / dispatch_parse_failed,
         "unexpected_event"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
         "unexpected_event"_s <= "parsed_identifier"_s + unexpected_event<_> / on_unexpected_from_parsed_identifier,
         "unexpected_event"_s <= "parsed_non_identifier"_s + unexpected_event<_> / on_unexpected_from_parsed_non_identifier,
@@ -140,9 +141,19 @@ impl GbnfRuleParserExpressionParserActor {
     #[must_use]
     pub fn new() -> Self { Self { machine: GbnfRuleParserExpressionParserStateMachine::new(Default::default()) } }
 
-    /// Processes one copied token kind to completion and returns an owned result.
     pub fn process_event(&mut self, event: RuleParserEventParseRules) -> ParseOutcome {
-        let _ = self.machine.process_event(GbnfRuleParserExpressionParserEvents::RuleParserEventParseRules(event));
+        if !self.machine.is(&GbnfRuleParserExpressionParserStates::Deciding) {
+            self.machine.context_mut().result = ParseOutcome::Unexpected;
+            self.machine.set_state(GbnfRuleParserExpressionParserStates::UnexpectedEvent);
+            return ParseOutcome::Unexpected;
+        }
+        if self.machine.process_event(GbnfRuleParserExpressionParserEvents::RuleParserEventParseRules(event)).is_err() {
+            self.machine.context_mut().result = ParseOutcome::Unexpected;
+            self.machine.set_state(GbnfRuleParserExpressionParserStates::UnexpectedEvent);
+        } else if self.machine.initialize().is_err() {
+            self.machine.context_mut().result = ParseOutcome::Unexpected;
+            self.machine.set_state(GbnfRuleParserExpressionParserStates::UnexpectedEvent);
+        }
         self.machine.context().result
     }
 
@@ -176,14 +187,14 @@ mod tests {
     fn classifies_identifier() {
         let mut parser = ExpressionParser::new();
         assert_eq!(parser.classify(TokenKind::Identifier), ParseOutcome::Parsed(ParseKind::Identifier));
-        assert!(parser.is(&GbnfRuleParserExpressionParserStates::ParsedIdentifier));
+        assert!(parser.is(&GbnfRuleParserExpressionParserStates::X));
     }
 
     #[test]
     fn classifies_non_identifier() {
         let mut parser = ExpressionParser::new();
         assert_eq!(parser.classify(TokenKind::StringLiteral), ParseOutcome::Parsed(ParseKind::NonIdentifier));
-        assert!(parser.is(&GbnfRuleParserExpressionParserStates::ParsedNonIdentifier));
+        assert!(parser.is(&GbnfRuleParserExpressionParserStates::X));
     }
 
     #[test]
@@ -192,7 +203,7 @@ mod tests {
         assert_eq!(parser.classify(TokenKind::DefinitionOperator), ParseOutcome::ParseFailed);
         let mut parser = ExpressionParser::new();
         assert_eq!(parser.process_event(RuleParserEventParseRules::absent()), ParseOutcome::ParseFailed);
-        assert!(parser.is(&GbnfRuleParserExpressionParserStates::ParseFailed));
+        assert!(parser.is(&GbnfRuleParserExpressionParserStates::X));
     }
 
     #[test]

@@ -75,8 +75,9 @@ impl From<TokenKind> for RuleParserEventParseRules {
 
 sml! {
     GbnfRuleParserDefinitionParser {
-        "parsed"_s <= *"deciding"_s + event<RuleParserEventParseRules> [token_definition_operator] / consume_definition_operator,
-        "parse_failed"_s <= "deciding"_s + event<RuleParserEventParseRules> [parse_failed] / dispatch_parse_failed,
+        *"deciding"_s + event<RuleParserEventParseRules>,
+        "parsed"_s <= "deciding"_s + completion<RuleParserEventParseRules> [token_definition_operator] / consume_definition_operator,
+        "parse_failed"_s <= "deciding"_s + completion<RuleParserEventParseRules> [parse_failed] / dispatch_parse_failed,
         "unexpected_event"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
         "unexpected_event"_s <= "parsed"_s + unexpected_event<_> / on_unexpected_from_parsed,
         "unexpected_event"_s <= "parse_failed"_s + unexpected_event<_> / on_unexpected_from_parse_failed,
@@ -165,11 +166,21 @@ impl GbnfRuleParserDefinitionParserActor {
         }
     }
 
-    /// Processes one copied token kind to completion and returns an owned result.
     pub fn process_event(&mut self, event: RuleParserEventParseRules) -> ParseOutcome {
-        let _ = self.machine.process_event(
+        if !self.machine.is(&GbnfRuleParserDefinitionParserStates::Deciding) {
+            self.machine.context_mut().result = ParseOutcome::Unexpected;
+            self.machine.set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
+            return ParseOutcome::Unexpected;
+        }
+        if self.machine.process_event(
             GbnfRuleParserDefinitionParserEvents::RuleParserEventParseRules(event),
-        );
+        ).is_err() {
+            self.machine.context_mut().result = ParseOutcome::Unexpected;
+            self.machine.set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
+        } else if self.machine.initialize().is_err() {
+            self.machine.context_mut().result = ParseOutcome::Unexpected;
+            self.machine.set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
+        }
         self.machine.context().result
     }
 
@@ -218,7 +229,7 @@ mod tests {
             parser.classify(TokenKind::DefinitionOperator),
             ParseOutcome::Parsed(ParseResult::DefinitionOperator)
         );
-        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::Parsed));
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::X));
     }
 
     #[test]
@@ -228,11 +239,11 @@ mod tests {
             parser.classify(TokenKind::Identifier),
             ParseOutcome::ParseFailed
         );
-        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::ParseFailed));
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::X));
 
         let mut parser = DefinitionParser::new();
         assert_eq!(parser.process_absent(), ParseOutcome::ParseFailed);
-        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::ParseFailed));
+        assert!(parser.is(&GbnfRuleParserDefinitionParserStates::X));
     }
 
     #[test]

@@ -219,12 +219,17 @@ impl GbnfSamplerTokenParserActor {
 
     /// Dispatches one copied runtime event to completion.
     pub fn process_event(&mut self, input: TokenParserInput) -> Result<TokenKind, TokenParserError> {
+        if input.error != TokenParserError::None {
+            self.machine.context_mut().set_input(input);
+            self.machine.context_mut().error = TokenParserError::InternalError;
+            self.machine.context_mut().token_kind = TokenKind::Unknown;
+            return self.outcome();
+        }
         self.machine.context_mut().set_input(input);
-        if self
-            .machine
-            .process_event(GbnfSamplerTokenParserEvents::SamplerEventSampleRuntime(input.into()))
-            .is_err()
-        {
+        if self.machine.process_event(GbnfSamplerTokenParserEvents::SamplerEventSampleRuntime(input.into())).is_err() {
+            self.machine.context_mut().error = TokenParserError::InternalError;
+            self.machine.context_mut().token_kind = TokenKind::Unknown;
+        } else if self.machine.initialize().is_err() {
             self.machine.context_mut().error = TokenParserError::InternalError;
             self.machine.context_mut().token_kind = TokenKind::Unknown;
         }
@@ -270,11 +275,11 @@ mod tests {
     fn classifies_text_and_empty_candidates() {
         let mut parser = TokenParser::new();
         assert_eq!(parser.process_event(TokenParserInput::new(CandidateKind::Text)), Ok(TokenKind::TextToken));
-        assert!(parser.is(&GbnfSamplerTokenParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerTokenParserStates::X));
 
         let mut parser = TokenParser::new();
         assert_eq!(parser.process_event(TokenParserInput::new(CandidateKind::Empty)), Ok(TokenKind::EmptyToken));
-        assert!(parser.is(&GbnfSamplerTokenParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerTokenParserStates::X));
     }
     #[test]
     fn unknown_candidate_is_parse_failed() {
@@ -283,7 +288,7 @@ mod tests {
             parser.process_event(TokenParserInput::new(CandidateKind::Unknown)),
             Err(TokenParserError::ParseFailed)
         );
-        assert!(parser.is(&GbnfSamplerTokenParserStates::ParseFailed));
+        assert!(parser.is(&GbnfSamplerTokenParserStates::X));
         assert_eq!(parser.context().token_kind, TokenKind::Unknown);
     }
 

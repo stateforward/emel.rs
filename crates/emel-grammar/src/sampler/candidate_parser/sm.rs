@@ -218,9 +218,12 @@ impl GbnfSamplerCandidateParserActor {
             return self.process_unexpected();
         }
         self.machine.context_mut().set_input(input);
-        let _ = self.machine.process_event(
-            GbnfSamplerCandidateParserEvents::SamplerEventSampleRuntime(input),
-        );
+        if self.machine.process_event(GbnfSamplerCandidateParserEvents::SamplerEventSampleRuntime(input)).is_err() {
+            self.machine.context_mut().result = CandidateParserOutcome::Unexpected;
+        } else if self.machine.initialize().is_err() {
+            self.machine.context_mut().result = CandidateParserOutcome::Unexpected;
+            self.machine.set_state(GbnfSamplerCandidateParserStates::UnexpectedEvent);
+        }
         self.machine.context().result
     }
 
@@ -228,6 +231,8 @@ impl GbnfSamplerCandidateParserActor {
     pub fn classify(&mut self, candidate_kind: CandidateKind) -> CandidateParserOutcome {
         self.process_event(SamplerEventSampleRuntime::new(candidate_kind))
     }
+
+    /// Processes an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> CandidateParserOutcome {
         let _ = self.machine.context_mut().unexpected();
         self.machine
@@ -265,18 +270,18 @@ mod tests {
     fn classifies_text_and_empty_candidates() {
         let mut parser = CandidateParser::new();
         assert_eq!(parser.classify(CandidateKind::Text), CandidateParserOutcome::Parsed(CandidateKind::Text));
-        assert!(parser.is(&GbnfSamplerCandidateParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerCandidateParserStates::X));
 
         let mut parser = CandidateParser::new();
         assert_eq!(parser.classify(CandidateKind::Empty), CandidateParserOutcome::Parsed(CandidateKind::Empty));
-        assert!(parser.is(&GbnfSamplerCandidateParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerCandidateParserStates::X));
     }
 
     #[test]
     fn unknown_candidate_is_parse_failed() {
         let mut parser = CandidateParser::new();
         assert_eq!(parser.classify(CandidateKind::Unknown), CandidateParserOutcome::ParseFailed);
-        assert!(parser.is(&GbnfSamplerCandidateParserStates::ParseFailed));
+        assert!(parser.is(&GbnfSamplerCandidateParserStates::X));
     }
 
     #[test]

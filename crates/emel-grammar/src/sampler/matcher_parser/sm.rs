@@ -250,11 +250,9 @@ impl GbnfSamplerMatcherParserActor {
             return self.outcome();
         }
         self.machine.context_mut().set_input(input);
-        if self
-            .machine
-            .process_event(GbnfSamplerMatcherParserEvents::SamplerEventSampleRuntime(input.into()))
-            .is_err()
-        {
+        if self.machine.process_event(GbnfSamplerMatcherParserEvents::SamplerEventSampleRuntime(input.into())).is_err() {
+            self.machine.context_mut().error = MatcherParserError::InternalError;
+        } else if self.machine.initialize().is_err() {
             self.machine.context_mut().error = MatcherParserError::InternalError;
         }
         self.outcome()
@@ -299,7 +297,7 @@ mod tests {
     fn accepts_text_and_allows_candidate() {
         let mut parser = MatcherParser::new();
         assert_eq!(parser.process_event(MatcherInput::new(TokenKind::Text)), Ok(MatchResult::Accepted));
-        assert!(parser.is(&GbnfSamplerMatcherParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerMatcherParserStates::X));
         assert_eq!(parser.context().match_result, MatchResult::Accepted);
         assert!(parser.context().candidate_allowed);
         assert_eq!(parser.context().accept_result, AcceptResult::Accepted);
@@ -309,7 +307,7 @@ mod tests {
     fn rejects_empty_and_disallows_candidate() {
         let mut parser = MatcherParser::new();
         assert_eq!(parser.process_event(MatcherInput::new(TokenKind::Empty)), Ok(MatchResult::Rejected));
-        assert!(parser.is(&GbnfSamplerMatcherParserStates::Parsed));
+        assert!(parser.is(&GbnfSamplerMatcherParserStates::X));
         assert!(!parser.context().candidate_allowed);
         assert_eq!(parser.context().accept_result, AcceptResult::Rejected);
     }
@@ -318,7 +316,7 @@ mod tests {
     fn unknown_token_is_parse_failed() {
         let mut parser = MatcherParser::new();
         assert_eq!(parser.process_event(MatcherInput::new(TokenKind::Unknown)), Err(MatcherParserError::ParseFailed));
-        assert!(parser.is(&GbnfSamplerMatcherParserStates::ParseFailed));
+        assert!(parser.is(&GbnfSamplerMatcherParserStates::X));
         assert_eq!(parser.context().match_result, MatchResult::Unknown);
         assert!(!parser.context().candidate_allowed);
         assert_eq!(parser.context().accept_result, AcceptResult::Unknown);

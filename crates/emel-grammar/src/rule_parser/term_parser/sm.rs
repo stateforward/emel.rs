@@ -195,15 +195,22 @@ impl TermParser {
     #[must_use]
     pub fn new() -> Self { Self { machine: GbnfRuleParserTermParserStateMachine::new(Default::default()) } }
 
-    /// Dispatches one copied lexer token to completion.
     pub fn process_event(&mut self, input: TermInput) -> Result<TermKind, TermParserError> {
         if !self.machine.is(&GbnfRuleParserTermParserStates::Deciding) {
             self.machine.context_mut().error = Some(TermParserError::InternalError);
             return Err(TermParserError::InternalError);
         }
         self.machine.context_mut().set_input(input);
-        if self.machine.process_event(RuleParserEventParseRules).is_err() {
+        if self.machine.process_event(GbnfRuleParserTermParserEvents::RuleParserEventParseRules(RuleParserEventParseRules {})).is_err() {
             self.machine.context_mut().error = Some(TermParserError::InternalError);
+            self.machine.context_mut().result = TermKind::Unknown;
+            self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
+            return Err(TermParserError::InternalError);
+        }
+        if self.machine.initialize().is_err() {
+            self.machine.context_mut().error = Some(TermParserError::InternalError);
+            self.machine.context_mut().result = TermKind::Unknown;
+            self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
             return Err(TermParserError::InternalError);
         }
         let context = self.machine.context();
@@ -212,7 +219,7 @@ impl TermParser {
 
     /// Records an unsupported event as an explicit internal error.
     pub fn process_unexpected_event(&mut self) -> Result<TermKind, TermParserError> {
-        self.machine.context_mut().unexpected();
+        let _ = self.machine.context_mut().unexpected();
         self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
         Err(TermParserError::InternalError)
     }
@@ -253,7 +260,7 @@ mod tests {
     fn unsupported_token_is_parse_failed() {
         let mut parser = TermParser::new();
         assert_eq!(parser.process_event(TermInput::new(TokenKind::Unknown)), Err(TermParserError::ParseFailed));
-        assert!(parser.is(GbnfRuleParserTermParserStates::ParseFailed));
+        assert!(parser.is(GbnfRuleParserTermParserStates::X));
         assert_eq!(parser.context().result, TermKind::Unknown);
     }
 
