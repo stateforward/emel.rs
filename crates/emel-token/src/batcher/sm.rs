@@ -276,12 +276,13 @@ pub struct Context {
 sml! {
     TokenBatcher {
         "request_decision"_s <= *"ready"_s + Batch(&'dispatch BatchRuntime<'dispatch>) / begin_batch,
-        "outputs_decision"_s <= "request_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_present],
-        "errored"_s <= "request_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_missing] / invalid,
-        "counts_decision"_s <= "outputs_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [counts_valid],
-        "errored"_s <= "outputs_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [counts_invalid] / invalid,
-        "capacity_decision"_s <= "counts_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [capacity_valid],
-        "errored"_s <= "counts_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [capacity_invalid] / invalid,
+        "request_validation_probe"_s <= "request_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "outputs_decision"_s <= "request_validation_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "errored"_s <= "outputs_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [request_outputs_missing] / invalid,
+        "counts_decision"_s <= "outputs_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [request_outputs_present],
+        "errored"_s <= "counts_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [token_counts_invalid] / invalid,
+        "capacity_decision"_s <= "counts_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [capacities_valid],
+        "errored"_s <= "counts_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [capacities_invalid] / invalid,
         "vocab_decision"_s <= "capacity_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [vocab_valid],
         "errored"_s <= "capacity_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [vocab_invalid] / invalid,
         "seq_payload_decision"_s <= "vocab_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_payload_valid],
@@ -291,10 +292,28 @@ sml! {
         "seq_primary"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_primary_mode] / normalize_primary,
         "seq_default"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_default_mode] / normalize_default,
         "errored"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "positions_decision"_s <= "seq_masks"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "positions_decision"_s <= "seq_primary"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "positions_decision"_s <= "seq_default"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-
+        "seq_mask_words_decision"_s <= "seq_masks"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "seq_masks"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "seq_masks"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "seq_masks"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "seq_masks"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "seq_mask_words_decision"_s <= "seq_primary"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "seq_primary"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "seq_primary"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "seq_primary"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "seq_primary"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "seq_mask_words_decision"_s <= "seq_default"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "seq_default"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "seq_default"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "seq_default"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "seq_default"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "positions_mask_publish"_s <= "seq_mask_words_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_present] / publish_mask_words,
+        "positions_decision"_s <= "seq_mask_words_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_absent],
+        "positions_decision"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
         "positions_stride_three"_s <= "positions_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [stride_three] / copy_positions_three,
         "positions_stride_one"_s <= "positions_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [stride_one] / copy_positions_one,
         "positions_seed_probe"_s <= "positions_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_mode] / probe_seeded,
@@ -307,48 +326,82 @@ sml! {
         "positions_unseeded"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok] / generate_unseeded,
         "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_invalid] / invalid,
         "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "positions_publish"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "positions_publish"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "errored"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_invalid] / invalid,
-        "positions_publish"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_ok],
-        "errored"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_invalid] / invalid,
-        "positions_publish"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [generation_ok],
-        "positions_mask_publish"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_present] / publish_mask_words,
-        "positions_count_decision"_s <= "positions_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [mask_words_output_absent],
-        "positions_count_decision"_s <= "positions_mask_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "positions_count_decision"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "positions_count_decision"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "positions_stride_one"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "positions_count_decision"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "positions_seeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "positions_count_decision"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "positions_unseeded"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
         "positions_count_publish"_s <= "positions_count_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [positions_count_output_present] / publish_positions_count,
         "output_decision"_s <= "positions_count_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [positions_count_output_absent],
-        "output_decision"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "output_decision"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
 
         "output_all"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_all_mode] / set_output_all,
         "output_copy"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_copy_mode] / copy_output,
         "output_last"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_last_mode] / set_output_last,
         "errored"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "count_outputs"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
-        "count_outputs"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
-        "count_outputs"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / count_outputs,
-        "outputs_total_publish"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_present] / publish_outputs_total,
-        "single_output_decision"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_absent],
-        "single_output_decision"_s <= "outputs_total_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "single_output_probe"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_required] / probe_single_output,
+        "count_outputs"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok] / count_outputs_from_output_all,
+        "count_outputs"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok] / count_outputs_from_output_copy,
+        "count_outputs"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok] / count_outputs_from_output_last,
+        "errored"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "output_all"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "errored"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "output_copy"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "errored"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "output_last"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "outputs_total_publish_decision"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "single_output_decision"_s <= "outputs_total_publish_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_present] / publish_outputs_total,
+        "single_output_decision"_s <= "outputs_total_publish_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_absent],
         "continuity_decision"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_skipped],
-        "continuity_decision"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok],
-        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_invalid] / invalid,
-        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
+        "single_output_probe"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_required] / probe_single_output,
+        "continuity_decision"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
         "done"_s <= "continuity_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_skipped],
         "continuity_probe"_s <= "continuity_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_required] / probe_continuity,
-        "done"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok],
-        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_invalid] / invalid,
-        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "done_callback_decision"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_present] / publish_done_callback,
+        "done"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "ready"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_present] / publish_done_callback,
         "ready"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_absent],
-        "error_callback_decision"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [error_callback_present] / publish_error_callback,
-        "ready"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [error_callback_absent],
-        "ready"_s <= "done_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "ready"_s <= "error_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
-        "ready"_s <= "request_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
+        "error_callback_decision"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
+        "ready"_s <= "error_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [error_callback_present] / publish_error_callback,
+        "ready"_s <= "error_callback_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [error_callback_absent],
         "ready"_s <= "ready"_s + unexpected<_> / unexpected,
         "ready"_s <= "request_decision"_s + unexpected<_> / unexpected,
+        "ready"_s <= "request_validation_probe"_s + unexpected<_> / unexpected,
         "ready"_s <= "outputs_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "counts_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "capacity_decision"_s + unexpected<_> / unexpected,
@@ -357,6 +410,7 @@ sml! {
         "ready"_s <= "seq_masks"_s + unexpected<_> / unexpected,
         "ready"_s <= "seq_primary"_s + unexpected<_> / unexpected,
         "ready"_s <= "seq_default"_s + unexpected<_> / unexpected,
+        "ready"_s <= "seq_mask_words_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_stride_three"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_stride_one"_s + unexpected<_> / unexpected,
@@ -364,8 +418,6 @@ sml! {
         "ready"_s <= "positions_unseed_probe"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_seeded"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_unseeded"_s + unexpected<_> / unexpected,
-        "ready"_s <= "positions_publish"_s + unexpected<_> / unexpected,
-        "ready"_s <= "positions_mask_publish"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_count_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "positions_count_publish"_s + unexpected<_> / unexpected,
         "ready"_s <= "output_decision"_s + unexpected<_> / unexpected,
@@ -373,9 +425,10 @@ sml! {
         "ready"_s <= "output_copy"_s + unexpected<_> / unexpected,
         "ready"_s <= "output_last"_s + unexpected<_> / unexpected,
         "ready"_s <= "count_outputs"_s + unexpected<_> / unexpected,
-        "ready"_s <= "outputs_total_publish"_s + unexpected<_> / unexpected,
         "ready"_s <= "single_output_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "single_output_probe"_s + unexpected<_> / unexpected,
+        "ready"_s <= "positions_mask_publish"_s + unexpected<_> / unexpected,
+        "ready"_s <= "outputs_total_publish_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "continuity_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "continuity_probe"_s + unexpected<_> / unexpected,
         "ready"_s <= "done_callback_decision"_s + unexpected<_> / unexpected,
@@ -384,7 +437,6 @@ sml! {
         "ready"_s <= "errored"_s + unexpected<_> / unexpected,
     }
 }
-
 impl TokenBatcherStateMachine<Context> {
     pub(super) fn dispatch(
         &mut self,
@@ -491,19 +543,16 @@ impl TokenBatcherStateMachineContext for Context {
         event.context.scratch.borrow_mut().reset();
         Ok(())
     }
-    fn outputs_present(&self, _event: &BatchRuntime<'_>) -> Result<bool, ()> {
+    fn request_outputs_present(&self, _event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(true)
     }
-    fn outputs_missing(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(!self.outputs_present(event)?)
+    fn request_outputs_missing(&self, _event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(false)
     }
-    fn counts_valid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(!event.request.token_ids.is_empty() && event.request.token_ids.len() <= MAX_TOKENS)
+    fn token_counts_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.token_ids.is_empty() || event.request.token_ids.len() > MAX_TOKENS)
     }
-    fn counts_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(!self.counts_valid(event)?)
-    }
-    fn capacity_valid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+    fn capacities_valid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         let n = event.request.token_ids.len();
         let words = effective_mask_words(&event.request);
         let mask_n = n.checked_mul(words).unwrap_or(usize::MAX);
@@ -514,8 +563,8 @@ impl TokenBatcherStateMachineContext for Context {
             && event.outputs.positions.len() >= pos_n
             && event.outputs.output_mask.len() >= n)
     }
-    fn capacity_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(!self.capacity_valid(event)?)
+    fn capacities_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(!self.capacities_valid(event)?)
     }
     fn vocab_valid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(vocab_valid(&event.request))
@@ -556,16 +605,31 @@ impl TokenBatcherStateMachineContext for Context {
     fn probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.context.error.get() == DispatchError::None)
     }
+    fn phase_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::None)
+    }
+    fn phase_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::InvalidRequest)
+    }
+    fn phase_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::Backend)
+    }
+    fn phase_internal(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.error.get() == DispatchError::Internal)
+    }
+    fn phase_unknown(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(!matches!(
+            event.context.error.get(),
+            DispatchError::None
+                | DispatchError::InvalidRequest
+                | DispatchError::Backend
+                | DispatchError::Internal
+        ))
+    }
     fn probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.context.error.get() == DispatchError::Backend)
     }
     fn probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::InvalidRequest)
-    }
-    fn generation_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::None)
-    }
-    fn generation_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.context.error.get() == DispatchError::InvalidRequest)
     }
     fn stride_one(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -669,7 +733,7 @@ impl TokenBatcherStateMachineContext for Context {
         }
         Ok(())
     }
-    fn count_outputs(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+    fn count_outputs_from_output_all(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         let count = event.request.token_ids.len();
         let total = event
             .outputs
@@ -680,6 +744,12 @@ impl TokenBatcherStateMachineContext for Context {
             .count();
         event.context.outputs_total.set(total);
         Ok(())
+    }
+    fn count_outputs_from_output_copy(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        self.count_outputs_from_output_all(event)
+    }
+    fn count_outputs_from_output_last(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
+        self.count_outputs_from_output_all(event)
     }
     fn single_output_required(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.request.enforce_single_output_per_seq)
@@ -1129,7 +1199,7 @@ fn continuity_ok(e: &BatchRuntime<'_>) -> bool {
                 let id = w * 64 + bits.trailing_zeros() as usize;
                 let last = s.seq_last_pos[id];
                 let first_seen = !s.seq_seen[id];
-                let monotonic = last < 0 || pos >= last;
+                let monotonic = first_seen || pos >= last;
                 let pos_changed = first_seen || pos != last;
                 s.seq_pos_count[id] += usize::from(pos_changed);
                 s.seq_last_pos[id] = pos;
