@@ -1,10 +1,18 @@
 //! Source-aligned bounded hybrid memory state machine.
 
+// The SML transition DSL intentionally uses assignment-like `<=` expressions;
+// this generated state-machine syntax triggers Clippy's formatting heuristic.
 #![allow(
-    clippy::enum_variant_names, clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions, clippy::missing_errors_doc,
-    clippy::must_use_candidate, clippy::return_self_not_must_use,
-    clippy::missing_const_for_fn, dead_code, missing_docs
+    clippy::enum_variant_names,
+    clippy::derive_partial_eq_without_eq,
+    clippy::module_name_repetitions,
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::return_self_not_must_use,
+    clippy::missing_const_for_fn,
+    clippy::suspicious_assignment_formatting,
+    dead_code,
+    missing_docs
 )]
 
 use core::cell::RefCell;
@@ -19,42 +27,146 @@ pub type Snapshot = kv::Snapshot;
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum HybridError {
-    #[default] None = 0, InvalidRequest = 1, BackendError = 2,
-    InternalError = 4, OutOfMemory = 8, Untracked = 16,
+    #[default]
+    None = 0,
+    InvalidRequest = 1,
+    BackendError = 2,
+    InternalError = 4,
+    OutOfMemory = 8,
+    Untracked = 16,
 }
-impl HybridError { const fn code(self) -> i32 { self as i32 } }
+impl HybridError {
+    const fn code(self) -> i32 {
+        self as i32
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ReserveContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32 }
+pub struct ReserveContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+}
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AllocateSequenceContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) rollback_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32, pub(crate) rollback_error: i32 }
+pub struct AllocateSequenceContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) rollback_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+    pub(crate) rollback_error: i32,
+}
 #[derive(Clone, Copy, Debug, Default)]
-pub struct AllocateSlotsContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) rollback_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32, pub(crate) rollback_error: i32, pub(crate) kv_block_count: i32 }
+pub struct AllocateSlotsContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) rollback_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+    pub(crate) rollback_error: i32,
+    pub(crate) kv_block_count: i32,
+}
 #[derive(Clone, Copy, Debug, Default)]
-pub struct BranchSequenceContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) rollback_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32, pub(crate) rollback_error: i32 }
+pub struct BranchSequenceContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) rollback_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+    pub(crate) rollback_error: i32,
+}
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FreeSequenceContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32 }
+pub struct FreeSequenceContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+}
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RollbackSlotsContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32, pub(crate) kv_block_count: i32 }
+pub struct RollbackSlotsContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+    pub(crate) kv_block_count: i32,
+}
 #[derive(Clone, Copy, Debug, Default)]
-pub struct CaptureViewContext { pub(crate) err: HybridError, pub(crate) kv_accepted: bool, pub(crate) recurrent_accepted: bool, pub(crate) kv_error: i32, pub(crate) recurrent_error: i32 }
+pub struct CaptureViewContext {
+    pub(crate) err: HybridError,
+    pub(crate) kv_accepted: bool,
+    pub(crate) recurrent_accepted: bool,
+    pub(crate) kv_error: i32,
+    pub(crate) recurrent_error: i32,
+}
 
 #[derive(Clone)]
-pub struct EventAllocateSequenceRuntime<'event> { pub seq_id: i32, pub error_out: Option<&'event RefCell<i32>>, pub context: &'event RefCell<AllocateSequenceContext> }
+pub struct EventAllocateSequenceRuntime<'event> {
+    pub seq_id: i32,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub context: &'event RefCell<AllocateSequenceContext>,
+}
 #[derive(Clone)]
-pub struct EventAllocateSlotsRuntime<'event> { pub seq_id: i32, pub token_count: i32, pub block_count_out: Option<&'event RefCell<i32>>, pub error_out: Option<&'event RefCell<i32>>, pub copy_block: Option<&'event dyn kv::BlockCopier>, pub context: &'event RefCell<AllocateSlotsContext> }
+pub struct EventAllocateSlotsRuntime<'event> {
+    pub seq_id: i32,
+    pub token_count: i32,
+    pub block_count_out: Option<&'event RefCell<i32>>,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub copy_block: Option<&'event dyn kv::BlockCopier>,
+    pub context: &'event RefCell<AllocateSlotsContext>,
+}
 #[derive(Clone)]
-pub struct EventBranchSequenceRuntime<'event> { pub parent_seq_id: i32, pub child_seq_id: i32, pub copy_state: Option<&'event dyn recurrent::StateCopier>, pub error_out: Option<&'event RefCell<i32>>, pub context: &'event RefCell<BranchSequenceContext> }
+pub struct EventBranchSequenceRuntime<'event> {
+    pub parent_seq_id: i32,
+    pub child_seq_id: i32,
+    pub copy_state: Option<&'event dyn recurrent::StateCopier>,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub context: &'event RefCell<BranchSequenceContext>,
+}
 #[derive(Clone)]
-pub struct EventCaptureViewRuntime<'event> { pub snapshot_out: Option<&'event RefCell<Snapshot>>, pub error_out: Option<&'event RefCell<i32>>, pub context: &'event RefCell<CaptureViewContext> }
+pub struct EventCaptureViewRuntime<'event> {
+    pub snapshot_out: Option<&'event RefCell<Snapshot>>,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub context: &'event RefCell<CaptureViewContext>,
+}
 #[derive(Clone)]
-pub struct EventFreeSequenceRuntime<'event> { pub seq_id: i32, pub error_out: Option<&'event RefCell<i32>>, pub context: &'event RefCell<FreeSequenceContext> }
+pub struct EventFreeSequenceRuntime<'event> {
+    pub seq_id: i32,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub context: &'event RefCell<FreeSequenceContext>,
+}
 #[derive(Clone)]
-pub struct EventReserveRuntime<'event> { pub max_sequences: i32, pub max_blocks: i32, pub block_tokens: i32, pub error_out: Option<&'event RefCell<i32>>, pub context: &'event RefCell<ReserveContext> }
+pub struct EventReserveRuntime<'event> {
+    pub max_sequences: i32,
+    pub max_blocks: i32,
+    pub block_tokens: i32,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub context: &'event RefCell<ReserveContext>,
+}
 #[derive(Clone)]
-pub struct EventRollbackSlotsRuntime<'event> { pub seq_id: i32, pub token_count: i32, pub block_count_out: Option<&'event RefCell<i32>>, pub error_out: Option<&'event RefCell<i32>>, pub context: &'event RefCell<RollbackSlotsContext> }
+pub struct EventRollbackSlotsRuntime<'event> {
+    pub seq_id: i32,
+    pub token_count: i32,
+    pub block_count_out: Option<&'event RefCell<i32>>,
+    pub error_out: Option<&'event RefCell<i32>>,
+    pub context: &'event RefCell<RollbackSlotsContext>,
+}
 macro_rules! event_debug { ($($name:ident),+ $(,)?) => { $(impl core::fmt::Debug for $name<'_> { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.debug_struct(stringify!($name)).finish() } })+ }; }
-event_debug!(EventAllocateSequenceRuntime, EventAllocateSlotsRuntime, EventBranchSequenceRuntime, EventCaptureViewRuntime, EventFreeSequenceRuntime, EventReserveRuntime, EventRollbackSlotsRuntime);
+event_debug!(
+    EventAllocateSequenceRuntime,
+    EventAllocateSlotsRuntime,
+    EventBranchSequenceRuntime,
+    EventCaptureViewRuntime,
+    EventFreeSequenceRuntime,
+    EventReserveRuntime,
+    EventRollbackSlotsRuntime
+);
 
 sml! {
     MemoryHybrid<'event> {
@@ -220,278 +332,1798 @@ sml! {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum KvCacheRoute { Owned, Bound }
+pub enum KvCacheRoute {
+    Owned,
+    Bound,
+}
 
 /// Public, safe boundary implemented by injected KV actors.
 pub trait HybridKvActor {
-    fn reserve(&mut self, max_sequences: i32, max_blocks: i32, block_tokens: i32, error_out: &RefCell<i32>) -> bool;
+    fn reserve(
+        &mut self,
+        max_sequences: i32,
+        max_blocks: i32,
+        block_tokens: i32,
+        error_out: &RefCell<i32>,
+    ) -> bool;
     fn allocate_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool;
-    fn allocate_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>, copy_block: Option<&dyn kv::BlockCopier>) -> bool;
+    fn allocate_slots(
+        &mut self,
+        seq_id: i32,
+        token_count: i32,
+        block_count_out: &RefCell<i32>,
+        error_out: &RefCell<i32>,
+        copy_block: Option<&dyn kv::BlockCopier>,
+    ) -> bool;
     fn free_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool;
-    fn rollback_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>) -> bool;
+    fn rollback_slots(
+        &mut self,
+        seq_id: i32,
+        token_count: i32,
+        block_count_out: &RefCell<i32>,
+        error_out: &RefCell<i32>,
+    ) -> bool;
     fn capture_view(&mut self, snapshot_out: &RefCell<Snapshot>, error_out: &RefCell<i32>) -> bool;
-    fn branch_sequence(&mut self, parent_seq_id: i32, child_seq_id: i32, error_out: &RefCell<i32>) -> bool;
+    fn branch_sequence(
+        &mut self,
+        parent_seq_id: i32,
+        child_seq_id: i32,
+        error_out: &RefCell<i32>,
+    ) -> bool;
 }
 
 impl HybridKvActor for kv::MemoryKvStateMachine<kv::MemoryKvContext> {
-    fn reserve(&mut self, max_sequences: i32, max_blocks: i32, block_tokens: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::ReserveContext::default()); self.process_event(kv::EventReserveRuntime { max_sequences, max_blocks, block_tokens, error_out: Some(error_out), context: &c }).is_ok() }
-    fn allocate_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::AllocateSequenceContext::default()); self.process_event(kv::EventAllocateSequenceRuntime { seq_id, error_out: Some(error_out), context: &c }).is_ok() }
-    fn allocate_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>, copy_block: Option<&dyn kv::BlockCopier>) -> bool { let c = RefCell::new(kv::AllocateSlotsContext::default()); self.process_event(kv::EventAllocateSlotsRuntime { seq_id, token_count, block_count_out: Some(block_count_out), error_out: Some(error_out), copy_block, context: &c }).is_ok() }
-    fn free_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::FreeSequenceContext::default()); self.process_event(kv::EventFreeSequenceRuntime { seq_id, error_out: Some(error_out), context: &c }).is_ok() }
-    fn rollback_slots(&mut self, seq_id: i32, token_count: i32, block_count_out: &RefCell<i32>, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::RollbackSlotsContext::default()); self.process_event(kv::EventRollbackSlotsRuntime { seq_id, token_count, block_count_out: Some(block_count_out), error_out: Some(error_out), context: &c }).is_ok() }
-    fn capture_view(&mut self, snapshot_out: &RefCell<Snapshot>, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::CaptureViewContext::default()); self.process_event(kv::EventCaptureViewRuntime { snapshot_out: Some(snapshot_out), error_out: Some(error_out), context: &c }).is_ok() }
-    fn branch_sequence(&mut self, parent_seq_id: i32, child_seq_id: i32, error_out: &RefCell<i32>) -> bool { let c = RefCell::new(kv::BranchSequenceContext::default()); self.process_event(kv::EventBranchSequenceRuntime { parent_seq_id, child_seq_id, copy_state: None, error_out: Some(error_out), context: &c }).is_ok() }
+    fn reserve(
+        &mut self,
+        max_sequences: i32,
+        max_blocks: i32,
+        block_tokens: i32,
+        error_out: &RefCell<i32>,
+    ) -> bool {
+        let c = RefCell::new(kv::ReserveContext::default());
+        self.process_event(kv::EventReserveRuntime {
+            max_sequences,
+            max_blocks,
+            block_tokens,
+            error_out: Some(error_out),
+            context: &c,
+        })
+        .is_ok()
+    }
+    fn allocate_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool {
+        let c = RefCell::new(kv::AllocateSequenceContext::default());
+        self.process_event(kv::EventAllocateSequenceRuntime {
+            seq_id,
+            error_out: Some(error_out),
+            context: &c,
+        })
+        .is_ok()
+    }
+    fn allocate_slots(
+        &mut self,
+        seq_id: i32,
+        token_count: i32,
+        block_count_out: &RefCell<i32>,
+        error_out: &RefCell<i32>,
+        copy_block: Option<&dyn kv::BlockCopier>,
+    ) -> bool {
+        let c = RefCell::new(kv::AllocateSlotsContext::default());
+        self.process_event(kv::EventAllocateSlotsRuntime {
+            seq_id,
+            token_count,
+            block_count_out: Some(block_count_out),
+            error_out: Some(error_out),
+            copy_block,
+            context: &c,
+        })
+        .is_ok()
+    }
+    fn free_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool {
+        let c = RefCell::new(kv::FreeSequenceContext::default());
+        self.process_event(kv::EventFreeSequenceRuntime {
+            seq_id,
+            error_out: Some(error_out),
+            context: &c,
+        })
+        .is_ok()
+    }
+    fn rollback_slots(
+        &mut self,
+        seq_id: i32,
+        token_count: i32,
+        block_count_out: &RefCell<i32>,
+        error_out: &RefCell<i32>,
+    ) -> bool {
+        let c = RefCell::new(kv::RollbackSlotsContext::default());
+        self.process_event(kv::EventRollbackSlotsRuntime {
+            seq_id,
+            token_count,
+            block_count_out: Some(block_count_out),
+            error_out: Some(error_out),
+            context: &c,
+        })
+        .is_ok()
+    }
+    fn capture_view(&mut self, snapshot_out: &RefCell<Snapshot>, error_out: &RefCell<i32>) -> bool {
+        let c = RefCell::new(kv::CaptureViewContext::default());
+        self.process_event(kv::EventCaptureViewRuntime {
+            snapshot_out: Some(snapshot_out),
+            error_out: Some(error_out),
+            context: &c,
+        })
+        .is_ok()
+    }
+    fn branch_sequence(
+        &mut self,
+        parent_seq_id: i32,
+        child_seq_id: i32,
+        error_out: &RefCell<i32>,
+    ) -> bool {
+        let c = RefCell::new(kv::BranchSequenceContext::default());
+        self.process_event(kv::EventBranchSequenceRuntime {
+            parent_seq_id,
+            child_seq_id,
+            copy_state: None,
+            error_out: Some(error_out),
+            context: &c,
+        })
+        .is_ok()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum KvBindingKind { Empty, Complete, Invalid }
+enum KvBindingKind {
+    Empty,
+    Complete,
+    Invalid,
+}
 
 #[derive(Clone)]
-pub struct KvBinding { actor: Option<std::rc::Rc<RefCell<dyn HybridKvActor>>>, kind: KvBindingKind }
-impl Default for KvBinding { fn default() -> Self { Self { actor: None, kind: KvBindingKind::Empty } } }
+pub struct KvBinding {
+    actor: Option<std::rc::Rc<RefCell<dyn HybridKvActor>>>,
+    kind: KvBindingKind,
+}
+impl Default for KvBinding {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 impl KvBinding {
-    pub fn empty() -> Self { Self::default() }
-    pub fn invalid() -> Self { Self { actor: None, kind: KvBindingKind::Invalid } }
-    pub fn from_shared(actor: std::rc::Rc<RefCell<dyn HybridKvActor>>) -> Self { Self { actor: Some(actor), kind: KvBindingKind::Complete } }
-    pub fn from_actor<A: HybridKvActor + 'static>(actor: A) -> Self { Self::from_shared(std::rc::Rc::new(RefCell::new(actor))) }
-    fn route(&self) -> KvCacheRoute { if matches!(self.kind, KvBindingKind::Empty) { KvCacheRoute::Owned } else { KvCacheRoute::Bound } }
-    fn is_invalid(&self) -> bool { matches!(self.kind, KvBindingKind::Invalid) }
+    pub fn empty() -> Self {
+        Self {
+            actor: Some(std::rc::Rc::new(RefCell::new(
+                kv::MemoryKvStateMachine::new(kv::MemoryKvContext::default()),
+            ))),
+            kind: KvBindingKind::Empty,
+        }
+    }
+    pub fn invalid() -> Self {
+        Self {
+            actor: None,
+            kind: KvBindingKind::Invalid,
+        }
+    }
+    pub fn from_shared(actor: std::rc::Rc<RefCell<dyn HybridKvActor>>) -> Self {
+        Self {
+            actor: Some(actor),
+            kind: KvBindingKind::Complete,
+        }
+    }
+    pub fn from_actor<A: HybridKvActor + 'static>(actor: A) -> Self {
+        Self::from_shared(std::rc::Rc::new(RefCell::new(actor)))
+    }
+    fn route(&self) -> KvCacheRoute {
+        if matches!(self.kind, KvBindingKind::Empty) {
+            KvCacheRoute::Owned
+        } else {
+            KvCacheRoute::Bound
+        }
+    }
+    fn is_invalid(&self) -> bool {
+        matches!(self.kind, KvBindingKind::Invalid)
+    }
 }
 
 pub struct MemoryHybridContext {
-    pub kv: kv::MemoryKvStateMachine<kv::MemoryKvContext>,
     pub recurrent: recurrent::MemoryRecurrentStateMachine<recurrent::MemoryRecurrentContext>,
     pub kv_route: KvCacheRoute,
     pub kv_binding: KvBinding,
-    pub kv_snapshot: Snapshot,
-    pub recurrent_snapshot: recurrent::Snapshot,
+    pub kv_snapshot: RefCell<Snapshot>,
+    pub recurrent_snapshot: RefCell<recurrent::Snapshot>,
 }
 impl Default for MemoryHybridContext {
     fn default() -> Self {
-        Self { kv: kv::MemoryKvStateMachine::new(kv::MemoryKvContext::default()), recurrent: recurrent::MemoryRecurrentStateMachine::new(recurrent::MemoryRecurrentContext::default()), kv_route: KvCacheRoute::Owned, kv_binding: KvBinding::default(), kv_snapshot: Snapshot::default(), recurrent_snapshot: recurrent::Snapshot::default() }
+        let binding = KvBinding::empty();
+        Self {
+            recurrent: recurrent::MemoryRecurrentStateMachine::new(
+                recurrent::MemoryRecurrentContext::default(),
+            ),
+            kv_route: binding.route(),
+            kv_binding: binding,
+            kv_snapshot: RefCell::new(Snapshot::default()),
+            recurrent_snapshot: RefCell::new(recurrent::Snapshot::default()),
+        }
     }
 }
 impl MemoryHybridContext {
-    pub fn with_kv_binding(binding: KvBinding) -> Self { let mut context = Self::default(); context.kv_route = binding.route(); context.kv_binding = binding; context }
-    fn bound_actor(&self) -> Option<std::rc::Rc<RefCell<dyn HybridKvActor>>> { self.kv_binding.actor.clone() }
-    fn kv_free_sequence(&mut self, seq_id: i32, err: &RefCell<i32>) -> bool {
-        if self.kv_binding.is_invalid() { *err.borrow_mut() = HybridError::BackendError.code(); return false; }
-        if let Some(actor) = self.bound_actor() { actor.borrow_mut().free_sequence(seq_id, err) } else {
-            let c = RefCell::new(kv::FreeSequenceContext::default()); self.kv.process_event(kv::EventFreeSequenceRuntime { seq_id, error_out: Some(err), context: &c }).is_ok()
+    pub fn with_kv_binding(binding: KvBinding) -> Self {
+        let kv_route = binding.route();
+        Self {
+            recurrent: recurrent::MemoryRecurrentStateMachine::new(
+                recurrent::MemoryRecurrentContext::default(),
+            ),
+            kv_route,
+            kv_binding: binding,
+            kv_snapshot: RefCell::new(Snapshot::default()),
+            recurrent_snapshot: RefCell::new(recurrent::Snapshot::default()),
         }
     }
-    fn kv_rollback_slots(&mut self, seq_id: i32, token_count: i32, count: &RefCell<i32>, err: &RefCell<i32>) -> bool {
-        if self.kv_binding.is_invalid() { *err.borrow_mut() = HybridError::BackendError.code(); return false; }
-        if let Some(actor) = self.bound_actor() { actor.borrow_mut().rollback_slots(seq_id, token_count, count, err) } else {
-            let c = RefCell::new(kv::RollbackSlotsContext::default()); self.kv.process_event(kv::EventRollbackSlotsRuntime { seq_id, token_count, block_count_out: Some(count), error_out: Some(err), context: &c }).is_ok()
-        }
+    fn bound_actor(&self) -> Option<std::rc::Rc<RefCell<dyn HybridKvActor>>> {
+        self.kv_binding.actor.clone()
     }
-    fn kv_branch(&mut self, parent_seq_id: i32, child_seq_id: i32, err: &RefCell<i32>) -> bool {
-        if self.kv_binding.is_invalid() { *err.borrow_mut() = HybridError::BackendError.code(); return false; }
-        if let Some(actor) = self.bound_actor() { actor.borrow_mut().branch_sequence(parent_seq_id, child_seq_id, err) } else {
-            let c = RefCell::new(kv::BranchSequenceContext::default()); self.kv.process_event(kv::EventBranchSequenceRuntime { parent_seq_id, child_seq_id, copy_state: None, error_out: Some(err), context: &c }).is_ok()
+    fn kv_free_sequence(&self, seq_id: i32, err: &RefCell<i32>) -> bool {
+        if self.kv_binding.is_invalid() {
+            *err.borrow_mut() = HybridError::BackendError.code();
+            return false;
         }
+        self.bound_actor()
+            .is_some_and(|actor| actor.borrow_mut().free_sequence(seq_id, err))
+    }
+    fn kv_rollback_slots(
+        &self,
+        seq_id: i32,
+        token_count: i32,
+        count: &RefCell<i32>,
+        err: &RefCell<i32>,
+    ) -> bool {
+        if self.kv_binding.is_invalid() {
+            *err.borrow_mut() = HybridError::BackendError.code();
+            return false;
+        }
+        self.bound_actor().is_some_and(|actor| {
+            actor
+                .borrow_mut()
+                .rollback_slots(seq_id, token_count, count, err)
+        })
+    }
+    fn kv_branch(&self, parent_seq_id: i32, child_seq_id: i32, err: &RefCell<i32>) -> bool {
+        if self.kv_binding.is_invalid() {
+            *err.borrow_mut() = HybridError::BackendError.code();
+            return false;
+        }
+        self.bound_actor().is_some_and(|actor| {
+            actor
+                .borrow_mut()
+                .branch_sequence(parent_seq_id, child_seq_id, err)
+        })
     }
 }
 
-fn set_error(out: Option<&RefCell<i32>>, error: HybridError) { if let Some(out) = out { *out.borrow_mut() = error.code(); } }
-fn api_error(code: i32) -> HybridError { match code { 1 => HybridError::InvalidRequest, 2 => HybridError::BackendError, 4 => HybridError::InternalError, 8 => HybridError::OutOfMemory, 16 => HybridError::Untracked, _ => HybridError::InternalError } }
-fn backend_family(code: i32) -> bool { matches!(code, 0 | 2 | 8) }
-fn backend_or_none(code: i32) -> bool { matches!(code, 0 | 2) }
-fn merge(kv: &Snapshot, rec: &recurrent::Snapshot, out: &mut Snapshot) {
-    *out = Snapshot::default(); out.max_sequences = kv.max_sequences.min(rec.max_sequences); out.block_tokens = kv.block_tokens;
-    let count = usize::try_from(out.max_sequences.max(0)).unwrap_or(0).min(MAX_SEQUENCES);
-    for i in 0..count { let active = kv.sequence_active[i] != 0 && rec.sequence_active[i] != 0; out.sequence_active[i] = u8::from(active); out.sequence_length_values[i] = if active { kv.sequence_length_values[i].min(rec.sequence_length_values[i]) } else { 0 }; out.sequence_kv_block_count[i] = if active { kv.sequence_kv_block_count[i] } else { 0 }; out.sequence_kv_blocks[i] = kv.sequence_kv_blocks[i]; out.sequence_recurrent_slot[i] = if active { rec.sequence_recurrent_slot[i] } else { -1 }; }
+fn set_error(out: Option<&RefCell<i32>>, error: HybridError) {
+    if let Some(out) = out {
+        *out.borrow_mut() = error.code();
+    }
 }
-
-fn effect_allocate_slots_impl(ctx: &mut MemoryHybridContext, e: &EventAllocateSlotsRuntime<'_>) -> Result<(), ()> {
-    let c = RefCell::new(kv::AllocateSlotsContext::default());
-    let err = RefCell::new(0); let count = RefCell::new(0);
-    let ok = if ctx.kv_binding.is_invalid() { *err.borrow_mut() = HybridError::BackendError.code(); false } else if let Some(actor) = ctx.bound_actor() { actor.borrow_mut().allocate_slots(e.seq_id, e.token_count, &count, &err, e.copy_block) } else { ctx.kv.process_event(kv::EventAllocateSlotsRuntime { seq_id: e.seq_id, token_count: e.token_count, block_count_out: Some(&count), error_out: Some(&err), copy_block: e.copy_block, context: &c }).is_ok() };
-    let mut h = e.context.borrow_mut(); h.kv_accepted = ok && *err.borrow() == 0; h.kv_error = *err.borrow(); h.kv_block_count = *count.borrow(); if let Some(out) = e.block_count_out { *out.borrow_mut() = h.kv_block_count; } Ok(())
+fn api_error(code: i32) -> HybridError {
+    match code {
+        1 => HybridError::InvalidRequest,
+        2 => HybridError::BackendError,
+        8 => HybridError::OutOfMemory,
+        16 => HybridError::Untracked,
+        _ => HybridError::InternalError,
+    }
 }
-fn effect_capture_impl(ctx: &mut MemoryHybridContext, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+fn backend_family(code: i32) -> bool {
+    matches!(code, 0 | 2 | 8)
+}
+fn backend_or_none(code: i32) -> bool {
+    matches!(code, 0 | 2)
+}
+fn merge(kv: &Snapshot, rec: &recurrent::Snapshot, route: KvCacheRoute, out: &mut Snapshot) {
+    *out = Snapshot::default();
+    out.max_sequences = kv.max_sequences.min(rec.max_sequences);
+    out.block_tokens = kv.block_tokens;
+    let count = usize::try_from(out.max_sequences.max(0))
+        .unwrap_or(0)
+        .min(MAX_SEQUENCES);
+    for i in 0..count {
+        let active = kv.sequence_active[i] != 0 && rec.sequence_active[i] != 0;
+        out.sequence_active[i] = u8::from(active);
+        out.sequence_length_values[i] = if active {
+            match route {
+                KvCacheRoute::Bound => kv.sequence_length_values[i],
+                KvCacheRoute::Owned => {
+                    kv.sequence_length_values[i].min(rec.sequence_length_values[i])
+                }
+            }
+        } else {
+            0
+        };
+        out.sequence_kv_block_count[i] = if active {
+            kv.sequence_kv_block_count[i]
+        } else {
+            0
+        };
+        out.sequence_kv_blocks[i] = kv.sequence_kv_blocks[i];
+        out.sequence_recurrent_slot[i] = if active {
+            rec.sequence_recurrent_slot[i]
+        } else {
+            -1
+        };
+    }
+}
+fn effect_allocate_slots_impl(ctx: &MemoryHybridContext, e: &EventAllocateSlotsRuntime<'_>) {
     let err = RefCell::new(0);
-    let ok = if ctx.kv_binding.is_invalid() { *err.borrow_mut() = HybridError::BackendError.code(); false } else if let Some(actor) = ctx.bound_actor() { actor.borrow_mut().capture_view(&RefCell::new(Snapshot::default()), &err) } else { ctx.kv.process_event(kv::EventCaptureViewRuntime { snapshot_out: Some(&RefCell::new(Snapshot::default())), error_out: Some(&err), context: &RefCell::new(kv::CaptureViewContext::default()) }).is_ok() };
-    let mut h = e.context.borrow_mut(); h.kv_accepted = ok && *err.borrow() == 0; h.kv_error = *err.borrow(); Ok(())
+    let count = RefCell::new(0);
+    let ok = if ctx.kv_binding.is_invalid() {
+        *err.borrow_mut() = HybridError::BackendError.code();
+        false
+    } else if let Some(actor) = ctx.bound_actor() {
+        actor
+            .borrow_mut()
+            .allocate_slots(e.seq_id, e.token_count, &count, &err, e.copy_block)
+    } else {
+        false
+    };
+    let mut h = e.context.borrow_mut();
+    h.kv_accepted = ok && *err.borrow() == 0;
+    h.kv_error = *err.borrow();
+    h.kv_block_count = *count.borrow();
+    if let Some(out) = e.block_count_out {
+        *out.borrow_mut() = h.kv_block_count;
+    }
+}
+fn effect_capture_impl(ctx: &MemoryHybridContext, e: &EventCaptureViewRuntime<'_>) {
+    let err = RefCell::new(0);
+    let ok = if ctx.kv_binding.is_invalid() {
+        *err.borrow_mut() = HybridError::BackendError.code();
+        false
+    } else if let Some(actor) = ctx.bound_actor() {
+        actor.borrow_mut().capture_view(&ctx.kv_snapshot, &err)
+    } else {
+        false
+    };
+    let mut h = e.context.borrow_mut();
+    h.kv_accepted = ok && *err.borrow() == 0;
+    h.kv_error = *err.borrow();
 }
 
 impl MemoryHybridStateMachineContext for MemoryHybridContext {
-    fn begin_allocate_sequence(&mut self, e: &EventAllocateSequenceRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = AllocateSequenceContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
-    fn begin_reserve(&mut self, e: &EventReserveRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = ReserveContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
-    fn begin_allocate_slots(&mut self, e: &EventAllocateSlotsRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = AllocateSlotsContext::default(); if let Some(o)=e.block_count_out {*o.borrow_mut()=0;} set_error(e.error_out, HybridError::None); Ok(()) }
-    fn begin_branch_sequence(&mut self, e: &EventBranchSequenceRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = BranchSequenceContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
-    fn begin_free_sequence(&mut self, e: &EventFreeSequenceRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = FreeSequenceContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
-    fn begin_rollback_slots(&mut self, e: &EventRollbackSlotsRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = RollbackSlotsContext::default(); if let Some(o)=e.block_count_out {*o.borrow_mut()=0;} set_error(e.error_out, HybridError::None); Ok(()) }
-    fn begin_capture_view(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> { *e.context.borrow_mut() = CaptureViewContext::default(); set_error(e.error_out, HybridError::None); Ok(()) }
-    fn capture_request_valid(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { Ok(e.snapshot_out.is_some()) } fn capture_request_invalid(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { Ok(e.snapshot_out.is_none()) }
-    fn exec_reserve_kv(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> { let c=RefCell::new(kv::ReserveContext::default()); let err=RefCell::new(0); let ok=if let Some(actor)=self.bound_actor(){actor.borrow_mut().reserve(e.max_sequences,e.max_blocks,e.block_tokens,&err)}else{self.kv.process_event(kv::EventReserveRuntime{max_sequences:e.max_sequences,max_blocks:e.max_blocks,block_tokens:e.block_tokens,error_out:Some(&err),context:&c}).is_ok()}; let mut h=e.context.borrow_mut();h.kv_accepted=ok&&*err.borrow()==0;h.kv_error=*err.borrow();Ok(()) }
-    fn exec_reserve_recurrent(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> { let c=RefCell::new(recurrent::ReserveContext::default()); let err=RefCell::new(0); let ok=self.recurrent.process_event(recurrent::EventReserveRuntime{max_sequences:e.max_sequences,max_blocks:e.max_blocks,block_tokens:e.block_tokens,error_out:Some(&err),context:&c}).is_ok()&&*err.borrow()==0; let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(()) }
-    fn exec_allocate_sequence_kv(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> { let c=RefCell::new(kv::AllocateSequenceContext::default()); let err=RefCell::new(0); let ok=if let Some(actor)=self.bound_actor(){actor.borrow_mut().allocate_sequence(e.seq_id,&err)}else{self.kv.process_event(kv::EventAllocateSequenceRuntime{seq_id:e.seq_id,error_out:Some(&err),context:&c}).is_ok()}; let mut h=e.context.borrow_mut();h.kv_accepted=ok&&*err.borrow()==0;h.kv_error=*err.borrow();Ok(()) }
-    fn exec_allocate_sequence_recurrent(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> { let c=RefCell::new(recurrent::AllocateSequenceContext::default()); let err=RefCell::new(0); let ok=self.recurrent.process_event(recurrent::EventAllocateSequenceRuntime{seq_id:e.seq_id,error_out:Some(&err),context:&c}).is_ok()&&*err.borrow()==0; let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(()) }
-    fn exec_allocate_sequence_rollback_kv(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> { let err=RefCell::new(0); let ok=self.kv_free_sequence(e.seq_id,&err); let mut h=e.context.borrow_mut();h.rollback_accepted=ok&&*err.borrow()==0;h.rollback_error=*err.borrow();Ok(()) }
-    fn exec_rollback_slots_recurrent(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()> { let c=RefCell::new(recurrent::RollbackSlotsContext::default()); let err=RefCell::new(0); let ok=self.recurrent.process_event(recurrent::EventRollbackSlotsRuntime{seq_id:e.seq_id,token_count:e.token_count,block_count_out:None,error_out:Some(&err),context:&c}).is_ok()&&*err.borrow()==0; let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(()) }
-    fn effect_allocate_slots_owned_kv(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()>{effect_allocate_slots_impl(self,e)} fn effect_allocate_slots_bound_kv(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()>{effect_allocate_slots_impl(self,e)}
-    fn exec_allocate_slots_recurrent(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()>{let c=RefCell::new(recurrent::AllocateSlotsContext::default());let err=RefCell::new(0);let ok=self.recurrent.process_event(recurrent::EventAllocateSlotsRuntime{seq_id:e.seq_id,token_count:e.token_count,block_count_out:None,error_out:Some(&err),context:&c}).is_ok()&&*err.borrow()==0;let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(())}
-    fn exec_allocate_slots_rollback_kv(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()>{let err=RefCell::new(0);let ok=self.kv_rollback_slots(e.seq_id,e.token_count,&RefCell::new(0),&err);let mut h=e.context.borrow_mut();h.rollback_accepted=ok&&*err.borrow()==0;h.rollback_error=*err.borrow();Ok(())}
-    fn exec_branch_sequence_kv(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()>{let err=RefCell::new(0);let ok=self.kv_branch(e.parent_seq_id,e.child_seq_id,&err);let mut h=e.context.borrow_mut();h.kv_accepted=ok&&*err.borrow()==0;h.kv_error=*err.borrow();Ok(())}
-    fn exec_branch_sequence_recurrent(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()>{let c=RefCell::new(recurrent::BranchSequenceContext::default());let err=RefCell::new(0);let ok=self.recurrent.process_event(recurrent::EventBranchSequenceRuntime{parent_seq_id:e.parent_seq_id,child_seq_id:e.child_seq_id,copy_state:e.copy_state,error_out:Some(&err),context:&c}).is_ok()&&*err.borrow()==0;let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(())}
-    fn exec_branch_sequence_rollback_kv(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()>{let err=RefCell::new(0);let ok=self.kv_free_sequence(e.child_seq_id,&err);let mut h=e.context.borrow_mut();h.rollback_accepted=ok&&*err.borrow()==0;h.rollback_error=*err.borrow();Ok(())}
-    fn exec_free_sequence_kv(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()>{let err=RefCell::new(0);let ok=self.kv_free_sequence(e.seq_id,&err);let mut h=e.context.borrow_mut();h.kv_accepted=ok&&*err.borrow()==0;h.kv_error=*err.borrow();Ok(())}
-    fn exec_free_sequence_recurrent(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()>{let c=RefCell::new(recurrent::FreeSequenceContext::default());let err=RefCell::new(0);let ok=self.recurrent.process_event(recurrent::EventFreeSequenceRuntime{seq_id:e.seq_id,error_out:Some(&err),context:&c}).is_ok()&&*err.borrow()==0;let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(())}
-    fn exec_rollback_slots_kv(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()>{let count=RefCell::new(0);let err=RefCell::new(0);let ok=self.kv_rollback_slots(e.seq_id,e.token_count,&count,&err);let mut h=e.context.borrow_mut();h.kv_accepted=ok&&*err.borrow()==0;h.kv_error=*err.borrow();h.kv_block_count=*count.borrow();if let Some(o)=e.block_count_out{*o.borrow_mut()=*count.borrow();}Ok(())}
-    fn effect_capture_owned_kv(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()>{effect_capture_impl(self,e)} fn effect_capture_bound_kv(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()>{effect_capture_impl(self,e)}
-    fn exec_capture_recurrent(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()>{let err=RefCell::new(0);let ok=self.recurrent.process_event(recurrent::EventCaptureViewRuntime{snapshot_out:Some(&RefCell::new(self.recurrent_snapshot.clone())),error_out:Some(&err),context:&RefCell::new(recurrent::CaptureViewContext::default())}).is_ok()&&*err.borrow()==0;let mut h=e.context.borrow_mut();h.recurrent_accepted=ok;h.recurrent_error=*err.borrow();Ok(())}
-    fn merge_capture_snapshots(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()>{if let Some(out)=e.snapshot_out{merge(&self.kv_snapshot,&self.recurrent_snapshot,&mut out.borrow_mut());}Ok(())}
-    fn kv_accepted_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn kv_rejected_with_error_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error != 0) }
-    fn kv_rejected_without_error_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error == 0) }
-    fn recurrent_accepted_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn kv_accepted_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn recurrent_accepted_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn kv_accepted_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn recurrent_accepted_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn kv_accepted_event_capture_view_runtime(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn kv_rejected_with_error_event_capture_view_runtime(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error != 0) }
-    fn kv_rejected_without_error_event_capture_view_runtime(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error == 0) }
-    fn recurrent_accepted_event_capture_view_runtime(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn recurrent_rejected_with_error_event_capture_view_runtime(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error != 0) }
-    fn recurrent_rejected_without_error_event_capture_view_runtime(&self,e:&EventCaptureViewRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error == 0) }
-    fn kv_accepted_event_free_sequence_runtime(&self,e:&EventFreeSequenceRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn kv_rejected_with_error_event_free_sequence_runtime(&self,e:&EventFreeSequenceRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error != 0) }
-    fn kv_rejected_without_error_event_free_sequence_runtime(&self,e:&EventFreeSequenceRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error == 0) }
-    fn recurrent_accepted_event_free_sequence_runtime(&self,e:&EventFreeSequenceRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn recurrent_rejected_with_error_event_free_sequence_runtime(&self,e:&EventFreeSequenceRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error != 0) }
-    fn recurrent_rejected_without_error_event_free_sequence_runtime(&self,e:&EventFreeSequenceRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error == 0) }
-    fn kv_accepted_event_reserve_runtime(&self,e:&EventReserveRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn kv_rejected_with_error_event_reserve_runtime(&self,e:&EventReserveRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error != 0) }
-    fn kv_rejected_without_error_event_reserve_runtime(&self,e:&EventReserveRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error == 0) }
-    fn recurrent_accepted_event_reserve_runtime(&self,e:&EventReserveRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn recurrent_rejected_with_error_event_reserve_runtime(&self,e:&EventReserveRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error != 0) }
-    fn recurrent_rejected_without_error_event_reserve_runtime(&self,e:&EventReserveRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error == 0) }
-    fn kv_accepted_event_rollback_slots_runtime(&self,e:&EventRollbackSlotsRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().kv_accepted) }
-    fn kv_rejected_with_error_event_rollback_slots_runtime(&self,e:&EventRollbackSlotsRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error != 0) }
-    fn kv_rejected_without_error_event_rollback_slots_runtime(&self,e:&EventRollbackSlotsRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error == 0) }
-    fn recurrent_accepted_event_rollback_slots_runtime(&self,e:&EventRollbackSlotsRuntime<'_>)->Result<bool,()> { Ok(e.context.borrow().recurrent_accepted) }
-    fn recurrent_rejected_with_error_event_rollback_slots_runtime(&self,e:&EventRollbackSlotsRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error != 0) }
-    fn recurrent_rejected_without_error_event_rollback_slots_runtime(&self,e:&EventRollbackSlotsRuntime<'_>)->Result<bool,()> { let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error == 0) }
-    fn recurrent_rejected_any_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()>{Ok(!e.context.borrow().recurrent_accepted)} fn recurrent_rejected_any_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()>{Ok(!e.context.borrow().recurrent_accepted)} fn recurrent_rejected_any_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()>{Ok(!e.context.borrow().recurrent_accepted)}
-    fn recurrent_rejected_out_of_memory_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error==8)}
-    fn recurrent_rejected_backend_or_none_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && backend_or_none(c.recurrent_error))}
-    fn recurrent_rejected_non_backend_error_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error!=0 && !backend_family(c.recurrent_error))}
-    fn kv_rejected_out_of_memory_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error==8)}
-    fn recurrent_rejected_out_of_memory_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error==8)}
-    fn kv_rejected_backend_or_none_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.kv_accepted && backend_or_none(c.kv_error))}
-    fn recurrent_rejected_backend_or_none_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && backend_or_none(c.recurrent_error))}
-    fn kv_rejected_non_backend_error_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error!=0 && !backend_family(c.kv_error))}
-    fn recurrent_rejected_non_backend_error_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error!=0 && !backend_family(c.recurrent_error))}
-    fn kv_rejected_out_of_memory_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error==8)}
-    fn recurrent_rejected_out_of_memory_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error==8)}
-    fn kv_rejected_backend_or_none_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.kv_accepted && backend_or_none(c.kv_error))}
-    fn recurrent_rejected_backend_or_none_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && backend_or_none(c.recurrent_error))}
-    fn kv_rejected_non_backend_error_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.kv_accepted && c.kv_error!=0 && !backend_family(c.kv_error))}
-    fn recurrent_rejected_non_backend_error_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow(); Ok(!c.recurrent_accepted && c.recurrent_error!=0 && !backend_family(c.recurrent_error))}
-    fn rollback_accepted_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> {Ok(e.context.borrow().rollback_accepted)}
-    fn rollback_rejected_with_error_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow();Ok(!c.rollback_accepted&&c.rollback_error!=0)}
-    fn rollback_rejected_without_error_event_allocate_sequence_runtime(&self,e:&EventAllocateSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow();Ok(!c.rollback_accepted&&c.rollback_error==0)}
-    fn rollback_accepted_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {Ok(e.context.borrow().rollback_accepted)}
-    fn rollback_rejected_with_error_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow();Ok(!c.rollback_accepted&&c.rollback_error!=0)}
-    fn rollback_rejected_without_error_event_allocate_slots_runtime(&self,e:&EventAllocateSlotsRuntime<'_>)->Result<bool,()> {let c=e.context.borrow();Ok(!c.rollback_accepted&&c.rollback_error==0)}
-    fn rollback_accepted_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {Ok(e.context.borrow().rollback_accepted)}
-    fn rollback_rejected_with_error_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow();Ok(!c.rollback_accepted&&c.rollback_error!=0)}
-    fn rollback_rejected_without_error_event_branch_sequence_runtime(&self,e:&EventBranchSequenceRuntime<'_>)->Result<bool,()> {let c=e.context.borrow();Ok(!c.rollback_accepted&&c.rollback_error==0)}
-    fn mark_backend_error_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_backend_error_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_backend_error_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_backend_error_event_capture_view_runtime(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_backend_error_event_free_sequence_runtime(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_backend_error_event_reserve_runtime(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_backend_error_event_rollback_slots_runtime(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::BackendError;set_error(e.error_out,HybridError::BackendError);Ok(())}
-    fn mark_out_of_memory_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::OutOfMemory;set_error(e.error_out,HybridError::OutOfMemory);Ok(())}
-    fn mark_out_of_memory_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::OutOfMemory;set_error(e.error_out,HybridError::OutOfMemory);Ok(())}
-    fn mark_out_of_memory_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::OutOfMemory;set_error(e.error_out,HybridError::OutOfMemory);Ok(())}
-    fn mark_internal_error_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::InternalError;set_error(e.error_out,HybridError::InternalError);Ok(())}
-    fn mark_internal_error_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::InternalError;set_error(e.error_out,HybridError::InternalError);Ok(())}
-    fn mark_internal_error_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::InternalError;set_error(e.error_out,HybridError::InternalError);Ok(())}
-    fn mark_error_from_kv_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_kv_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_kv_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_kv_event_capture_view_runtime(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_kv_event_free_sequence_runtime(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_kv_event_reserve_runtime(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_kv_event_rollback_slots_runtime(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()> {let code=e.context.borrow().kv_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_capture_view_runtime(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_free_sequence_runtime(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_reserve_runtime(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_recurrent_event_rollback_slots_runtime(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()> {let code=e.context.borrow().recurrent_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_rollback_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().rollback_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_rollback_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {let code=e.context.borrow().rollback_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn mark_error_from_rollback_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {let code=e.context.borrow().rollback_error;let err=api_error(code);e.context.borrow_mut().err=err;set_error(e.error_out,err);Ok(())}
-    fn publish_done_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_allocate_sequence_runtime(&mut self,e:&EventAllocateSequenceRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);Ok(())}
-    fn publish_done_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_allocate_slots_runtime(&mut self,e:&EventAllocateSlotsRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);if let Some(o)=e.block_count_out{*o.borrow_mut()=0;}Ok(())}
-    fn publish_done_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_branch_sequence_runtime(&mut self,e:&EventBranchSequenceRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);Ok(())}
-    fn publish_done_event_capture_view_runtime(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_capture_view_runtime(&mut self,e:&EventCaptureViewRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);Ok(())}
-    fn publish_done_event_free_sequence_runtime(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_free_sequence_runtime(&mut self,e:&EventFreeSequenceRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);Ok(())}
-    fn publish_done_event_reserve_runtime(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_reserve_runtime(&mut self,e:&EventReserveRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);Ok(())}
-    fn publish_done_event_rollback_slots_runtime(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()> {e.context.borrow_mut().err=HybridError::None;set_error(e.error_out,HybridError::None);Ok(())}
-    fn publish_error_event_rollback_slots_runtime(&mut self,e:&EventRollbackSlotsRuntime<'_>)->Result<(),()> {let err=e.context.borrow().err;set_error(e.error_out,err);if let Some(o)=e.block_count_out{*o.borrow_mut()=0;}Ok(())}
-    fn on_unexpected_from_allocate_sequence_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_sequence_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_sequence_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_sequence_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_sequence_recurrent_error_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_sequence_rollback_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_sequence_rollback_result_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_recurrent_error_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_rollback_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_allocate_slots_rollback_result_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_recurrent_error_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_rollback_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_branch_sequence_rollback_result_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_capture_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_capture_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_capture_merge(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_capture_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_capture_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_capture_request_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_done(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_errored(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_free_sequence_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_free_sequence_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_free_sequence_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_free_sequence_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_out_of_memory(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_ready(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_reserve_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_reserve_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_reserve_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_reserve_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_rollback_slots_kv(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_rollback_slots_kv_decision(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_rollback_slots_recurrent(&mut self)->Result<(),()>{Ok(())}
-    fn on_unexpected_from_rollback_slots_recurrent_decision(&mut self)->Result<(),()>{Ok(())}
-    fn guard_bound_kv_cache_event_allocate_slots_runtime(&self, _: &EventAllocateSlotsRuntime<'_>) -> Result<bool, ()> { Ok(matches!(self.kv_route, KvCacheRoute::Bound)) }
-    fn guard_bound_kv_cache_event_capture_view_runtime(&self, _: &EventCaptureViewRuntime<'_>) -> Result<bool, ()> { Ok(matches!(self.kv_route, KvCacheRoute::Bound)) }
-    fn guard_owned_kv_cache_event_allocate_slots_runtime(&self, _: &EventAllocateSlotsRuntime<'_>) -> Result<bool, ()> { Ok(matches!(self.kv_route, KvCacheRoute::Owned)) }
-    fn guard_owned_kv_cache_event_capture_view_runtime(&self, _: &EventCaptureViewRuntime<'_>) -> Result<bool, ()> { Ok(matches!(self.kv_route, KvCacheRoute::Owned)) }
-    fn mark_invalid_request(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> { e.context.borrow_mut().err = HybridError::InvalidRequest; set_error(e.error_out, HybridError::InvalidRequest); Ok(()) }
+    fn begin_allocate_sequence(&mut self, e: &EventAllocateSequenceRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = AllocateSequenceContext::default();
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn begin_reserve(&mut self, e: &EventReserveRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = ReserveContext::default();
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn begin_allocate_slots(&mut self, e: &EventAllocateSlotsRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = AllocateSlotsContext::default();
+        if let Some(o) = e.block_count_out {
+            *o.borrow_mut() = 0;
+        }
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn begin_branch_sequence(&mut self, e: &EventBranchSequenceRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = BranchSequenceContext::default();
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn begin_free_sequence(&mut self, e: &EventFreeSequenceRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = FreeSequenceContext::default();
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn begin_rollback_slots(&mut self, e: &EventRollbackSlotsRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = RollbackSlotsContext::default();
+        if let Some(o) = e.block_count_out {
+            *o.borrow_mut() = 0;
+        }
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn begin_capture_view(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+        *e.context.borrow_mut() = CaptureViewContext::default();
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn capture_request_valid(&self, e: &EventCaptureViewRuntime<'_>) -> Result<bool, ()> {
+        Ok(e.snapshot_out.is_some())
+    }
+    fn capture_request_invalid(&self, e: &EventCaptureViewRuntime<'_>) -> Result<bool, ()> {
+        Ok(e.snapshot_out.is_none())
+    }
+    fn exec_reserve_kv(&mut self, e: &EventReserveRuntime<'_>) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = if self.kv_binding.is_invalid() {
+            *err.borrow_mut() = HybridError::BackendError.code();
+            false
+        } else {
+            self.bound_actor().is_some_and(|actor| {
+                actor
+                    .borrow_mut()
+                    .reserve(e.max_sequences, e.max_blocks, e.block_tokens, &err)
+            })
+        };
+        let mut h = e.context.borrow_mut();
+        h.kv_accepted = ok && *err.borrow() == 0;
+        h.kv_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_reserve_recurrent(&mut self, e: &EventReserveRuntime<'_>) -> Result<(), ()> {
+        let c = RefCell::new(recurrent::ReserveContext::default());
+        let err = RefCell::new(0);
+        let ok = self
+            .recurrent
+            .process_event(recurrent::EventReserveRuntime {
+                max_sequences: e.max_sequences,
+                max_blocks: e.max_blocks,
+                block_tokens: e.block_tokens,
+                error_out: Some(&err),
+                context: &c,
+            })
+            .is_ok()
+            && *err.borrow() == 0;
+        let mut h = e.context.borrow_mut();
+        h.recurrent_accepted = ok;
+        h.recurrent_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_allocate_sequence_kv(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = if self.kv_binding.is_invalid() {
+            *err.borrow_mut() = HybridError::BackendError.code();
+            false
+        } else {
+            self.bound_actor()
+                .is_some_and(|actor| actor.borrow_mut().allocate_sequence(e.seq_id, &err))
+        };
+        let mut h = e.context.borrow_mut();
+        h.kv_accepted = ok && *err.borrow() == 0;
+        h.kv_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_allocate_sequence_recurrent(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let c = RefCell::new(recurrent::AllocateSequenceContext::default());
+        let err = RefCell::new(0);
+        let ok = self
+            .recurrent
+            .process_event(recurrent::EventAllocateSequenceRuntime {
+                seq_id: e.seq_id,
+                error_out: Some(&err),
+                context: &c,
+            })
+            .is_ok()
+            && *err.borrow() == 0;
+        let mut h = e.context.borrow_mut();
+        h.recurrent_accepted = ok;
+        h.recurrent_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_allocate_sequence_rollback_kv(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = self.kv_free_sequence(e.seq_id, &err);
+        let mut h = e.context.borrow_mut();
+        h.rollback_accepted = ok && *err.borrow() == 0;
+        h.rollback_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_rollback_slots_recurrent(
+        &mut self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let c = RefCell::new(recurrent::RollbackSlotsContext::default());
+        let err = RefCell::new(0);
+        let ok = self
+            .recurrent
+            .process_event(recurrent::EventRollbackSlotsRuntime {
+                seq_id: e.seq_id,
+                token_count: e.token_count,
+                block_count_out: None,
+                error_out: Some(&err),
+                context: &c,
+            })
+            .is_ok()
+            && *err.borrow() == 0;
+        let mut h = e.context.borrow_mut();
+        h.recurrent_accepted = ok;
+        h.recurrent_error = *err.borrow();
+        Ok(())
+    }
+    fn effect_allocate_slots_owned_kv(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        effect_allocate_slots_impl(self, e);
+        Ok(())
+    }
+    fn effect_allocate_slots_bound_kv(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        effect_allocate_slots_impl(self, e);
+        Ok(())
+    }
+    fn exec_allocate_slots_recurrent(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let c = RefCell::new(recurrent::AllocateSlotsContext::default());
+        let err = RefCell::new(0);
+        let ok = self
+            .recurrent
+            .process_event(recurrent::EventAllocateSlotsRuntime {
+                seq_id: e.seq_id,
+                token_count: e.token_count,
+                block_count_out: None,
+                error_out: Some(&err),
+                context: &c,
+            })
+            .is_ok()
+            && *err.borrow() == 0;
+        let mut h = e.context.borrow_mut();
+        h.recurrent_accepted = ok;
+        h.recurrent_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_allocate_slots_rollback_kv(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = self.kv_rollback_slots(e.seq_id, e.token_count, &RefCell::new(0), &err);
+        let mut h = e.context.borrow_mut();
+        h.rollback_accepted = ok && *err.borrow() == 0;
+        h.rollback_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_branch_sequence_kv(&mut self, e: &EventBranchSequenceRuntime<'_>) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = self.kv_branch(e.parent_seq_id, e.child_seq_id, &err);
+        let mut h = e.context.borrow_mut();
+        h.kv_accepted = ok && *err.borrow() == 0;
+        h.kv_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_branch_sequence_recurrent(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let c = RefCell::new(recurrent::BranchSequenceContext::default());
+        let err = RefCell::new(0);
+        let ok = self
+            .recurrent
+            .process_event(recurrent::EventBranchSequenceRuntime {
+                parent_seq_id: e.parent_seq_id,
+                child_seq_id: e.child_seq_id,
+                copy_state: e.copy_state,
+                error_out: Some(&err),
+                context: &c,
+            })
+            .is_ok()
+            && *err.borrow() == 0;
+        let mut h = e.context.borrow_mut();
+        h.recurrent_accepted = ok;
+        h.recurrent_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_branch_sequence_rollback_kv(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = self.kv_free_sequence(e.child_seq_id, &err);
+        let mut h = e.context.borrow_mut();
+        h.rollback_accepted = ok && *err.borrow() == 0;
+        h.rollback_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_free_sequence_kv(&mut self, e: &EventFreeSequenceRuntime<'_>) -> Result<(), ()> {
+        let err = RefCell::new(0);
+        let ok = self.kv_free_sequence(e.seq_id, &err);
+        let mut h = e.context.borrow_mut();
+        h.kv_accepted = ok && *err.borrow() == 0;
+        h.kv_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_free_sequence_recurrent(&mut self, e: &EventFreeSequenceRuntime<'_>) -> Result<(), ()> {
+        let c = RefCell::new(recurrent::FreeSequenceContext::default());
+        let err = RefCell::new(0);
+        let ok = self
+            .recurrent
+            .process_event(recurrent::EventFreeSequenceRuntime {
+                seq_id: e.seq_id,
+                error_out: Some(&err),
+                context: &c,
+            })
+            .is_ok()
+            && *err.borrow() == 0;
+        let mut h = e.context.borrow_mut();
+        h.recurrent_accepted = ok;
+        h.recurrent_error = *err.borrow();
+        Ok(())
+    }
+    fn exec_rollback_slots_kv(&mut self, e: &EventRollbackSlotsRuntime<'_>) -> Result<(), ()> {
+        let count = RefCell::new(0);
+        let err = RefCell::new(0);
+        let ok = self.kv_rollback_slots(e.seq_id, e.token_count, &count, &err);
+        let mut h = e.context.borrow_mut();
+        h.kv_accepted = ok && *err.borrow() == 0;
+        h.kv_error = *err.borrow();
+        h.kv_block_count = *count.borrow();
+        if let Some(o) = e.block_count_out {
+            *o.borrow_mut() = *count.borrow();
+        }
+        Ok(())
+    }
+    fn effect_capture_owned_kv(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+        effect_capture_impl(self, e);
+        Ok(())
+    }
+    fn effect_capture_bound_kv(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+        effect_capture_impl(self, e);
+        Ok(())
+    }
+    fn exec_capture_recurrent(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+        let context = RefCell::new(recurrent::CaptureViewContext::default());
+        let error = RefCell::new(0);
+        let accepted = self
+            .recurrent
+            .process_event(recurrent::EventCaptureViewRuntime {
+                snapshot_out: Some(&self.recurrent_snapshot),
+                error_out: Some(&error),
+                context: &context,
+            })
+            .is_ok()
+            && *error.borrow() == 0;
+        let mut hybrid = e.context.borrow_mut();
+        hybrid.recurrent_accepted = accepted;
+        hybrid.recurrent_error = *error.borrow();
+        Ok(())
+    }
+    fn merge_capture_snapshots(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+        if let Some(out) = e.snapshot_out {
+            merge(
+                &self.kv_snapshot.borrow(),
+                &self.recurrent_snapshot.borrow(),
+                self.kv_route,
+                &mut out.borrow_mut(),
+            );
+        }
+        Ok(())
+    }
+    fn kv_accepted_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn kv_rejected_with_error_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0)
+    }
+    fn kv_rejected_without_error_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 0)
+    }
+    fn recurrent_accepted_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn kv_accepted_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn recurrent_accepted_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn kv_accepted_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn recurrent_accepted_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn kv_accepted_event_capture_view_runtime(
+        &self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn kv_rejected_with_error_event_capture_view_runtime(
+        &self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0)
+    }
+    fn kv_rejected_without_error_event_capture_view_runtime(
+        &self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 0)
+    }
+    fn recurrent_accepted_event_capture_view_runtime(
+        &self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_with_error_event_capture_view_runtime(
+        &self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0)
+    }
+    fn recurrent_rejected_without_error_event_capture_view_runtime(
+        &self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 0)
+    }
+    fn kv_accepted_event_free_sequence_runtime(
+        &self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn kv_rejected_with_error_event_free_sequence_runtime(
+        &self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0)
+    }
+    fn kv_rejected_without_error_event_free_sequence_runtime(
+        &self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 0)
+    }
+    fn recurrent_accepted_event_free_sequence_runtime(
+        &self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_with_error_event_free_sequence_runtime(
+        &self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0)
+    }
+    fn recurrent_rejected_without_error_event_free_sequence_runtime(
+        &self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 0)
+    }
+    fn kv_accepted_event_reserve_runtime(&self, e: &EventReserveRuntime<'_>) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn kv_rejected_with_error_event_reserve_runtime(
+        &self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0)
+    }
+    fn kv_rejected_without_error_event_reserve_runtime(
+        &self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 0)
+    }
+    fn recurrent_accepted_event_reserve_runtime(
+        &self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_with_error_event_reserve_runtime(
+        &self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0)
+    }
+    fn recurrent_rejected_without_error_event_reserve_runtime(
+        &self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 0)
+    }
+    fn kv_accepted_event_rollback_slots_runtime(
+        &self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().kv_accepted)
+    }
+    fn kv_rejected_with_error_event_rollback_slots_runtime(
+        &self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0)
+    }
+    fn kv_rejected_without_error_event_rollback_slots_runtime(
+        &self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 0)
+    }
+    fn recurrent_accepted_event_rollback_slots_runtime(
+        &self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_with_error_event_rollback_slots_runtime(
+        &self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0)
+    }
+    fn recurrent_rejected_without_error_event_rollback_slots_runtime(
+        &self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 0)
+    }
+    fn recurrent_rejected_any_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(!e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_any_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(!e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_any_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(!e.context.borrow().recurrent_accepted)
+    }
+    fn recurrent_rejected_out_of_memory_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 8)
+    }
+    fn recurrent_rejected_backend_or_none_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && backend_or_none(c.recurrent_error))
+    }
+    fn recurrent_rejected_non_backend_error_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0 && !backend_family(c.recurrent_error))
+    }
+    fn kv_rejected_out_of_memory_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 8)
+    }
+    fn recurrent_rejected_out_of_memory_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 8)
+    }
+    fn kv_rejected_backend_or_none_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && backend_or_none(c.kv_error))
+    }
+    fn recurrent_rejected_backend_or_none_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && backend_or_none(c.recurrent_error))
+    }
+    fn kv_rejected_non_backend_error_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0 && !backend_family(c.kv_error))
+    }
+    fn recurrent_rejected_non_backend_error_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0 && !backend_family(c.recurrent_error))
+    }
+    fn kv_rejected_out_of_memory_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error == 8)
+    }
+    fn recurrent_rejected_out_of_memory_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error == 8)
+    }
+    fn kv_rejected_backend_or_none_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && backend_or_none(c.kv_error))
+    }
+    fn recurrent_rejected_backend_or_none_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && backend_or_none(c.recurrent_error))
+    }
+    fn kv_rejected_non_backend_error_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.kv_accepted && c.kv_error != 0 && !backend_family(c.kv_error))
+    }
+    fn recurrent_rejected_non_backend_error_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.recurrent_accepted && c.recurrent_error != 0 && !backend_family(c.recurrent_error))
+    }
+    fn rollback_accepted_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().rollback_accepted)
+    }
+    fn rollback_rejected_with_error_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.rollback_accepted && c.rollback_error != 0)
+    }
+    fn rollback_rejected_without_error_event_allocate_sequence_runtime(
+        &self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.rollback_accepted && c.rollback_error == 0)
+    }
+    fn rollback_accepted_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().rollback_accepted)
+    }
+    fn rollback_rejected_with_error_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.rollback_accepted && c.rollback_error != 0)
+    }
+    fn rollback_rejected_without_error_event_allocate_slots_runtime(
+        &self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.rollback_accepted && c.rollback_error == 0)
+    }
+    fn rollback_accepted_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(e.context.borrow().rollback_accepted)
+    }
+    fn rollback_rejected_with_error_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.rollback_accepted && c.rollback_error != 0)
+    }
+    fn rollback_rejected_without_error_event_branch_sequence_runtime(
+        &self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<bool, ()> {
+        let c = e.context.borrow();
+        Ok(!c.rollback_accepted && c.rollback_error == 0)
+    }
+    fn mark_backend_error_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_backend_error_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_backend_error_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_backend_error_event_capture_view_runtime(
+        &mut self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_backend_error_event_free_sequence_runtime(
+        &mut self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_backend_error_event_reserve_runtime(
+        &mut self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_backend_error_event_rollback_slots_runtime(
+        &mut self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::BackendError;
+        set_error(e.error_out, HybridError::BackendError);
+        Ok(())
+    }
+    fn mark_out_of_memory_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::OutOfMemory;
+        set_error(e.error_out, HybridError::OutOfMemory);
+        Ok(())
+    }
+    fn mark_out_of_memory_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::OutOfMemory;
+        set_error(e.error_out, HybridError::OutOfMemory);
+        Ok(())
+    }
+    fn mark_out_of_memory_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::OutOfMemory;
+        set_error(e.error_out, HybridError::OutOfMemory);
+        Ok(())
+    }
+    fn mark_internal_error_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::InternalError;
+        set_error(e.error_out, HybridError::InternalError);
+        Ok(())
+    }
+    fn mark_internal_error_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::InternalError;
+        set_error(e.error_out, HybridError::InternalError);
+        Ok(())
+    }
+    fn mark_internal_error_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::InternalError;
+        set_error(e.error_out, HybridError::InternalError);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_capture_view_runtime(
+        &mut self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_free_sequence_runtime(
+        &mut self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_reserve_runtime(
+        &mut self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_kv_event_rollback_slots_runtime(
+        &mut self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().kv_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_capture_view_runtime(
+        &mut self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_free_sequence_runtime(
+        &mut self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_reserve_runtime(
+        &mut self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_recurrent_event_rollback_slots_runtime(
+        &mut self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().recurrent_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_rollback_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().rollback_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_rollback_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().rollback_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn mark_error_from_rollback_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let code = e.context.borrow().rollback_error;
+        let err = api_error(code);
+        e.context.borrow_mut().err = err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn publish_done_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_allocate_sequence_runtime(
+        &mut self,
+        e: &EventAllocateSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn publish_done_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_allocate_slots_runtime(
+        &mut self,
+        e: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        if let Some(o) = e.block_count_out {
+            *o.borrow_mut() = 0;
+        }
+        Ok(())
+    }
+    fn publish_done_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_branch_sequence_runtime(
+        &mut self,
+        e: &EventBranchSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn publish_done_event_capture_view_runtime(
+        &mut self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_capture_view_runtime(
+        &mut self,
+        e: &EventCaptureViewRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn publish_done_event_free_sequence_runtime(
+        &mut self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_free_sequence_runtime(
+        &mut self,
+        e: &EventFreeSequenceRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn publish_done_event_reserve_runtime(
+        &mut self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_reserve_runtime(
+        &mut self,
+        e: &EventReserveRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        Ok(())
+    }
+    fn publish_done_event_rollback_slots_runtime(
+        &mut self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::None;
+        set_error(e.error_out, HybridError::None);
+        Ok(())
+    }
+    fn publish_error_event_rollback_slots_runtime(
+        &mut self,
+        e: &EventRollbackSlotsRuntime<'_>,
+    ) -> Result<(), ()> {
+        let err = e.context.borrow().err;
+        set_error(e.error_out, err);
+        if let Some(o) = e.block_count_out {
+            *o.borrow_mut() = 0;
+        }
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_recurrent_error_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_rollback_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_sequence_rollback_result_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_recurrent_error_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_rollback_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_allocate_slots_rollback_result_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_recurrent_error_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_rollback_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_branch_sequence_rollback_result_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_capture_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_capture_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_capture_merge(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_capture_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_capture_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_capture_request_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_free_sequence_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_free_sequence_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_free_sequence_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_free_sequence_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_out_of_memory(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_ready(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_reserve_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_reserve_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_reserve_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_reserve_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_rollback_slots_kv(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_rollback_slots_kv_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_rollback_slots_recurrent(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn on_unexpected_from_rollback_slots_recurrent_decision(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
+    fn guard_bound_kv_cache_event_allocate_slots_runtime(
+        &self,
+        _: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(matches!(self.kv_route, KvCacheRoute::Bound))
+    }
+    fn guard_bound_kv_cache_event_capture_view_runtime(
+        &self,
+        _: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(matches!(self.kv_route, KvCacheRoute::Bound))
+    }
+    fn guard_owned_kv_cache_event_allocate_slots_runtime(
+        &self,
+        _: &EventAllocateSlotsRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(matches!(self.kv_route, KvCacheRoute::Owned))
+    }
+    fn guard_owned_kv_cache_event_capture_view_runtime(
+        &self,
+        _: &EventCaptureViewRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(matches!(self.kv_route, KvCacheRoute::Owned))
+    }
+    fn mark_invalid_request(&mut self, e: &EventCaptureViewRuntime<'_>) -> Result<(), ()> {
+        e.context.borrow_mut().err = HybridError::InvalidRequest;
+        set_error(e.error_out, HybridError::InvalidRequest);
+        Ok(())
+    }
 }
 
 pub type Hybrid = MemoryHybridStateMachine<MemoryHybridContext>;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct SpyKv {
+        calls: [u32; 7],
+        active: [bool; 2],
+    }
+
+    impl HybridKvActor for SpyKv {
+        fn reserve(&mut self, _: i32, _: i32, _: i32, error_out: &RefCell<i32>) -> bool {
+            self.calls[0] += 1;
+            *error_out.borrow_mut() = 0;
+            true
+        }
+        fn allocate_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool {
+            self.calls[1] += 1;
+            if let Ok(index) = usize::try_from(seq_id)
+                && let Some(active) = self.active.get_mut(index)
+            {
+                *active = true;
+            }
+            *error_out.borrow_mut() = 0;
+            true
+        }
+        fn allocate_slots(
+            &mut self,
+            _: i32,
+            _: i32,
+            count: &RefCell<i32>,
+            error_out: &RefCell<i32>,
+            _: Option<&dyn kv::BlockCopier>,
+        ) -> bool {
+            self.calls[2] += 1;
+            *count.borrow_mut() = 7;
+            *error_out.borrow_mut() = 0;
+            true
+        }
+        fn free_sequence(&mut self, seq_id: i32, error_out: &RefCell<i32>) -> bool {
+            self.calls[3] += 1;
+            if let Ok(index) = usize::try_from(seq_id)
+                && let Some(active) = self.active.get_mut(index)
+            {
+                *active = false;
+            }
+            *error_out.borrow_mut() = 0;
+            true
+        }
+        fn rollback_slots(
+            &mut self,
+            _: i32,
+            _: i32,
+            count: &RefCell<i32>,
+            error_out: &RefCell<i32>,
+        ) -> bool {
+            self.calls[4] += 1;
+            *count.borrow_mut() = 3;
+            *error_out.borrow_mut() = 0;
+            true
+        }
+        fn capture_view(
+            &mut self,
+            snapshot_out: &RefCell<Snapshot>,
+            error_out: &RefCell<i32>,
+        ) -> bool {
+            self.calls[5] += 1;
+            let mut snapshot = snapshot_out.borrow_mut();
+            snapshot.max_sequences = 2;
+            snapshot.block_tokens = 16;
+            snapshot.sequence_active[0] = u8::from(self.active[0]);
+            snapshot.sequence_length_values[0] = 4;
+            snapshot.sequence_kv_block_count[0] = 7;
+            snapshot.sequence_active[1] = u8::from(self.active[1]);
+            *error_out.borrow_mut() = 0;
+            true
+        }
+        fn branch_sequence(&mut self, _: i32, child_seq_id: i32, error_out: &RefCell<i32>) -> bool {
+            self.calls[6] += 1;
+            if let Ok(index) = usize::try_from(child_seq_id)
+                && let Some(active) = self.active.get_mut(index)
+            {
+                *active = true;
+            }
+            *error_out.borrow_mut() = 0;
+            true
+        }
+    }
+    #[test]
+    fn injected_binding_receives_all_kv_routes_and_capture_survives_merge() {
+        let actor = Rc::new(RefCell::new(SpyKv::default()));
+        let mut machine = Hybrid::new(MemoryHybridContext::with_kv_binding(
+            KvBinding::from_shared(actor.clone()),
+        ));
+        let error = RefCell::new(-1);
+        let reserve_context = RefCell::new(ReserveContext::default());
+        machine
+            .process_event(EventReserveRuntime {
+                max_sequences: 2,
+                max_blocks: 2,
+                block_tokens: 16,
+                error_out: Some(&error),
+                context: &reserve_context,
+            })
+            .unwrap();
+        let sequence_context = RefCell::new(AllocateSequenceContext::default());
+        machine
+            .process_event(EventAllocateSequenceRuntime {
+                seq_id: 0,
+                error_out: Some(&error),
+                context: &sequence_context,
+            })
+            .unwrap();
+        let slots_context = RefCell::new(AllocateSlotsContext::default());
+        let block_count = RefCell::new(-1);
+        machine
+            .process_event(EventAllocateSlotsRuntime {
+                seq_id: 0,
+                token_count: 4,
+                block_count_out: Some(&block_count),
+                error_out: Some(&error),
+                copy_block: None,
+                context: &slots_context,
+            })
+            .unwrap();
+        assert_eq!(*block_count.borrow(), 7);
+        let rollback_context = RefCell::new(RollbackSlotsContext::default());
+        machine
+            .process_event(EventRollbackSlotsRuntime {
+                seq_id: 0,
+                token_count: 1,
+                block_count_out: Some(&block_count),
+                error_out: Some(&error),
+                context: &rollback_context,
+            })
+            .unwrap();
+        assert_eq!(*block_count.borrow(), 3);
+        let branch_context = RefCell::new(BranchSequenceContext::default());
+        machine
+            .process_event(EventBranchSequenceRuntime {
+                parent_seq_id: 0,
+                child_seq_id: 1,
+                copy_state: None,
+                error_out: Some(&error),
+                context: &branch_context,
+            })
+            .unwrap();
+        assert_eq!(*error.borrow(), HybridError::InvalidRequest.code());
+        assert!(branch_context.borrow().kv_accepted);
+        assert!(!branch_context.borrow().recurrent_accepted);
+        assert!(branch_context.borrow().rollback_accepted);
+        assert_eq!(branch_context.borrow().err, HybridError::InvalidRequest);
+        assert!(!actor.borrow().active[1]);
+        let snapshot = RefCell::new(Snapshot::default());
+        let capture_context = RefCell::new(CaptureViewContext::default());
+        machine
+            .process_event(EventCaptureViewRuntime {
+                snapshot_out: Some(&snapshot),
+                error_out: Some(&error),
+                context: &capture_context,
+            })
+            .unwrap();
+        assert!(capture_context.borrow().kv_accepted);
+        assert!(capture_context.borrow().recurrent_accepted);
+        assert_eq!(capture_context.borrow().err, HybridError::None);
+        assert_eq!(snapshot.borrow().sequence_active[1], 0);
+        assert_eq!(snapshot.borrow().sequence_kv_block_count[0], 7);
+        assert_eq!(snapshot.borrow().sequence_length_values[0], 4);
+        let free_context = RefCell::new(FreeSequenceContext::default());
+        machine
+            .process_event(EventFreeSequenceRuntime {
+                seq_id: 0,
+                error_out: Some(&error),
+                context: &free_context,
+            })
+            .unwrap();
+        assert_eq!(actor.borrow().calls, [1, 1, 1, 2, 1, 1, 1]);
+    }
+}
