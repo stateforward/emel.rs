@@ -94,6 +94,10 @@ pub enum Error {
     UnexpectedEvent,
     /// The generated machine failed to dispatch an event.
     Internal,
+    /// The requested architecture is not available in this build.
+    UnsupportedKernelKind(crate::KernelKind),
+    /// The requested architecture was compiled but could not initialize.
+    KernelUnavailable(crate::KernelKind),
 }
 
 impl fmt::Display for Error {
@@ -103,6 +107,12 @@ impl fmt::Display for Error {
             Self::UnsupportedOperation(_) => formatter.write_str("unsupported kernel operation"),
             Self::UnexpectedEvent => formatter.write_str("unexpected kernel event"),
             Self::Internal => formatter.write_str("internal kernel dispatch error"),
+            Self::UnsupportedKernelKind(kind) => {
+                write!(formatter, "unsupported kernel kind: {kind:?}")
+            }
+            Self::KernelUnavailable(kind) => {
+                write!(formatter, "kernel kind unavailable: {kind:?}")
+            }
         }
     }
 }

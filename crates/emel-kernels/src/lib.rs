@@ -20,8 +20,7 @@ pub mod x86_64;
 
 mod detail;
 
-pub use any::event;
-pub use any::{Error, Kernel};
+pub use any::{Any, Error, Kernel, RuntimeKernel};
 
 /// A kernel kind available to the kernel package.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
