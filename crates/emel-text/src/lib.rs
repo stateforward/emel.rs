@@ -30,6 +30,7 @@ pub enum GenerationPhase {
 
 #[cfg(test)]
 mod conditioner_contract_tests {
+    use core::sync::atomic::{AtomicU8, Ordering};
     use super::{
         BindingDone, ChatMessage, Conditioner, ConditionerError, ConditionerObserver,
         ConditioningDone, FormatRequest, conditioner_event, format_raw,
@@ -170,6 +171,59 @@ mod conditioner_contract_tests {
             *slot = i32::from(byte);
         }
         Ok(text.len())
+    }
+
+    static LAST_TOKENIZER_FLAGS: AtomicU8 = AtomicU8::new(0);
+
+    fn recording_tokenizer(
+        text: &[u8],
+        add_special: bool,
+        parse_special: bool,
+        output: &mut [i32],
+    ) -> Result<usize, ConditionerError> {
+        LAST_TOKENIZER_FLAGS.store(
+            u8::from(add_special) | (u8::from(parse_special) << 1),
+            Ordering::Relaxed,
+        );
+        injected_tokenizer(text, add_special, parse_special, output)
+    }
+
+    #[test]
+    fn prepare_forwards_effective_tokenizer_flags() {
+        let mut conditioner = Conditioner::default();
+        conditioner.set_dependencies(injected_formatter, recording_tokenizer);
+        conditioner
+            .process_event(conditioner_event::Bind {
+                tokenizer_available: true,
+                formatter_available: true,
+                model_valid: true,
+            })
+            .unwrap();
+
+        for (add_special, parse_special) in [(false, false), (false, true), (true, false), (true, true)] {
+            let mut token_ids = [0; 2];
+            let mut token_count = 0;
+            conditioner
+                .prepare(conditioner_event::Prepare {
+                    messages: &[],
+                    formatter_available: true,
+                    tokenizer_available: true,
+                    model_valid: true,
+                    token_capacity: 2,
+                    token_ids: &mut token_ids,
+                    token_count: &mut token_count,
+                    add_generation_prompt: false,
+                    enable_thinking: false,
+                    add_special,
+                    parse_special,
+                })
+                .unwrap();
+            assert_eq!(token_count, 2);
+            assert_eq!(
+                LAST_TOKENIZER_FLAGS.load(Ordering::Relaxed),
+                u8::from(add_special) | (u8::from(parse_special) << 1),
+            );
+        }
     }
 
     #[test]
@@ -561,8 +615,8 @@ impl Conditioner {
         let count = if let Some(tokenizer) = self.tokenizer {
             tokenizer(
                 &self.formatted[..formatted_len],
-                true,
-                false,
+                event.add_special,
+                event.parse_special,
                 &mut event.token_ids[..event.token_capacity],
             )?
         } else {
