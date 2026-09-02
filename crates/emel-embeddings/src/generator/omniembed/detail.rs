@@ -175,6 +175,27 @@ fn gelu(value: f32) -> f32 {
     let erf = sign * (1.0 - polynomial * (-x * x).exp());
     0.5 * value * (1.0 + erf)
 }
+#[allow(clippy::suboptimal_flops)]
+fn l2_normalize(values: &mut [f32]) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+    let mut sum = 0.0_f64;
+    for value in values.iter().copied() {
+        sum += f64::from(value) * f64::from(value);
+    }
+    if sum <= 0.0 {
+        return false;
+    }
+    let scale = (sum as f32).sqrt().recip();
+    if !scale.is_finite() {
+        return false;
+    }
+    for value in values {
+        *value *= scale;
+    }
+    true
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LayerTensors<'a> {
@@ -520,17 +541,39 @@ pub fn execute_text(
     }
     if !matvec(dense, dense_output, hidden, &pooled[..hidden], &mut dense_values[..dense_output]) { return Err(Error::ModelInvalid); }
     for (index, value) in dense_values[..dense_output].iter_mut().enumerate() { *value += read_f32(dense_bias, index).ok_or(Error::ModelInvalid)?; }
+    if !l2_normalize(&mut dense_values[..dense_output]) { return Err(Error::ModelInvalid); }
     if !matvec(expand, projection_hidden, dense_output, &dense_values[..dense_output], &mut expanded[..projection_hidden]) { return Err(Error::ModelInvalid); }
     for (index, value) in expanded[..projection_hidden].iter_mut().enumerate() { *value = gelu(*value + read_f32(expand_bias, index).ok_or(Error::ModelInvalid)?); }
     if !layer_norm(&mut expanded[..projection_hidden], expand_norm_weight, expand_norm_bias, 1.0e-5) { return Err(Error::ModelInvalid); }
     let mut residual_values = [0.0_f32; MAX_WORK];
     if !matvec(residual, projection_hidden, projection_hidden, &expanded[..projection_hidden], &mut residual_values[..projection_hidden]) { return Err(Error::ModelInvalid); }
-    for (index, expanded_value) in expanded[..projection_hidden].iter_mut().enumerate() { *expanded_value += residual_values[index] + read_f32(residual_bias, index).ok_or(Error::ModelInvalid)?; }
-    if !layer_norm(&mut expanded[..projection_hidden], residual_norm_weight, residual_norm_bias, 1.0e-5) { return Err(Error::ModelInvalid); }
+    for (index, value) in residual_values[..projection_hidden].iter_mut().enumerate() { *value = gelu(*value + read_f32(residual_bias, index).ok_or(Error::ModelInvalid)?); }
+    if !layer_norm(&mut residual_values[..projection_hidden], residual_norm_weight, residual_norm_bias, 1.0e-5) { return Err(Error::ModelInvalid); }
+    for (expanded_value, residual_value) in expanded[..projection_hidden].iter_mut().zip(residual_values[..projection_hidden].iter().copied()) { *expanded_value += residual_value; }
     if !matvec(project, embedding, projection_hidden, &expanded[..projection_hidden], &mut output[..embedding]) { return Err(Error::ModelInvalid); }
     for (index, value) in output[..embedding].iter_mut().enumerate() { *value += read_f32(project_bias, index).ok_or(Error::ModelInvalid)?; }
-    let norm = output[..embedding].iter().map(|value| value * value).sum::<f32>().sqrt();
-    if !norm.is_finite() || norm <= 0.0 { return Err(Error::ModelInvalid); }
-    for value in &mut output[..embedding] { *value /= norm; }
+    if !l2_normalize(&mut output[..embedding]) { return Err(Error::ModelInvalid); }
     Ok(embedding)
+}
+#[cfg(test)]
+mod tests {
+    use super::l2_normalize;
+
+    #[test]
+    fn l2_normalize_produces_unit_length() {
+        let mut values = [3.0_f32, 4.0_f32];
+        assert!(l2_normalize(&mut values));
+        let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1.0e-6);
+        assert!((values[0] - 0.6).abs() < 1.0e-6);
+        assert!((values[1] - 0.8).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn l2_normalize_rejects_empty_and_zero_vectors() {
+        let mut empty = [];
+        assert!(!l2_normalize(&mut empty));
+        let mut zero = [0.0_f32, 0.0_f32];
+        assert!(!l2_normalize(&mut zero));
+    }
 }
