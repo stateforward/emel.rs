@@ -332,4 +332,92 @@ impl SpeechCodecMimiDecoder {
 
 /// Short actor alias matching the C++ `sm` surface.
 pub type Decoder = SpeechCodecMimiDecoder;
+#[cfg(test)]
+mod tests {
+    use super::super::super::binding::{ArenaCapacities, UpsampleBinding};
+    use super::*;
+    use emel_model::bridge::{
+        Data, MimiDataInput, MimiHParams, MimiHParamsInput, TensorInput, TensorMetadata,
+        TensorMetadataInput,
+    };
+    use emel_tensor::dtype::SerializedType;
 
+    #[test]
+    fn native_upsample_overlaps_persistent_tail_and_emits_time_major() {
+        // Pinned [taps, 1, channels] layout: channel 0 taps are 1, 2, 3;
+        // channel 1 taps are 10, 20, 30. The non-interleaved values make a
+        // tap-major/channel-interleaved read observably produce wrong output.
+        let bytes: [u8; 24] = [
+            0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 32, 65, 0, 0, 160, 65,
+            0, 0, 240, 65,
+        ];
+        let h = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 2,
+            dim: 2,
+            semantic_n_q: 1,
+            codebook_dim: 2,
+            transformer_num_layers: 1,
+            transformer_num_heads: 1,
+            transformer_context: 1,
+            transformer_max_period: 1,
+        })
+        .unwrap();
+        let tensor = TensorInput::with_bytes(
+            b"mimi.upsample.convtr.convtr.convtr.weight",
+            TensorMetadata::new(TensorMetadataInput {
+                tensor_type: SerializedType::F32,
+                dimension_count: 3,
+                dimensions: [3, 1, 2, 1],
+                data_offset: 0,
+                file_offset: 0,
+                data_size: 24,
+                file_index: 0,
+                storage: None,
+            }),
+            &bytes,
+        );
+        let data = Data::try_from_mimi(MimiDataInput {
+            hparams: h,
+            tensors: &[tensor],
+        })
+        .unwrap();
+        let runtime = CodecRuntime::for_test(
+            data.mimi_binding_input(),
+            ArenaCapacities::new(6, 6, 8, 4),
+            UpsampleBinding::for_test(&bytes, 2, 3),
+        );
+        let mut state_arena = [0.0; 6];
+        let mut state = CodecStreamingState::new(&mut state_arena);
+        let mut frame = [0.0; 4];
+        let mut workspace = [0.0; 8];
+        assert!(native_upsample_stage(
+            &runtime,
+            &mut state,
+            &[1.0, 2.0],
+            &mut frame,
+            &mut workspace
+        ));
+        assert!(
+            frame
+                .iter()
+                .zip([1.0, 20.0, 2.0, 40.0])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+        assert!(native_upsample_stage(
+            &runtime,
+            &mut state,
+            &[2.0, 1.0],
+            &mut frame,
+            &mut workspace
+        ));
+        assert!(
+            frame
+                .iter()
+                .zip([5.0, 70.0, 4.0, 20.0])
+                .all(|(actual, expected)| (actual - expected).abs() < f32::EPSILON)
+        );
+    }
+}
