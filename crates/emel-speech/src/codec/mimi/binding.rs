@@ -565,7 +565,9 @@ impl UpsampleBinding<'_> {
         if tap >= self.taps || channel >= self.dim {
             return None;
         }
-        let index = tap.checked_mul(self.dim)?.checked_add(channel)?;
+        // Pinned Mimi serializes depthwise weights as [taps, 1, channels],
+        // with each channel's taps contiguous in the flat buffer.
+        let index = channel.checked_mul(self.taps)?.checked_add(tap)?;
         let start = index.checked_mul(4)?;
         let bytes = self.bytes.get(start..start.checked_add(4)?)?;
         Some(f32::from_ne_bytes(bytes.try_into().ok()?))
