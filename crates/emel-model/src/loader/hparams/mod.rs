@@ -21,6 +21,11 @@ pub enum Operation {
     RequiredFirstNonzeroArray,
     OptionalF32,
     RequiredFlagArray,
+    RequiredI32,
+    RequiredBool,
+    RequiredI32Array,
+    OptionalI32Array,
+    RequiredString,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,23 +87,188 @@ macro_rules! raw_hparam_guard {
 pub struct Accessor {
     machine: HparamAccessStateMachine<Context>,
 }
+impl core::fmt::Debug for Accessor {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.debug_struct("Accessor").finish_non_exhaustive()
+    }
+}
 
 impl Accessor {
     /// Checks an optional GGUF string against a source-fixed byte value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the key is absent, mismatched, or unqueryable.
     pub fn require_string(gguf: &mut Loader, key: &[u8], expected: &[u8]) -> Result<(), Error> {
         let mut destination = [0u8; 64];
         let result =
             gguf.process_event(emel_gguf::event::ReadStringInto::new(key, &mut destination));
         match result {
             Ok(Some(length)) if &destination[..length] == expected => Ok(()),
-            Ok(Some(_) | None) => Err(Error {
-                operation: Operation::OptionalI32,
+            Ok(Some(_)) => Err(Error {
+                operation: Operation::RequiredString,
+                kind: ErrorKind::Unexpected,
+            }),
+            Ok(None) => Err(Error {
+                operation: Operation::RequiredString,
                 kind: ErrorKind::Missing,
             }),
-            Err(_) => Err(Error {
-                operation: Operation::OptionalI32,
-                kind: ErrorKind::Query,
-            }),
+            Err(error) => Err(Self::query_error(Operation::RequiredString, error)),
+        }
+    }
+}
+impl Accessor {
+    /// Assigns a required signed integer from GGUF's integer wire kinds.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the key is missing, malformed, the wrong
+    /// kind, or cannot be represented by `i32`.
+    pub fn require_i32(
+        gguf: &mut Loader,
+        key: &[u8],
+        field: &mut i32,
+    ) -> Result<(), Error> {
+        let value = gguf
+            .process_event(emel_gguf::event::ReadUnsigned::new(key))
+            .map_err(|error| Self::query_error(Operation::RequiredI32, error))?
+            .ok_or(Error {
+                operation: Operation::RequiredI32,
+                kind: ErrorKind::Missing,
+            })?;
+        *field = i32::try_from(value).map_err(|_| Error {
+            operation: Operation::RequiredI32,
+            kind: ErrorKind::Range,
+        })?;
+        Ok(())
+    }
+
+    /// Assigns a required boolean scalar.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the key is missing, malformed, or the wrong
+    /// wire kind.
+    pub fn require_bool(gguf: &mut Loader, key: &[u8], field: &mut bool) -> Result<(), Error> {
+        let value = gguf
+            .process_event(emel_gguf::event::ReadBool::new(key))
+            .map_err(|error| Self::query_error(Operation::RequiredBool, error))?
+            .ok_or(Error {
+                operation: Operation::RequiredBool,
+                kind: ErrorKind::Missing,
+            })?;
+        *field = value;
+        Ok(())
+    }
+
+    /// Copies a required integer array into caller-owned fixed storage.
+    ///
+    /// The raw unsigned decoding matches the source loader: signed wire kinds
+    /// are accepted only when their raw value fits `i32`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the key is missing, malformed, the wrong
+    /// kind, empty, out of range, or exceeds the destination capacity.
+    pub fn copy_i32_array(
+        gguf: &mut Loader,
+        key: &[u8],
+        destination: &mut [i32],
+    ) -> Result<u32, Error> {
+        Self::copy_i32_array_inner(gguf, key, destination, Operation::RequiredI32Array, true)
+    }
+
+    /// Copies an optional integer array into caller-owned fixed storage.
+    ///
+    /// Missing keys leave the destination untouched and return zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when a present array is malformed, empty, the
+    /// wrong kind, out of range, or exceeds the destination capacity.
+    pub fn copy_optional_i32_array(
+        gguf: &mut Loader,
+        key: &[u8],
+        destination: &mut [i32],
+    ) -> Result<u32, Error> {
+        Self::copy_i32_array_inner(gguf, key, destination, Operation::OptionalI32Array, false)
+    }
+
+    fn copy_i32_array_inner(
+        gguf: &mut Loader,
+        key: &[u8],
+        destination: &mut [i32],
+        operation: Operation,
+        required: bool,
+    ) -> Result<u32, Error> {
+        let metrics = gguf
+            .process_event(ReadUnsignedArrayMetrics::new(key))
+            .map_err(|error| Self::query_error(operation, error))?;
+        let Some(metrics) = metrics else {
+            if required {
+                return Err(Error {
+                    operation,
+                    kind: ErrorKind::Missing,
+                });
+            }
+            return Ok(0);
+        };
+        if metrics.element_count() == 0 {
+            return Err(Error {
+                operation,
+                kind: ErrorKind::Count,
+            });
+        }
+        if metrics.element_count() > destination.len() as u64 {
+            return Err(Error {
+                operation,
+                kind: ErrorKind::Capacity,
+            });
+        }
+        if metrics.maximum() > i32::MAX as u64 {
+            return Err(Error {
+                operation,
+                kind: ErrorKind::Range,
+            });
+        }
+        let mut valid = true;
+        let count = gguf
+            .process_event(VisitUnsignedArray::new(key, |index, value| {
+                if let Ok(value) = i32::try_from(value) {
+                    destination[index as usize] = value;
+                } else {
+                    valid = false;
+                }
+            }))
+            .map_err(|error| Self::query_error(operation, error))?
+            .ok_or(Error {
+                operation,
+                kind: ErrorKind::Missing,
+            })?;
+        if !valid {
+            return Err(Error {
+                operation,
+                kind: ErrorKind::Range,
+            });
+        }
+        u32::try_from(count).map_err(|_| Error {
+            operation,
+            kind: ErrorKind::Range,
+        })
+    }
+
+    fn query_error(operation: Operation, error: QueryError) -> Error {
+        Error {
+            operation,
+            kind: match error {
+                QueryError::TypeMismatch => ErrorKind::WrongKind,
+                QueryError::IndexOutOfBounds => ErrorKind::Count,
+                QueryError::Range => ErrorKind::Range,
+                QueryError::Malformed => ErrorKind::Malformed,
+                QueryError::NotParsed => ErrorKind::Query,
+                QueryError::Internal => ErrorKind::Internal,
+                _ => ErrorKind::Internal,
+            },
         }
     }
 }
@@ -110,6 +280,11 @@ impl Accessor {
         }
     }
 
+    /// Assigns an optional signed integer hyperparameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source value is malformed, missing, or out of range.
     pub fn assign_i32(
         &mut self,
         gguf: &mut Loader,
@@ -119,6 +294,11 @@ impl Accessor {
         self.dispatch_i32(gguf, Operation::OptionalI32, key, field)
     }
 
+    /// Assigns an optional integer, falling back to the first array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source value is malformed, missing, or out of range.
     pub fn assign_i32_or_first_array_value(
         &mut self,
         gguf: &mut Loader,
@@ -128,6 +308,11 @@ impl Accessor {
         self.dispatch_i32(gguf, Operation::OptionalI32OrFirstArray, key, field)
     }
 
+    /// Assigns the first nonzero integer array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source value is malformed, missing, or out of range.
     pub fn assign_first_nonzero_i32_from_array(
         &mut self,
         gguf: &mut Loader,
@@ -137,6 +322,11 @@ impl Accessor {
         self.dispatch_i32(gguf, Operation::RequiredFirstNonzeroArray, key, field)
     }
 
+    /// Assigns an optional floating-point hyperparameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source value is malformed or cannot be queried.
     pub fn assign_f32(
         &mut self,
         gguf: &mut Loader,
@@ -156,6 +346,11 @@ impl Accessor {
         Ok(())
     }
 
+    /// Copies a required boolean or integer flag array.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the source array is malformed, missing, or exceeds capacity.
     pub fn copy_flag_array(
         &mut self,
         gguf: &mut Loader,
