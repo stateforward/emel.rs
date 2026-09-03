@@ -270,9 +270,10 @@ fn role_is_reachable(role: TensorRole, hparams: &emel_model::bridge::MimiHParams
 impl RuntimeVariant {
     fn accepts(self, role: TensorRole, tensor_type: SerializedType) -> bool {
         // Decoder upsample weights are canonicalized into F32 before any
-        // dispatch. This keeps the native stage's weight view allocation-free.
+        // dispatch, and the pinned prepare_conv_transpose accepts either
+        // serialized float class.
         if role.family == TensorFamily::Upsample && role.kind == RoleKind::SingleWeight {
-            return tensor_type == SerializedType::F32;
+            return matches!(tensor_type, SerializedType::F32 | SerializedType::F16);
         }
         let is_float = matches!(tensor_type, SerializedType::F32 | SerializedType::F16);
         let transformer_projection = matches!(
@@ -551,7 +552,7 @@ pub struct UpsampleBinding<'a> {
     taps: usize,
 }
 
-impl UpsampleBinding<'_> {
+impl<'a> UpsampleBinding<'a> {
     #[must_use]
     pub const fn dim(self) -> usize {
         self.dim
@@ -571,6 +572,11 @@ impl UpsampleBinding<'_> {
         let start = index.checked_mul(4)?;
         let bytes = self.bytes.get(start..start.checked_add(4)?)?;
         Some(f32::from_ne_bytes(bytes.try_into().ok()?))
+    }
+    /// Returns the model-owned canonical F32 serialized weight bytes.
+    #[must_use]
+    pub(crate) const fn bytes(self) -> &'a [u8] {
+        self.bytes
     }
 }
 
@@ -687,10 +693,7 @@ impl MimiBindingFactory {
             .filter(|samples| *samples == 1_920)
             .ok_or(BindingError::InvalidFrameGeometry)?;
         let count = validate_model_tensors(model, variant)?;
-        validate_arenas(arenas, model, frame_samples)?;
-        if parsed.tensor_count() != count {
-            return Err(BindingError::TensorCountMismatch);
-        }
+        validate_arenas(arenas, model, frame_samples, variant)?;
         validate_loader_tensors(loader, model, count)?;
         let upsample = role_tensor(
             model,
@@ -816,6 +819,7 @@ fn validate_model_tensors(
     variant: RuntimeVariant,
 ) -> Result<u32, BindingError> {
     let (count, seen) = validate_model_tensor_records(model, variant)?;
+    validate_conv_dtype_consistency(model, variant)?;
     for family in [
         TensorFamily::Encoder,
         TensorFamily::EncoderTransformer,
@@ -843,7 +847,8 @@ fn validate_model_tensors(
         return Err(BindingError::InvalidHParams(MimiHParamsError::NonPositive));
     }
     validate_transformer_families(model, dim, layers, variant)?;
-    validate_seanet_family(model, TensorFamily::Encoder, dim, 1_920, 2, false)?;
+    validate_seanet_family(model, TensorFamily::Encoder, dim, 1_920, 2)?;
+    validate_decoder_seanet(model, dim, 2)?;
     // The fixed encoder stride chain produces two transformer tokens from a
     // 1,920-sample frame; downsample then reduces those two tokens to one.
     validate_downsample_upsample(model, dim, 2)?;
@@ -896,6 +901,55 @@ fn validate_model_tensor_records(
         validate_tensor_metadata(index, role, metadata, variant)?;
     }
     Ok((count, seen))
+}
+
+fn validate_conv_dtype_consistency(
+    model: MimiBindingInput<'_>,
+    variant: RuntimeVariant,
+) -> Result<(), BindingError> {
+    if variant != RuntimeVariant::Q8 {
+        return Ok(());
+    }
+    let anchor = optional_role_tensor(
+        model,
+        TensorRole {
+            family: TensorFamily::Encoder,
+            kind: RoleKind::ConvWeight,
+            module: 0,
+            split: 0,
+            level: 0,
+        },
+    )?;
+    let Some((_, anchor_metadata)) = anchor else {
+        return Ok(());
+    };
+    if anchor_metadata.tensor_type() != SerializedType::F16 {
+        return Ok(());
+    }
+    for index in 0..model.tensor_count() {
+        let tensor = model
+            .tensor(index)
+            .ok_or(BindingError::InvalidTensor(index))?;
+        let role = TensorRole::parse(tensor.name())
+            .ok_or(BindingError::UnknownTensorFamily(index))?;
+        let is_non_transposed_conv = matches!(
+            (role.family, role.kind),
+            (
+                TensorFamily::Encoder | TensorFamily::Decoder,
+                RoleKind::ConvWeight | RoleKind::Residual1Weight | RoleKind::Residual3Weight
+            ) | (TensorFamily::Downsample, RoleKind::SingleWeight)
+        );
+        if is_non_transposed_conv
+            && tensor
+                .metadata()
+                .ok_or(BindingError::InvalidTensor(index))?
+                .tensor_type()
+                != SerializedType::F16
+        {
+            return Err(BindingError::UnsupportedRuntime(index));
+        }
+    }
+    Ok(())
 }
 
 fn validate_loader_tensors(
@@ -994,7 +1048,7 @@ fn validate_transformer_module(
             level: 0,
         },
     )?;
-    expect_shape(index, metadata, 2, [dim, dim * 3, 1, 1])?;
+    expect_projection_matrix_shape(index, metadata, dim, dim * 3)?;
     let (index, metadata) = role_tensor(
         model,
         TensorRole {
@@ -1017,7 +1071,8 @@ fn validate_transformer_module(
         },
     )?;
     let dimensions = metadata.dimensions();
-    if metadata.dimension_count() != 2 || dimensions[0] != dim || dimensions[1] == 0 {
+    let dimension_count = metadata.dimension_count();
+    if !(2..=4).contains(&dimension_count) || dimensions[0] != dim || dimensions[1] == 0 {
         return Err(BindingError::TensorShapeMismatch(index));
     }
     if module == 0 {
@@ -1214,36 +1269,20 @@ fn validate_seanet_family(
     dim: u64,
     input_length: u64,
     expected_length: u64,
-    decoder: bool,
 ) -> Result<(), BindingError> {
-    let modules: &[(u16, u8, u64)] = if decoder {
-        &[
-            (0, 0, 1),
-            (2, 1, 8),
-            (3, 2, 1),
-            (5, 1, 6),
-            (6, 2, 1),
-            (8, 1, 5),
-            (9, 2, 1),
-            (11, 1, 4),
-            (12, 2, 1),
-            (14, 0, 1),
-        ]
-    } else {
-        &[
-            (0, 0, 1),
-            (1, 2, 1),
-            (3, 0, 4),
-            (4, 2, 1),
-            (6, 0, 5),
-            (7, 2, 1),
-            (9, 0, 6),
-            (10, 2, 1),
-            (12, 0, 8),
-            (14, 0, 1),
-        ]
-    };
-    let mut channels = if decoder { dim } else { 1 };
+    let modules: &[(u16, u8, u64)] = &[
+        (0, 0, 1),
+        (1, 2, 1),
+        (3, 0, 4),
+        (4, 2, 1),
+        (6, 0, 5),
+        (7, 2, 1),
+        (9, 0, 6),
+        (10, 2, 1),
+        (12, 0, 8),
+        (14, 0, 1),
+    ];
+    let mut channels = 1;
     let mut length = input_length;
     for &(module, kind, stride) in modules {
         channels = validate_seanet_module(model, family, channels, module, kind, stride)?;
@@ -1252,13 +1291,57 @@ fn validate_seanet_family(
                 return Err(BindingError::TensorShapeMismatch(0));
             }
             length /= stride;
-        } else if kind == 1 {
+        }
+    }
+    if channels != dim || length != expected_length {
+        return Err(BindingError::TensorShapeMismatch(0));
+    }
+    Ok(())
+}
+
+fn validate_decoder_seanet(
+    model: MimiBindingInput<'_>,
+    dim: u64,
+    input_length: u64,
+) -> Result<(), BindingError> {
+    let modules: &[(u16, u8, u64)] = &[
+        (0, 0, 1),
+        (2, 1, 8),
+        (3, 2, 1),
+        (5, 1, 6),
+        (6, 2, 1),
+        (8, 1, 5),
+        (9, 2, 1),
+        (11, 1, 4),
+        (12, 2, 1),
+        (14, 0, 1),
+    ];
+    let mut channels = dim;
+    let mut length = input_length;
+    if length == 0 {
+        return Err(BindingError::TensorShapeMismatch(0));
+    }
+    for &(module, kind, stride) in modules {
+        channels = validate_seanet_module(
+            model,
+            TensorFamily::Decoder,
+            channels,
+            module,
+            kind,
+            stride,
+        )?;
+        if kind == 1 {
             length = length
                 .checked_mul(stride)
                 .ok_or(BindingError::TensorShapeMismatch(0))?;
+        } else if kind == 0 {
+            if stride == 0 || !length.is_multiple_of(stride) {
+                return Err(BindingError::TensorShapeMismatch(0));
+            }
+            length /= stride;
         }
     }
-    if channels != if decoder { 1 } else { dim } || length != expected_length {
+    if channels != 1 || length != 1_920 {
         return Err(BindingError::TensorShapeMismatch(0));
     }
     Ok(())
@@ -1435,6 +1518,25 @@ fn expect_shape(
     }
     Ok(())
 }
+fn expect_projection_matrix_shape(
+    index: u32,
+    metadata: TensorMetadata,
+    input: u64,
+    output: u64,
+) -> Result<(), BindingError> {
+    let dimension_count = metadata.dimension_count();
+    let dimensions = metadata.dimensions();
+    // The pinned plan checks the first two extents and accepts trailing
+    // singleton dimensions retained by GGUF. Model-record validation already
+    // rejects non-singleton trailing extents and invalid ranks.
+    if !(2..=4).contains(&dimension_count)
+        || dimensions[0] != input
+        || dimensions[1] != output
+    {
+        return Err(BindingError::TensorShapeMismatch(index));
+    }
+    Ok(())
+}
 fn expect_projection_shape(
     index: u32,
     metadata: TensorMetadata,
@@ -1453,44 +1555,265 @@ fn expect_projection_shape(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RequiredArenaCapacities {
+    prepared_floats: usize,
+    state_floats: usize,
+    workspace_floats: usize,
+    frame_floats: usize,
+}
+
+fn arena_add(a: u64, b: u64, kind: ArenaKind) -> Result<u64, BindingError> {
+    a.checked_add(b).ok_or(BindingError::ArenaCapacity(kind))
+}
+
+fn arena_mul(a: u64, b: u64, kind: ArenaKind) -> Result<u64, BindingError> {
+    a.checked_mul(b).ok_or(BindingError::ArenaCapacity(kind))
+}
+
+fn account_sized_conv(
+    channel_major: &mut u64,
+    columns: &mut u64,
+    frame: &mut u64,
+    state: &mut u64,
+    in_channels: u64,
+    out_channels: u64,
+    taps: u64,
+    stride: u64,
+    in_length: u64,
+    transposed: bool,
+) -> Result<(), BindingError> {
+    let state_len = taps
+        .checked_sub(stride)
+        .ok_or(BindingError::ArenaCapacity(ArenaKind::State))?;
+    let input_frame = arena_mul(in_channels, in_length, ArenaKind::Frame)?;
+    *frame = (*frame).max(input_frame);
+    if transposed {
+        let lout = arena_add(
+            arena_mul(in_length.checked_sub(1).ok_or(BindingError::ArenaCapacity(ArenaKind::Workspace))?, stride, ArenaKind::Workspace)?,
+            taps,
+            ArenaKind::Workspace,
+        )?;
+        *channel_major = (*channel_major).max(arena_mul(in_channels, in_length, ArenaKind::Workspace)?);
+        *columns = (*columns).max(arena_mul(out_channels, lout, ArenaKind::Workspace)?);
+        *state = arena_add(*state, arena_mul(out_channels, lout, ArenaKind::State)?, ArenaKind::State)?;
+        *frame = (*frame).max(arena_mul(out_channels, arena_mul(in_length, stride, ArenaKind::Frame)?, ArenaKind::Frame)?);
+    } else {
+        let padded = arena_add(state_len, in_length, ArenaKind::Workspace)?;
+        let out_length = in_length / stride;
+        *channel_major = (*channel_major).max(arena_mul(in_channels, padded, ArenaKind::Workspace)?);
+        *columns = (*columns).max(
+            arena_mul(arena_mul(in_channels, taps, ArenaKind::Workspace)?, out_length, ArenaKind::Workspace)?,
+        );
+        *state = arena_add(*state, arena_mul(in_channels, state_len, ArenaKind::State)?, ArenaKind::State)?;
+        *frame = (*frame).max(arena_mul(out_channels, out_length, ArenaKind::Frame)?);
+    }
+    Ok(())
+}
+
+fn sized_conv(
+    model: MimiBindingInput<'_>,
+    family: TensorFamily,
+    module: u16,
+    kind: u8,
+    channels: u64,
+    stride: u64,
+    length: u64,
+    prepared: &mut u64,
+    channel_major: &mut u64,
+    columns: &mut u64,
+    frame: &mut u64,
+    state: &mut u64,
+    f16_conv: bool,
+) -> Result<u64, BindingError> {
+    let transposed = kind == 1;
+    let weight = role_tensor(model, TensorRole {
+        family,
+        kind: if transposed { RoleKind::ConvTransposeWeight } else { RoleKind::ConvWeight },
+        module,
+        split: 0,
+        level: 0,
+    })?;
+    let (taps, output) = resolve_conv(weight.0, weight.1, channels, stride)?;
+    account_sized_conv(channel_major, columns, frame, state, channels, output, taps, stride, length, transposed)?;
+    *prepared = arena_add(*prepared, arena_add(arena_mul(arena_mul(taps, channels, ArenaKind::Prepared)?, output, ArenaKind::Prepared)?, output, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+    if f16_conv && !transposed {
+        let elems = arena_mul(arena_mul(taps, channels, ArenaKind::Prepared)?, output, ArenaKind::Prepared)?;
+        *prepared = arena_add(*prepared, elems.div_ceil(2), ArenaKind::Prepared)?;
+    }
+    Ok(output)
+}
+
+fn sized_residual(
+    model: MimiBindingInput<'_>,
+    family: TensorFamily,
+    module: u16,
+    channels: u64,
+    length: u64,
+    prepared: &mut u64,
+    channel_major: &mut u64,
+    columns: &mut u64,
+    frame: &mut u64,
+    state: &mut u64,
+    f16_conv: bool,
+) -> Result<(), BindingError> {
+    let first = role_tensor(model, TensorRole { family, kind: RoleKind::Residual1Weight, module, split: 0, level: 0 })?;
+    let (taps, half) = resolve_conv(first.0, first.1, channels, 1)?;
+    account_sized_conv(channel_major, columns, frame, state, channels, half, taps, 1, length, false)?;
+    let second = role_tensor(model, TensorRole { family, kind: RoleKind::Residual3Weight, module, split: 0, level: 0 })?;
+    let (second_taps, output) = resolve_conv(second.0, second.1, half, 1)?;
+    if second_taps != 1 || output != channels {
+        return Err(BindingError::TensorShapeMismatch(second.0));
+    }
+    account_sized_conv(channel_major, columns, frame, state, half, output, second_taps, 1, length, false)?;
+    for (t, input, output) in [(taps, channels, half), (second_taps, half, channels)] {
+        let elems = arena_mul(arena_mul(t, input, ArenaKind::Prepared)?, output, ArenaKind::Prepared)?;
+        *prepared = arena_add(*prepared, arena_add(elems, output, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+        if f16_conv {
+            *prepared = arena_add(*prepared, elems.div_ceil(2), ArenaKind::Prepared)?;
+        }
+    }
+    Ok(())
+}
+
+fn sized_seanet(
+    model: MimiBindingInput<'_>,
+    family: TensorFamily,
+    decoder: bool,
+    mut channels: u64,
+    mut length: u64,
+    prepared: &mut u64,
+    channel_major: &mut u64,
+    columns: &mut u64,
+    frame: &mut u64,
+    state: &mut u64,
+    f16_conv: bool,
+) -> Result<(u64, u64), BindingError> {
+    let modules: &[(u16, u8, u64)] = if decoder {
+        &[(0, 0, 1), (2, 1, 8), (3, 2, 1), (5, 1, 6), (6, 2, 1), (8, 1, 5), (9, 2, 1), (11, 1, 4), (12, 2, 1), (14, 0, 1)]
+    } else {
+        &[(0, 0, 1), (1, 2, 1), (3, 0, 4), (4, 2, 1), (6, 0, 5), (7, 2, 1), (9, 0, 6), (10, 2, 1), (12, 0, 8), (14, 0, 1)]
+    };
+    for &(module, kind, stride) in modules {
+        if kind == 2 {
+            sized_residual(model, family, module, channels, length, prepared, channel_major, columns, frame, state, f16_conv)?;
+        } else {
+            channels = sized_conv(model, family, module, kind, channels, stride, length, prepared, channel_major, columns, frame, state, f16_conv)?;
+            if decoder && kind == 1 {
+                length = length.checked_mul(stride).ok_or(BindingError::ArenaCapacity(ArenaKind::Frame))?;
+            } else if !decoder {
+                length /= stride;
+            }
+        }
+    }
+    Ok((channels, length))
+}
+
+fn sized_transformer(
+    model: MimiBindingInput<'_>,
+    family: TensorFamily,
+    dim: u64,
+    layers: u16,
+    prepared: &mut u64,
+    state: &mut u64,
+    frame: &mut u64,
+) -> Result<u64, BindingError> {
+    let mut mlp_dim = 0;
+    for module in 0..layers {
+        let linear = role_tensor(model, TensorRole { family, kind: RoleKind::Linear1, module, split: 0, level: 0 })?;
+        mlp_dim = linear.1.dimensions()[1];
+        let attention = arena_add(
+            arena_mul(dim, 3 * dim, ArenaKind::Prepared)?,
+            arena_mul(dim, dim, ArenaKind::Prepared)?,
+            ArenaKind::Prepared,
+        )?;
+        let feedforward = arena_add(
+            arena_mul(2 * dim, mlp_dim, ArenaKind::Prepared)?,
+            6 * dim,
+            ArenaKind::Prepared,
+        )?;
+        *prepared = arena_add(*prepared, arena_add(attention, feedforward, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+    }
+    let context = u64::try_from(model.hparams().transformer_context())
+        .map_err(|_| BindingError::ArenaCapacity(ArenaKind::State))?;
+    *state = arena_add(*state, arena_mul(arena_mul(u64::from(layers), 2, ArenaKind::State)?, arena_mul(context, dim, ArenaKind::State)?, ArenaKind::State)?, ArenaKind::State)?;
+    *frame = (*frame).max(arena_mul(2, dim, ArenaKind::Frame)?);
+    Ok(mlp_dim)
+}
+
+fn required_arena_capacities(
+    model: MimiBindingInput<'_>,
+    frame_samples: u32,
+    variant: RuntimeVariant,
+) -> Result<RequiredArenaCapacities, BindingError> {
+    let h = model.hparams();
+    let dim = u64::try_from(h.dim()).map_err(|_| BindingError::InvalidHParams(MimiHParamsError::NonPositive))?;
+    let codebook_dim = u64::try_from(h.codebook_dim()).map_err(|_| BindingError::InvalidHParams(MimiHParamsError::NonPositive))?;
+    let card = u64::try_from(h.card()).map_err(|_| BindingError::InvalidHParams(MimiHParamsError::NonPositive))?;
+    let layers = u16::try_from(h.transformer_num_layers()).map_err(|_| BindingError::InvalidHParams(MimiHParamsError::NonPositive))?;
+    let anchor = role_tensor(model, TensorRole { family: TensorFamily::Encoder, kind: RoleKind::ConvWeight, module: 0, split: 0, level: 0 })?;
+    let f16_conv = variant == RuntimeVariant::F16 || (variant == RuntimeVariant::Q8 && anchor.1.tensor_type() == SerializedType::F16);
+    let mut prepared = 0;
+    let mut channel_major = 0;
+    let mut columns = 0;
+    let mut frame = u64::from(frame_samples);
+    let mut state = 0;
+    let (_, encoder_tokens) = sized_seanet(model, TensorFamily::Encoder, false, 1, u64::from(frame_samples), &mut prepared, &mut channel_major, &mut columns, &mut frame, &mut state, f16_conv)?;
+    let encoder_mlp = sized_transformer(model, TensorFamily::EncoderTransformer, dim, layers, &mut prepared, &mut state, &mut frame)?;
+    let down = role_tensor(model, TensorRole { family: TensorFamily::Downsample, kind: RoleKind::SingleWeight, module: 0, split: 0, level: 0 })?;
+    let (down_taps, down_out) = resolve_conv(down.0, down.1, dim, 2)?;
+    if down_out != dim { return Err(BindingError::TensorShapeMismatch(down.0)); }
+    account_sized_conv(&mut channel_major, &mut columns, &mut frame, &mut state, dim, dim, down_taps, 2, encoder_tokens, false)?;
+    let down_elems = arena_mul(arena_mul(down_taps, dim, ArenaKind::Prepared)?, dim, ArenaKind::Prepared)?;
+    prepared = arena_add(prepared, arena_add(down_elems, dim, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+    if f16_conv { prepared = arena_add(prepared, down_elems.div_ceil(2), ArenaKind::Prepared)?; }
+    let per_proj = arena_mul(codebook_dim, dim, ArenaKind::Prepared)?;
+    let per_level = arena_add(arena_mul(codebook_dim, card, ArenaKind::Prepared)?, arena_mul(codebook_dim + 1, card, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+    prepared = arena_add(prepared, arena_add(arena_mul(4, per_proj, ArenaKind::Prepared)?, arena_mul(u64::try_from(h.n_q()).map_err(|_| BindingError::InvalidHParams(MimiHParamsError::NonPositive))?, per_level, ArenaKind::Prepared)?, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+    if f16_conv { prepared = arena_add(prepared, arena_mul(4, per_proj.div_ceil(2), ArenaKind::Prepared)?, ArenaKind::Prepared)?; }
+    let up = role_tensor(model, TensorRole { family: TensorFamily::Upsample, kind: RoleKind::SingleWeight, module: 0, split: 0, level: 0 })?;
+    let up_taps = up.1.dimensions()[0];
+    account_sized_conv(&mut channel_major, &mut columns, &mut frame, &mut state, dim, dim, up_taps, 2, 1, true)?;
+    prepared = arena_add(prepared, arena_mul(up_taps, dim, ArenaKind::Prepared)?, ArenaKind::Prepared)?;
+    let decoder_mlp = sized_transformer(model, TensorFamily::DecoderTransformer, dim, layers, &mut prepared, &mut state, &mut frame)?;
+    let (_, decoder_tokens) = sized_seanet(model, TensorFamily::Decoder, true, dim, 2, &mut prepared, &mut channel_major, &mut columns, &mut frame, &mut state, f16_conv)?;
+    if decoder_tokens != u64::from(frame_samples) { return Err(BindingError::InvalidFrameGeometry); }
+    let head_dim = u64::try_from(h.transformer_num_heads()).ok().and_then(|heads| dim.checked_div(heads)).ok_or(BindingError::ArenaCapacity(ArenaKind::Workspace))?;
+    let transformer_ws = |mlp: u64| -> Result<u64, BindingError> {
+        let context = u64::try_from(h.transformer_context()).map_err(|_| BindingError::ArenaCapacity(ArenaKind::Workspace))?;
+        arena_add(arena_add(arena_add(arena_add(arena_mul(dim, 6, ArenaKind::Workspace)?, head_dim, ArenaKind::Workspace)?, context, ArenaKind::Workspace)?, mlp, ArenaKind::Workspace)?, arena_add(arena_add(arena_add(head_dim.div_ceil(2), context.div_ceil(2), ArenaKind::Workspace)?, arena_mul(context, head_dim, ArenaKind::Workspace)?.div_ceil(2), ArenaKind::Workspace)?, 16, ArenaKind::Workspace)?, ArenaKind::Workspace)
+    };
+    let conv_ws = arena_mul(2, channel_major.checked_add(columns).ok_or(BindingError::ArenaCapacity(ArenaKind::Workspace))?.max(frame), ArenaKind::Workspace)?;
+    let rvq_ws = arena_add(arena_add(arena_mul(3, codebook_dim, ArenaKind::Workspace)?, dim, ArenaKind::Workspace)?, 8, ArenaKind::Workspace)?;
+    let workspace = arena_add(conv_ws.max(transformer_ws(encoder_mlp)?.max(transformer_ws(decoder_mlp)?)).max(rvq_ws), 64, ArenaKind::Workspace)?;
+    let prepared = arena_add(prepared, 64, ArenaKind::Prepared)?;
+    let state = arena_add(state, 64, ArenaKind::State)?;
+    let frame = arena_add(frame, 64, ArenaKind::Frame)?;
+    Ok(RequiredArenaCapacities {
+        prepared_floats: usize::try_from(prepared).map_err(|_| BindingError::ArenaCapacity(ArenaKind::Prepared))?,
+        state_floats: usize::try_from(state).map_err(|_| BindingError::ArenaCapacity(ArenaKind::State))?,
+        workspace_floats: usize::try_from(workspace).map_err(|_| BindingError::ArenaCapacity(ArenaKind::Workspace))?,
+        frame_floats: usize::try_from(frame).map_err(|_| BindingError::ArenaCapacity(ArenaKind::Frame))?,
+    })
+}
+
 fn validate_arenas(
     arenas: ArenaCapacities,
     model: MimiBindingInput<'_>,
     frame_samples: u32,
+    variant: RuntimeVariant,
 ) -> Result<(), BindingError> {
-    let dimension = usize::try_from(model.hparams().dim())
-        .map_err(|_| BindingError::InvalidHParams(MimiHParamsError::NonPositive))?;
-    let upsample = role_tensor(
-        model,
-        TensorRole {
-            family: TensorFamily::Upsample,
-            kind: RoleKind::SingleWeight,
-            module: 0,
-            split: 0,
-            level: 0,
-        },
-    )?;
-    let taps = usize::try_from(upsample.1.dimensions()[0])
-        .map_err(|_| BindingError::TensorShapeMismatch(upsample.0))?;
-    let state_required = dimension
-        .checked_mul(taps)
-        .ok_or(BindingError::ArenaCapacity(ArenaKind::State))?;
-    let workspace_required = dimension
-        .checked_add(state_required)
-        .ok_or(BindingError::ArenaCapacity(ArenaKind::Workspace))?;
-    let frame_required = usize::try_from(frame_samples)
-        .unwrap_or(usize::MAX)
-        .max(dimension.saturating_mul(2));
-    if arenas.prepared_floats < state_required {
+    let required = required_arena_capacities(model, frame_samples, variant)?;
+    if arenas.prepared_floats < required.prepared_floats {
         return Err(BindingError::ArenaCapacity(ArenaKind::Prepared));
     }
-    if arenas.state_floats < state_required {
+    if arenas.state_floats < required.state_floats {
         return Err(BindingError::ArenaCapacity(ArenaKind::State));
     }
-    if arenas.workspace_floats < workspace_required {
+    if arenas.workspace_floats < required.workspace_floats {
         return Err(BindingError::ArenaCapacity(ArenaKind::Workspace));
     }
-    if arenas.frame_floats < frame_required {
+    if arenas.frame_floats < required.frame_floats {
         return Err(BindingError::ArenaCapacity(ArenaKind::Frame));
     }
     Ok(())
@@ -1713,23 +2036,33 @@ mod tests {
         dimensions: [u64; 4],
         rank: u32,
     ) -> TensorInput<'static> {
+        resident_tensor_with_type(name, dimensions, rank, SerializedType::F32)
+    }
+
+    fn resident_tensor_with_type(
+        name: &'static [u8],
+        dimensions: [u64; 4],
+        rank: u32,
+        tensor_type: SerializedType,
+    ) -> TensorInput<'static> {
         static BYTES: [u8; 8192] = [0; 8192];
         let elements = dimensions[..usize::try_from(rank).unwrap()]
             .iter()
             .product::<u64>();
-        let byte_len = usize::try_from(elements * 4).unwrap();
+        let element_bytes = if tensor_type == SerializedType::F16 { 2 } else { 4 };
+        let byte_len = usize::try_from(elements * element_bytes).unwrap();
         let bytes = &BYTES[..byte_len];
         TensorInput::with_bytes(
             name,
             TensorMetadata::new(emel_model::bridge::TensorMetadataInput {
-                tensor_type: SerializedType::F32,
+                tensor_type,
                 dimension_count: rank,
                 dimensions,
                 data_offset: 0,
                 file_offset: 0,
-                data_size: elements * 4,
+                data_size: elements * element_bytes,
                 file_index: 0,
-                storage: Some(TensorBinding::new(0, 0, elements * 4)),
+                storage: Some(TensorBinding::new(0, 0, elements * element_bytes)),
             }),
             bytes,
         )
@@ -1953,25 +2286,298 @@ mod tests {
             Err(BindingError::TensorShapeMismatch(2))
         );
     }
+
+    #[test]
+    fn upsample_accepts_both_pinned_float_source_classes() {
+        let upsample = role(RoleKind::SingleWeight, TensorFamily::Upsample);
+        assert!(RuntimeVariant::F32.accepts(upsample, SerializedType::F32));
+        assert!(RuntimeVariant::F32.accepts(upsample, SerializedType::F16));
+        assert!(RuntimeVariant::F16.accepts(upsample, SerializedType::F32));
+        assert!(RuntimeVariant::F16.accepts(upsample, SerializedType::F16));
+        assert!(RuntimeVariant::Q8.accepts(upsample, SerializedType::F32));
+        assert!(RuntimeVariant::Q8.accepts(upsample, SerializedType::F16));
+        assert!(!RuntimeVariant::Q8.accepts(upsample, SerializedType::Q8_0));
+    }
+
+    #[test]
+    fn accepts_pinned_transformer_projection_with_trailing_singletons() {
+        let tensor = resident_tensor(
+            b"mimi.encoder_transformer.transformer.layers.0.self_attn.in_projs.0.weight",
+            [16, 48, 1, 1],
+            4,
+        );
+        assert_eq!(
+            expect_projection_matrix_shape(0, tensor.metadata(), 16, 48),
+            Ok(())
+        );
+    }
+
+    fn complete_sizing_model() -> emel_model::bridge::Data {
+        use std::sync::OnceLock;
+        static NAMES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+        static TENSORS: OnceLock<Vec<TensorInput<'static>>> = OnceLock::new();
+        static BYTES: [u8; 1_048_576] = [0; 1_048_576];
+        fn add(
+            tensors: &mut Vec<TensorInput<'static>>,
+            names: &'static [Vec<u8>],
+            name: String,
+            dimensions: [u64; 4],
+            rank: u32,
+        ) {
+            let name = names.iter().find(|stored| stored.as_slice() == name.as_bytes()).unwrap().as_slice();
+            let elements = dimensions[..usize::try_from(rank).unwrap()].iter().product::<u64>();
+            let bytes = &BYTES[..usize::try_from(elements * 4).unwrap()];
+            tensors.push(TensorInput::with_bytes(
+                name,
+                TensorMetadata::new(emel_model::bridge::TensorMetadataInput {
+                    tensor_type: SerializedType::F32,
+                    dimension_count: rank,
+                    dimensions,
+                    data_offset: 0,
+                    file_offset: 0,
+                    data_size: elements * 4,
+                    file_index: 0,
+                    storage: Some(TensorBinding::new(0, 0, elements * 4)),
+                }),
+                bytes,
+            ));
+        }
+        let names = NAMES.get_or_init(|| {
+            let mut names = Vec::new();
+            for &(module, _, _, _) in &[(0, 7, 1, 16), (3, 4, 16, 32), (6, 5, 32, 64), (9, 6, 64, 128), (12, 8, 128, 16), (14, 1, 16, 16)] {
+                names.push(format!("mimi.encoder.model.{module}.conv.conv.weight").into_bytes());
+            }
+            for &(module, _, _, _) in &[(1, 3, 16, 8), (4, 3, 32, 16), (7, 3, 64, 32), (10, 3, 128, 64)] {
+                names.push(format!("mimi.encoder.model.{module}.block.1.conv.conv.weight").into_bytes());
+                names.push(format!("mimi.encoder.model.{module}.block.3.conv.conv.weight").into_bytes());
+            }
+            names.push(b"mimi.downsample.conv.conv.conv.weight".to_vec());
+            for &(module, _, _, _) in &[(0, 1, 16, 16), (14, 1, 16, 1)] {
+                names.push(format!("mimi.decoder.model.{module}.conv.conv.weight").into_bytes());
+            }
+            for &(module, _) in &[(2, 8), (5, 6), (8, 5), (11, 4)] {
+                names.push(format!("mimi.decoder.model.{module}.convtr.convtr.weight").into_bytes());
+            }
+            for &module in &[3_u16, 6, 9, 12] {
+                names.push(format!("mimi.decoder.model.{module}.block.1.conv.conv.weight").into_bytes());
+                names.push(format!("mimi.decoder.model.{module}.block.3.conv.conv.weight").into_bytes());
+            }
+            for family in ["encoder_transformer", "decoder_transformer"] {
+                for module in 0..2 {
+                    let prefix = format!("mimi.{family}.transformer.layers.{module}");
+                    for suffix in ["norm1.weight", "norm1.bias", "layer_scale_1.scale", "norm2.weight", "norm2.bias", "layer_scale_2.scale", "self_attn.in_projs.0.weight", "self_attn.out_projs.0.weight", "linear1.weight", "linear2.weight"] {
+                        names.push(format!("{prefix}.{suffix}").into_bytes());
+                    }
+                }
+            }
+            for name in [
+                "mimi.quantizer.rvq_first.input_proj.weight", "mimi.quantizer.rvq_first.output_proj.weight", "mimi.quantizer.rvq_first.vq.layers.0._codebook.embedding",
+                "mimi.quantizer.rvq_rest.input_proj.weight", "mimi.quantizer.rvq_rest.output_proj.weight", "mimi.quantizer.rvq_rest.vq.layers.0._codebook.embedding",
+                "mimi.upsample.convtr.convtr.convtr.weight",
+            ] { names.push(name.as_bytes().to_vec()); }
+            names
+        });
+        let tensors = TENSORS.get_or_init(|| {
+            let mut tensors = Vec::new();
+            for &(module, taps, input, output) in &[(0, 7, 1, 16), (3, 4, 16, 32), (6, 5, 32, 64), (9, 6, 64, 128), (12, 8, 128, 16), (14, 1, 16, 16)] {
+                add(&mut tensors, names, format!("mimi.encoder.model.{module}.conv.conv.weight"), [taps, input, output, 1], 3);
+            }
+            for &(module, taps, input, half) in &[(1, 3, 16, 8), (4, 3, 32, 16), (7, 3, 64, 32), (10, 3, 128, 64)] {
+                add(&mut tensors, names, format!("mimi.encoder.model.{module}.block.1.conv.conv.weight"), [taps, input, half, 1], 3);
+                add(&mut tensors, names, format!("mimi.encoder.model.{module}.block.3.conv.conv.weight"), [1, half, input, 1], 3);
+            }
+            add(&mut tensors, names, "mimi.downsample.conv.conv.conv.weight".into(), [2, 16, 16, 1], 3);
+            for &(module, taps, input, output) in &[(0, 1, 16, 16), (14, 1, 16, 1)] {
+                add(&mut tensors, names, format!("mimi.decoder.model.{module}.conv.conv.weight"), [taps, input, output, 1], 3);
+            }
+            for &(module, taps) in &[(2, 8), (5, 6), (8, 5), (11, 4)] {
+                add(&mut tensors, names, format!("mimi.decoder.model.{module}.convtr.convtr.weight"), [taps, 16, 16, 1], 3);
+            }
+            for &module in &[3_u16, 6, 9, 12] {
+                add(&mut tensors, names, format!("mimi.decoder.model.{module}.block.1.conv.conv.weight"), [3, 16, 8, 1], 3);
+                add(&mut tensors, names, format!("mimi.decoder.model.{module}.block.3.conv.conv.weight"), [1, 8, 16, 1], 3);
+            }
+            for family in ["encoder_transformer", "decoder_transformer"] {
+                for module in 0..2 {
+                    let prefix = format!("mimi.{family}.transformer.layers.{module}");
+                    for suffix in ["norm1.weight", "norm1.bias", "layer_scale_1.scale", "norm2.weight", "norm2.bias", "layer_scale_2.scale"] {
+                        add(&mut tensors, names, format!("{prefix}.{suffix}"), [16, 1, 1, 1], 1);
+                    }
+                    add(&mut tensors, names, format!("{prefix}.self_attn.in_projs.0.weight"), [16, 48, 1, 1], 2);
+                    add(&mut tensors, names, format!("{prefix}.self_attn.out_projs.0.weight"), [16, 16, 1, 1], 2);
+                    add(&mut tensors, names, format!("{prefix}.linear1.weight"), [16, 32, 1, 1], 2);
+                    add(&mut tensors, names, format!("{prefix}.linear2.weight"), [32, 16, 1, 1], 2);
+                }
+            }
+            for (name, dimensions, rank) in [
+                ("mimi.quantizer.rvq_first.input_proj.weight", [16, 8, 1, 1], 2), ("mimi.quantizer.rvq_first.output_proj.weight", [8, 16, 1, 1], 2), ("mimi.quantizer.rvq_first.vq.layers.0._codebook.embedding", [8, 32, 1, 1], 2),
+                ("mimi.quantizer.rvq_rest.input_proj.weight", [16, 8, 1, 1], 2), ("mimi.quantizer.rvq_rest.output_proj.weight", [8, 16, 1, 1], 2), ("mimi.quantizer.rvq_rest.vq.layers.0._codebook.embedding", [8, 32, 1, 1], 2),
+                ("mimi.upsample.convtr.convtr.convtr.weight", [2, 1, 16, 1], 3),
+            ] { add(&mut tensors, names, name.into(), dimensions, rank); }
+            tensors
+        });
+        emel_model::bridge::Data::try_from_mimi(MimiDataInput { hparams: hparams(), tensors }).unwrap()
+    }
+
     #[test]
     fn rejects_upsample_prepared_capacity_below_weight_count() {
-        let up = resident_tensor(
-            b"mimi.upsample.convtr.convtr.convtr.weight",
-            [2, 1, 16, 1],
-            3,
-        );
-        let model = emel_model::bridge::Data::try_from_mimi(MimiDataInput {
-            hparams: hparams(),
-            tensors: &[up],
-        })
-        .unwrap();
+        let model = complete_sizing_model();
         assert_eq!(
-            validate_arenas(
-                ArenaCapacities::new(16, 32, 48, 1_920),
-                model.mimi_binding_input(),
-                1_920,
-            ),
+            validate_arenas(ArenaCapacities::new(1, usize::MAX, usize::MAX, usize::MAX), model.mimi_binding_input(), 1_920, RuntimeVariant::F32),
             Err(BindingError::ArenaCapacity(ArenaKind::Prepared))
         );
+    }
+
+    fn decoder_model(final_channels: u64) -> emel_model::bridge::Data {
+        let tensors = [
+            resident_tensor(
+                b"mimi.decoder.model.0.conv.conv.weight",
+                [1, 16, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.2.convtr.convtr.weight",
+                [8, 16, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.3.block.1.conv.conv.weight",
+                [1, 16, 8, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.3.block.3.conv.conv.weight",
+                [1, 8, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.5.convtr.convtr.weight",
+                [6, 16, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.6.block.1.conv.conv.weight",
+                [1, 16, 8, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.6.block.3.conv.conv.weight",
+                [1, 8, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.8.convtr.convtr.weight",
+                [5, 16, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.9.block.1.conv.conv.weight",
+                [1, 16, 8, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.9.block.3.conv.conv.weight",
+                [1, 8, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.11.convtr.convtr.weight",
+                [4, 16, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.12.block.1.conv.conv.weight",
+                [1, 16, 8, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.12.block.3.conv.conv.weight",
+                [1, 8, 16, 1],
+                3,
+            ),
+            resident_tensor(
+                b"mimi.decoder.model.14.conv.conv.weight",
+                [1, 16, final_channels, 1],
+                3,
+            ),
+        ];
+        emel_model::bridge::Data::try_from_mimi(MimiDataInput {
+            hparams: hparams(),
+            tensors: &tensors,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn q8_rejects_mixed_non_transposed_conv_dtype_after_f16_anchor() {
+        let tensors = [
+            resident_tensor_with_type(
+                b"mimi.encoder.model.0.conv.conv.weight",
+                [7, 1, 4, 1],
+                3,
+                SerializedType::F16,
+            ),
+            resident_tensor(
+                b"mimi.encoder.model.3.conv.conv.weight",
+                [8, 16, 4, 1],
+                3,
+            ),
+        ];
+        let data = emel_model::bridge::Data::try_from_mimi(MimiDataInput {
+            hparams: hparams(),
+            tensors: &tensors,
+        })
+        .unwrap();
+        validate_model_tensor_records(data.mimi_binding_input(), RuntimeVariant::Q8).unwrap();
+        assert_eq!(
+            validate_conv_dtype_consistency(data.mimi_binding_input(), RuntimeVariant::Q8),
+            Err(BindingError::UnsupportedRuntime(1))
+        );
+    }
+
+    #[test]
+    fn q8_accepts_mixed_non_transposed_conv_dtype_after_f32_anchor() {
+        let tensors = [
+            resident_tensor(
+                b"mimi.encoder.model.0.conv.conv.weight",
+                [7, 1, 4, 1],
+                3,
+            ),
+            resident_tensor_with_type(
+                b"mimi.encoder.model.3.conv.conv.weight",
+                [8, 16, 4, 1],
+                3,
+                SerializedType::F16,
+            ),
+        ];
+        let data = emel_model::bridge::Data::try_from_mimi(MimiDataInput {
+            hparams: hparams(),
+            tensors: &tensors,
+        })
+        .unwrap();
+        validate_model_tensor_records(data.mimi_binding_input(), RuntimeVariant::Q8).unwrap();
+        assert_eq!(
+            validate_conv_dtype_consistency(data.mimi_binding_input(), RuntimeVariant::Q8),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn decoder_seanet_validator_rejects_final_output_channel_mismatch() {
+        let valid = decoder_model(1);
+        assert_eq!(
+            validate_decoder_seanet(valid.mimi_binding_input(), 16, 2),
+            Ok(())
+        );
+        assert_eq!(
+            validate_decoder_seanet(valid.mimi_binding_input(), 16, 1),
+            Err(BindingError::TensorShapeMismatch(0))
+        );
+
+        let malformed = decoder_model(2);
+        assert!(matches!(
+            validate_decoder_seanet(malformed.mimi_binding_input(), 16, 2),
+            Err(BindingError::TensorShapeMismatch(_))
+        ));
     }
 }
