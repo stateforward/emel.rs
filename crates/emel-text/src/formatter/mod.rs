@@ -7,4 +7,4 @@ pub mod format;
 pub mod guards;
 pub mod sm;
 
-pub use format::{ChatMessage, FormatRequest, Formatter, format_raw, raw_formatter};
+pub use format::{ChatMessage, FormatRequest, Formatter, RawFormatRequest, format_raw, format_raw_request, raw_formatter};
