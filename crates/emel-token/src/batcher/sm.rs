@@ -161,6 +161,15 @@ enum DispatchError {
     Internal,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProbeOutcome {
+    Pending,
+    Ok,
+    InvalidRequest,
+    Backend,
+    Internal,
+}
+
 #[derive(Debug)]
 struct Scratch {
     next_pos: [i32; MAX_SEQ],
@@ -216,6 +225,7 @@ impl Default for Scratch {
 #[derive(Debug)]
 struct DispatchContext {
     error: Cell<DispatchError>,
+    probe_outcome: Cell<ProbeOutcome>,
     mask_words: Cell<usize>,
     positions_count: Cell<usize>,
     outputs_total: Cell<usize>,
@@ -226,6 +236,7 @@ impl DispatchContext {
     fn new() -> Self {
         Self {
             error: Cell::new(DispatchError::None),
+            probe_outcome: Cell::new(ProbeOutcome::Pending),
             mask_words: Cell::new(1),
             positions_count: Cell::new(0),
             outputs_total: Cell::new(0),
@@ -319,13 +330,16 @@ sml! {
         "positions_seed_probe"_s <= "positions_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_mode] / probe_seeded,
         "positions_unseed_probe"_s <= "positions_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [unseeded_mode] / probe_unseeded,
         "errored"_s <= "positions_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "positions_seeded"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok] / generate_seeded,
-        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_backend] / backend,
-        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_invalid] / invalid,
-        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
-        "positions_unseeded"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_ok] / generate_unseeded,
-        "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [probe_invalid] / invalid,
-        "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
+        "positions_seeded"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_probe_ok] / generate_seeded,
+        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_probe_backend] / backend,
+        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_probe_invalid] / invalid,
+        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_probe_internal] / internal,
+        "errored"_s <= "positions_seed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seeded_probe_pending] / internal,
+        "positions_unseeded"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [unseeded_probe_ok] / generate_unseeded,
+        "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [unseeded_probe_backend] / backend,
+        "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [unseeded_probe_invalid] / invalid,
+        "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [unseeded_probe_internal] / internal,
+        "errored"_s <= "positions_unseed_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [unseeded_probe_pending] / internal,
         "positions_count_decision"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
         "errored"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
         "errored"_s <= "positions_stride_three"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
@@ -379,21 +393,21 @@ sml! {
         "errored"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
         "errored"_s <= "count_outputs"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
         "single_output_decision"_s <= "outputs_total_publish_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_present] / publish_outputs_total,
+        "single_output_probe"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_required] / probe_single_output,
         "single_output_decision"_s <= "outputs_total_publish_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [outputs_total_output_absent],
         "continuity_decision"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_skipped],
-        "single_output_probe"_s <= "single_output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_required] / probe_single_output,
-        "continuity_decision"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
-        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
-        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
-        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
-        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "continuity_decision"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_probe_ok],
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_probe_invalid] / invalid,
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_probe_backend] / backend,
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [single_output_probe_internal] / internal,
+        "errored"_s <= "single_output_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
         "done"_s <= "continuity_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_skipped],
         "continuity_probe"_s <= "continuity_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_required] / probe_continuity,
-        "done"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_ok],
-        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_invalid] / invalid,
-        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_backend] / backend,
-        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
-        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
+        "done"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_probe_ok],
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_probe_invalid] / invalid,
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_probe_backend] / backend,
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [continuity_probe_internal] / internal,
+        "errored"_s <= "continuity_probe"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) / internal,
         "ready"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_present] / publish_done_callback,
         "ready"_s <= "done"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [done_callback_absent],
         "error_callback_decision"_s <= "errored"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>),
@@ -431,7 +445,6 @@ sml! {
         "ready"_s <= "outputs_total_publish_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "continuity_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "continuity_probe"_s + unexpected<_> / unexpected,
-        "ready"_s <= "done_callback_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "error_callback_decision"_s + unexpected<_> / unexpected,
         "ready"_s <= "done"_s + unexpected<_> / unexpected,
         "ready"_s <= "errored"_s + unexpected<_> / unexpected,
@@ -518,22 +531,18 @@ impl TokenBatcherStateMachine<Context> {
         if self.is_ready() {
             self.context_mut().unexpected = true;
         }
-        if self.context().unexpected {
-            Err(BatchError::UnexpectedEvent)
-        } else {
-            Err(BatchError::UnexpectedEvent)
-        }
+        Err(BatchError::UnexpectedEvent)
     }
 
     pub(super) fn is_ready(&self) -> bool {
         self.is(&TokenBatcherStates::Ready)
     }
 }
-
 impl TokenBatcherStateMachineContext for Context {
     fn begin_batch(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         self.unexpected = false;
         event.context.error.set(DispatchError::None);
+        event.context.probe_outcome.set(ProbeOutcome::Pending);
         event
             .context
             .mask_words
@@ -599,11 +608,35 @@ impl TokenBatcherStateMachineContext for Context {
         normalize_primary(event);
         Ok(())
     }
-    fn stride_three(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(position_stride(&event.request) == 3)
+    fn seeded_probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Ok)
     }
-    fn probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::None)
+    fn seeded_probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Backend)
+    }
+    fn seeded_probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::InvalidRequest)
+    }
+    fn seeded_probe_internal(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Internal)
+    }
+    fn seeded_probe_pending(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Pending)
+    }
+    fn unseeded_probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Ok)
+    }
+    fn unseeded_probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Backend)
+    }
+    fn unseeded_probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::InvalidRequest)
+    }
+    fn unseeded_probe_internal(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Internal)
+    }
+    fn unseeded_probe_pending(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Pending)
     }
     fn phase_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.context.error.get() == DispatchError::None)
@@ -626,11 +659,8 @@ impl TokenBatcherStateMachineContext for Context {
                 | DispatchError::Internal
         ))
     }
-    fn probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::Backend)
-    }
-    fn probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.context.error.get() == DispatchError::InvalidRequest)
+    fn stride_three(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(position_stride(&event.request) == 3)
     }
     fn stride_one(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(position_stride(&event.request) == 1)
@@ -751,6 +781,30 @@ impl TokenBatcherStateMachineContext for Context {
     fn count_outputs_from_output_last(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
         self.count_outputs_from_output_all(event)
     }
+    fn single_output_probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Ok)
+    }
+    fn single_output_probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::InvalidRequest)
+    }
+    fn single_output_probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Backend)
+    }
+    fn single_output_probe_internal(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Internal)
+    }
+    fn continuity_probe_ok(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Ok)
+    }
+    fn continuity_probe_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::InvalidRequest)
+    }
+    fn continuity_probe_backend(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Backend)
+    }
+    fn continuity_probe_internal(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.probe_outcome.get() == ProbeOutcome::Internal)
+    }
     fn single_output_required(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(event.request.enforce_single_output_per_seq)
     }
@@ -758,14 +812,10 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(!event.request.enforce_single_output_per_seq)
     }
     fn probe_single_output(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        const ERROR_LUT: [DispatchError; 2] = [
-            DispatchError::InvalidRequest,
-            DispatchError::None,
-        ];
-        event
-            .context
-            .error
-            .set(ERROR_LUT[usize::from(single_output_ok(event))]);
+        event.context.probe_outcome.set(match single_output_ok(event) {
+            true => ProbeOutcome::Ok,
+            false => ProbeOutcome::InvalidRequest,
+        });
         Ok(())
     }
     fn continuity_required(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -775,14 +825,10 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(position_stride(&event.request) > 1)
     }
     fn probe_continuity(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        const ERROR_LUT: [DispatchError; 2] = [
-            DispatchError::InvalidRequest,
-            DispatchError::None,
-        ];
-        event
-            .context
-            .error
-            .set(ERROR_LUT[usize::from(continuity_ok(event))]);
+        event.context.probe_outcome.set(match continuity_ok(event) {
+            true => ProbeOutcome::Ok,
+            false => ProbeOutcome::InvalidRequest,
+        });
         Ok(())
     }
     fn outputs_total_output_present(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
@@ -903,7 +949,12 @@ fn mask_has(mask: &[u64], id: i32) -> bool {
 }
 fn explicit_masks_malformed(r: &RequestView<'_>) -> bool {
     r.seq_masks.is_some_and(|values| {
-        values.len() >= r.token_ids.len() && (r.seq_mask_words == 0 || r.seq_mask_words > SEQ_WORDS)
+        r.seq_mask_words == 0
+            || r.seq_mask_words > SEQ_WORDS
+            || r.token_ids
+                .len()
+                .checked_mul(r.seq_mask_words)
+                .is_none_or(|required| values.len() < required)
     })
 }
 fn seq_payload_valid(r: &RequestView<'_>) -> bool {
@@ -996,11 +1047,11 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
     let resolver = e.request.resolve_position_seed.unwrap();
     let mut backend_error = false;
-    let mut invalid = false;
+    let mut invalid_error = false;
     for id in 0..MAX_SEQ {
         match (resolver.resolve)(&resolver.context, id as i32) {
             Ok(v) => {
-                invalid |= v < 0;
+                invalid_error |= v < 0;
                 s.next_pos[id] = v;
                 s.seed_pos[id] = v;
             }
@@ -1008,11 +1059,11 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
                 backend_error = true;
             }
             Err(PositionSeedError::InvalidRequest) => {
-                invalid = true;
+                invalid_error = true;
             }
         }
     }
-    let mut valid = !backend_error && !invalid;
+    let mut valid = !backend_error && !invalid_error;
     let words = effective_mask_words(&e.request);
     for i in 0..e.request.token_ids.len() {
         let primary = e.outputs.seq_primary_ids[i].get() as usize;
@@ -1044,13 +1095,13 @@ fn probe_seeded(e: &BatchRuntime<'_>) {
             }
         }
     }
-    const ERROR_LUT: [[DispatchError; 2]; 2] = [
-        [DispatchError::InvalidRequest, DispatchError::None],
-        [DispatchError::Backend, DispatchError::Backend],
-    ];
-    e.context
-        .error
-        .set(ERROR_LUT[backend_error as usize][valid as usize]);
+    e.context.probe_outcome.set(if backend_error {
+        ProbeOutcome::Backend
+    } else if !valid {
+        ProbeOutcome::InvalidRequest
+    } else {
+        ProbeOutcome::Ok
+    });
 }
 fn probe_unseeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
@@ -1089,11 +1140,11 @@ fn probe_unseeded(e: &BatchRuntime<'_>) {
             }
         }
     }
-    const ERROR_LUT: [DispatchError; 2] = [
-        DispatchError::InvalidRequest,
-        DispatchError::None,
-    ];
-    e.context.error.set(ERROR_LUT[valid as usize]);
+    e.context.probe_outcome.set(if valid {
+        ProbeOutcome::Ok
+    } else {
+        ProbeOutcome::InvalidRequest
+    });
 }
 fn generate_seeded(e: &BatchRuntime<'_>) {
     let mut s = e.context.scratch.borrow_mut();
@@ -1144,14 +1195,6 @@ fn generate_unseeded(e: &BatchRuntime<'_>) {
     }
     e.context.positions_count.set(e.request.token_ids.len());
 }
-fn publish_positions(e: &BatchRuntime<'_>) {
-    if let Some(o) = e.request.seq_mask_words_out {
-        o.set(e.context.mask_words.get());
-    }
-    if let Some(o) = e.request.positions_count_out {
-        o.set(e.context.positions_count.get());
-    }
-}
 fn single_output_ok(e: &BatchRuntime<'_>) -> bool {
     let mut s = e.context.scratch.borrow_mut();
     s.seq_output_count.fill(0);
@@ -1199,8 +1242,8 @@ fn continuity_ok(e: &BatchRuntime<'_>) -> bool {
                 let id = w * 64 + bits.trailing_zeros() as usize;
                 let last = s.seq_last_pos[id];
                 let first_seen = !s.seq_seen[id];
-                let monotonic = first_seen || pos >= last;
-                let pos_changed = first_seen || pos != last;
+                let monotonic = (last < 0) || pos >= last;
+                let pos_changed = pos != last;
                 s.seq_pos_count[id] += usize::from(pos_changed);
                 s.seq_last_pos[id] = pos;
                 s.seq_min_pos[id] = s.seq_min_pos[id].min(pos);

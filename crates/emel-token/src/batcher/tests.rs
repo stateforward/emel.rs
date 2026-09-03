@@ -33,13 +33,16 @@ fn seed_zero(
     Ok(context.seeds[0])
 }
 
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "fixture matches the position-seed callback contract"
+)]
 fn seed_values(
     context: &super::PositionSeedContext<'_>,
     sequence_id: i32,
 ) -> Result<i32, PositionSeedError> {
     Ok(context.seeds[usize::try_from(sequence_id).unwrap()])
 }
-
 fn mixed_seed_errors(
     context: &super::PositionSeedContext<'_>,
     sequence_id: i32,
@@ -325,6 +328,29 @@ fn three_lane_positions_shape_participates_in_capacity_validation() {
 }
 
 #[test]
+fn short_positions_are_capacity_invalid_before_payload_validation() {
+    let ids = [1, 2];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [9; 2];
+    let mut output = [7; 2];
+    let result = TokenBatcher::new().process_event(request(
+        &ids,
+        10,
+        None,
+        1,
+        None,
+        Some(&[0]),
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
+    ));
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+    assert_eq!(positions, [9; 2]);
+}
+
+#[test]
 fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
     let mut primary_out = [0; 1];
     let mut masks_out = [0; 1];
@@ -377,29 +403,8 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
         )),
         Err(BatchError::InvalidRequest)
     );
-    assert_eq!(
-        batcher.process_event(request(
-            &[1],
-            32,
-            Some(&[1]),
-            SEQ_WORDS + 1,
-            None,
-            None,
-            &mut primary_out,
-            &mut masks_out,
-            &mut positions_out,
-            &mut output_mask,
-        )),
-        Err(BatchError::InvalidRequest)
-    );
-
-    // A short counted mask input is absent in the source contract, so the
-    // request falls through to the default sequence normalization mode.
+    // Incomplete flattened rows are invalid before sequence mode selection.
     let short_masks = [u64::MAX];
-    let mut primary_out = [0; 2];
-    let mut masks_out = [0; 2];
-    let mut positions_out = [0; 2];
-    let mut output_mask = [0; 2];
     let result = batcher.process_event(request(
         &[1, 2],
         32,
@@ -412,9 +417,43 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
         &mut positions_out,
         &mut output_mask,
     ));
-    assert_eq!(result.unwrap().seq_mask_words, 1);
-    assert_eq!(primary_out, [0, 0]);
-    assert_eq!(masks_out, [1, 1]);
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+}
+
+#[test]
+fn incomplete_multiword_masks_are_invalid_before_mode_selection() {
+    let ids = [1, 2];
+    let short_masks = [1_u64, 0_u64];
+    let mut primary = [0; 2];
+    let mut masks = [0; 4];
+    let mut positions = [0; 2];
+    let mut output = [0; 2];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: Some(&short_masks),
+        seq_mask_words: 2,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+    assert_eq!(primary, [0, 0]);
+    assert_eq!(masks, [0, 0, 0, 0]);
 }
 
 #[test]
@@ -440,7 +479,7 @@ fn continuity_counts_explicit_first_negative_position() {
         &mut output,
     ));
 
-    assert!(result.is_ok());
+    assert_eq!(result, Err(BatchError::InvalidRequest));
     assert_eq!(positions, positions_input);
 }
 
@@ -467,7 +506,7 @@ fn continuity_counts_negative_to_zero_position_sequence() {
         &mut output,
     ));
 
-    assert!(result.is_ok());
+    assert_eq!(result, Err(BatchError::InvalidRequest));
     assert_eq!(positions, positions_input);
 }
 
@@ -640,7 +679,7 @@ fn full_outputs_and_stride_three_are_published() {
     let input_positions = [1, 2, 3, 4, 5, 6];
     let mut output = [0; 2];
     let mut words = 0;
-    let mut position_count = 0;
+    let mut position_count = 37;
     let mut total = 0;
     let result = TokenBatcher::new()
         .process_event(BatchRequest {
@@ -671,6 +710,226 @@ fn full_outputs_and_stride_three_are_published() {
     assert_eq!(positions, input_positions);
     assert_eq!(output, [1, 1]);
     assert_eq!((words, position_count, total), (1, 6, 2));
+}
+
+#[test]
+fn first_seen_coupled_sequence_without_seed_callback_uses_unseeded_path() {
+    let ids = [1, 2];
+    let sequence_masks = [0b11, 0b11];
+    let sequence_ids = [0, 1];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [-1; 2];
+    let mut output = [0; 2];
+
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: Some(&sequence_masks),
+        seq_mask_words: 1,
+        seq_primary_ids: Some(&sequence_ids),
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+
+    assert_eq!(result.unwrap().positions_count, 2);
+    assert_eq!(positions, [0, 1]);
+}
+
+#[test]
+fn unseeded_generation_writes_each_sequence_position() {
+    let ids = [1, 2, 3, 4];
+    let sequence_ids = [2, 5, 2, 5];
+    let mut primary = [0; 4];
+    let mut masks = [0; 4];
+    let mut positions = [-1; 4];
+    let mut output = [0; 4];
+
+    let result = TokenBatcher::new().process_event(request(
+        &ids,
+        10,
+        None,
+        1,
+        Some(&sequence_ids),
+        None,
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
+    ));
+
+    assert_eq!(result.unwrap().positions_count, 4);
+    assert_eq!(positions, [0, 0, 1, 1]);
+}
+
+#[test]
+fn generated_position_count_outputs_replace_stale_sentinels() {
+    let ids = [1, 2];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [-1; 2];
+    let mut output = [0; 2];
+    let mut seeded_position_count = 91;
+    let seeded = TokenBatcher::new()
+        .process_event(BatchRequest {
+            token_ids: &ids,
+            vocab_size: 10,
+            seq_masks: None,
+            seq_mask_words: 1,
+            seq_primary_ids: None,
+            positions: None,
+            output_mask_input: None,
+            output_all: false,
+            enforce_single_output_per_seq: false,
+            resolve_position_seed: Some(super::PositionSeedResolver {
+                context: super::PositionSeedContext { seeds: &[10] },
+                resolve: seed_zero,
+            }),
+            seq_mask_words_out: None,
+            positions_count_out: Some(&mut seeded_position_count),
+            outputs_total_out: None,
+            on_done: None,
+            on_error: None,
+            outputs: BatchOutputs {
+                seq_primary_ids: &mut primary,
+                seq_masks: &mut masks,
+                positions: &mut positions,
+                output_mask: &mut output,
+            },
+        })
+        .unwrap();
+    assert_eq!(seeded.positions_count, 2);
+    assert_eq!(seeded_position_count, 2);
+    assert_eq!(positions, [10, 11]);
+
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [-1; 2];
+    let mut output = [0; 2];
+    let mut unseeded_position_count = 73;
+    let unseeded = TokenBatcher::new()
+        .process_event(BatchRequest {
+            token_ids: &ids,
+            vocab_size: 10,
+            seq_masks: None,
+            seq_mask_words: 1,
+            seq_primary_ids: None,
+            positions: None,
+            output_mask_input: None,
+            output_all: false,
+            enforce_single_output_per_seq: false,
+            resolve_position_seed: None,
+            seq_mask_words_out: None,
+            positions_count_out: Some(&mut unseeded_position_count),
+            outputs_total_out: None,
+            on_done: None,
+            on_error: None,
+            outputs: BatchOutputs {
+                seq_primary_ids: &mut primary,
+                seq_masks: &mut masks,
+                positions: &mut positions,
+                output_mask: &mut output,
+            },
+        })
+        .unwrap();
+    assert_eq!(unseeded.positions_count, 2);
+    assert_eq!(unseeded_position_count, 2);
+    assert_eq!(positions, [0, 1]);
+}
+#[test]
+fn stride_one_position_count_output_replaces_stale_sentinel() {
+    let ids = [1, 2];
+    let input_positions = [4, 5];
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [-1; 2];
+    let mut output = [0; 2];
+    let mut position_count = 59;
+    let result = TokenBatcher::new()
+        .process_event(BatchRequest {
+            token_ids: &ids,
+            vocab_size: 10,
+            seq_masks: None,
+            seq_mask_words: 1,
+            seq_primary_ids: None,
+            positions: Some(&input_positions),
+            output_mask_input: None,
+            output_all: false,
+            enforce_single_output_per_seq: false,
+            resolve_position_seed: None,
+            seq_mask_words_out: None,
+            positions_count_out: Some(&mut position_count),
+            outputs_total_out: None,
+            on_done: None,
+            on_error: None,
+            outputs: BatchOutputs {
+                seq_primary_ids: &mut primary,
+                seq_masks: &mut masks,
+                positions: &mut positions,
+                output_mask: &mut output,
+            },
+        })
+        .unwrap();
+    assert_eq!(result.positions_count, 2);
+    assert_eq!(position_count, 2);
+    assert_eq!(positions, input_positions);
+}
+
+#[test]
+fn diverged_coupled_seed_positions_are_rejected_as_invalid_request() {
+    let ids = [1, 2];
+    let sequence_masks = [0b11, 0b11];
+    let sequence_ids = [0, 1];
+    let mut seeds = [0; MAX_SEQ];
+    seeds[0] = 4;
+    seeds[1] = 9;
+    let mut primary = [0; 2];
+    let mut masks = [0; 2];
+    let mut positions = [-1; 2];
+    let mut output = [0; 2];
+
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: Some(&sequence_masks),
+        seq_mask_words: 1,
+        seq_primary_ids: Some(&sequence_ids),
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: Some(super::PositionSeedResolver {
+            context: super::PositionSeedContext { seeds: &seeds },
+            resolve: seed_values,
+        }),
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+
+    assert_eq!(result, Err(BatchError::InvalidRequest));
 }
 
 #[test]
@@ -759,7 +1018,7 @@ fn oversized_output_buffers_are_logically_bounded() {
 }
 
 #[test]
-fn short_flattened_masks_fall_through_without_panicking() {
+fn short_flattened_masks_are_invalid_before_mode_selection() {
     let ids = [1, 2];
     let short_masks = [1_u64];
     let mut primary = [0; 2];
@@ -789,11 +1048,10 @@ fn short_flattened_masks_fall_through_without_panicking() {
                 positions: &mut positions,
                 output_mask: &mut output,
             },
-        })
-        .unwrap();
-    assert_eq!(result.seq_mask_words, 1);
+        });
+    assert_eq!(result, Err(BatchError::InvalidRequest));
     assert_eq!(primary, [0, 0]);
-    assert_eq!(masks, [1, 1]);
+    assert_eq!(masks, [0, 0]);
 }
 
 #[test]
@@ -840,7 +1098,7 @@ fn maximum_seed_is_rejected_before_increment() {
 }
 
 #[test]
-fn seeded_probe_preserves_invalid_seed_error() {
+fn seeded_probe_classifies_resolver_rejection_as_invalid_request() {
     let ids = [1];
     let sequence_ids = [0];
     let seeds = [0; MAX_SEQ];
