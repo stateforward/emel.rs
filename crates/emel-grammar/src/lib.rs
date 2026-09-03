@@ -21,5 +21,18 @@ impl GrammarSource {
     }
 }
 pub mod gbnf;
-pub(crate) mod rule_parser;
-pub(crate) mod sampler;
+pub mod rule_parser;
+pub mod sampler;
+
+/// Public root rule-parser actor and its typed request/result/state contracts.
+pub use rule_parser::sm::{
+    DoneCallback, ErrorCallback, EventParseRules, GbnfRuleParser, GbnfRuleParserActor,
+    GbnfRuleParserContext, GbnfRuleParserStates, ParseDone, ParseError, ParseOutcome, ParsingDone,
+    ParsingError, RuleParser,
+};
+
+/// Public root sampler actor and its typed request/result/state contracts.
+pub use sampler::sm::{
+    EventSampleRuntime, GbnfSampler, GbnfSamplerContext, GbnfSamplerStates, Sample, SampleDone,
+    Sampler, SamplerError, make_sampler,
+};
