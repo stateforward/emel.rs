@@ -20,6 +20,15 @@
     missing_docs
 )]
 
+use super::super::encoder::feature_extractor::{
+    Error as NativeFeatureExtractorError, Route as NativeFeatureExtractorRoute,
+};
+use super::super::executor::native_projection::{
+    Error as NativeProjectionError, Route as NativeProjectionRoute,
+};
+use super::super::executor::native_transformer::{
+    Error as NativeTransformerError, Route as NativeTransformerRoute,
+};
 use super::super::{NativeOutputError, NativeOutputRoute};
 use core::cell::RefCell;
 use sml::sml;
@@ -178,8 +187,6 @@ pub struct RunError {
 pub type DoneCallback = fn(RunDone) -> bool;
 /// Caller-owned error callback.
 pub type ErrorCallback = fn(RunError) -> bool;
-
-/// Bounded borrowed pipeline request.
 pub struct EventRunFlow<'a> {
     pub contract: &'a PipelineContract,
     pub pcm: &'a [f32],
@@ -194,6 +201,12 @@ pub struct EventRunFlow<'a> {
     pub probability_count_out: RefCell<&'a mut i32>,
     pub segment_count_out: RefCell<&'a mut i32>,
     pub error_out: RefCell<&'a mut PipelineError>,
+    /// Caller-owned native feature-extractor route and reusable workspace.
+    pub native_feature_extractor_route: RefCell<Option<&'a mut NativeFeatureExtractorRoute<'a>>>,
+    /// Caller-owned native encoder-projection route and reusable workspace.
+    pub native_projection_route: RefCell<Option<&'a mut NativeProjectionRoute<'a>>>,
+    /// Caller-owned native transformer route and reusable workspace.
+    pub native_transformer_route: RefCell<Option<&'a mut NativeTransformerRoute<'a>>>,
     pub on_done: Option<DoneCallback>,
     pub on_error: Option<ErrorCallback>,
     pub native_output_route: RefCell<Option<&'a mut NativeOutputRoute<'a>>>,
@@ -231,6 +244,9 @@ impl<'a> EventRunFlow<'a> {
             probability_count_out: RefCell::new(probability_count_out),
             segment_count_out: RefCell::new(segment_count_out),
             error_out: RefCell::new(error_out),
+            native_feature_extractor_route: RefCell::new(None),
+            native_projection_route: RefCell::new(None),
+            native_transformer_route: RefCell::new(None),
             native_output_route: RefCell::new(None),
             on_done: None,
             on_error: None,
@@ -249,6 +265,30 @@ impl<'a> EventRunFlow<'a> {
     #[must_use]
     pub fn with_native_output_route(mut self, route: &'a mut NativeOutputRoute<'a>) -> Self {
         self.native_output_route.get_mut().replace(route);
+        self
+    }
+    #[must_use]
+    pub fn with_native_feature_extractor_route(
+        mut self,
+        route: &'a mut NativeFeatureExtractorRoute<'a>,
+    ) -> Self {
+        *self.native_feature_extractor_route.get_mut() = Some(route);
+        self
+    }
+    #[must_use]
+    pub fn with_native_projection_route(
+        mut self,
+        route: &'a mut NativeProjectionRoute<'a>,
+    ) -> Self {
+        *self.native_projection_route.get_mut() = Some(route);
+        self
+    }
+    #[must_use]
+    pub fn with_native_transformer_route(
+        mut self,
+        route: &'a mut NativeTransformerRoute<'a>,
+    ) -> Self {
+        *self.native_transformer_route.get_mut() = Some(route);
         self
     }
 }
@@ -626,7 +666,10 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
     where
         'event: 'dispatch,
     {
-        Ok(event.native_output_route.borrow().is_none() && event.contract.decode_segments.is_some())
+        Ok(
+            event.native_output_route.borrow().is_none()
+                && event.contract.decode_segments.is_some(),
+        )
     }
     fn guard_segment_route_missing<'dispatch, 'event>(
         &self,
@@ -635,7 +678,10 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
     where
         'event: 'dispatch,
     {
-        Ok(!self.guard_native_segment_route(event)? && !self.guard_callback_segment_route(event)?)
+        Ok(
+            !self.guard_native_segment_route(event)?
+                && !self.guard_callback_segment_route(event)?,
+        )
     }
     fn effect_mark_kernel_error_from_state_segment_decode_decision<'dispatch, 'event>(
         &mut self,
@@ -1188,9 +1234,12 @@ impl DiarizationSortformerPipeline {
             probability_count_out,
             segment_count_out,
             error_out,
-            native_output_route,
+            native_feature_extractor_route,
+            native_projection_route,
+            native_transformer_route,
             on_done,
             on_error,
+            native_output_route,
         } = event;
         let features = features.into_inner();
         let encoder_frames = encoder_frames.into_inner();
@@ -1201,6 +1250,9 @@ impl DiarizationSortformerPipeline {
         let probability_count_out = probability_count_out.into_inner();
         let segment_count_out = segment_count_out.into_inner();
         let error_out = error_out.into_inner();
+        let native_feature_extractor_route = native_feature_extractor_route.into_inner();
+        let native_projection_route = native_projection_route.into_inner();
+        let native_transformer_route = native_transformer_route.into_inner();
         let native_output_route = native_output_route.into_inner();
         let event = EventRunFlow {
             contract,
@@ -1216,9 +1268,12 @@ impl DiarizationSortformerPipeline {
             probability_count_out: RefCell::new(probability_count_out),
             segment_count_out: RefCell::new(segment_count_out),
             error_out: RefCell::new(error_out),
-            native_output_route: RefCell::new(native_output_route),
+            native_feature_extractor_route: RefCell::new(native_feature_extractor_route),
+            native_projection_route: RefCell::new(native_projection_route),
+            native_transformer_route: RefCell::new(native_transformer_route),
             on_done,
             on_error,
+            native_output_route: RefCell::new(native_output_route),
         };
         if self
             .machine
