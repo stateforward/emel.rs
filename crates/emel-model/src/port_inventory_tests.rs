@@ -106,6 +106,7 @@ fn valid_request(model: &mut crate::data::Data) -> crate::loader::event::LoadReq
         crate::loader::event::Source {
             model_path: "fixture.gguf",
             file_image: None,
+            mapped_files: None,
         },
     )
 }
@@ -120,8 +121,9 @@ fn loader_event_contract_classifies_request_and_status_values() {
     request.parse_model = Some(parse_ok);
     assert!(request.is_valid());
     request.source = crate::loader::event::Source {
-        model_path: "",
-        file_image: Some(&[1]),
+        model_path: "fixture.gguf",
+        file_image: None,
+        mapped_files: None,
     };
     assert!(request.is_valid());
     request.source.file_image = Some(&[]);
