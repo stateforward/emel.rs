@@ -25,27 +25,60 @@ pub enum RouteOutcome {
 /// Public family identity selected by the pinned architecture registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Family {
+    /// Llama-family decoder model.
     Llama,
+    /// Qwen3-family decoder model.
     Qwen3,
+    /// LFM2-family decoder model.
     Lfm2,
+    /// Gemma4-family decoder model.
     Gemma4,
+    /// `OmniEmbed` encoder model.
     OmniEmbed,
+    /// Sortformer sequence model.
     Sortformer,
+    /// Whisper speech model.
     Whisper,
+    /// Moshi speech model.
     Moshi,
 }
 
-/// Whether a resolved family currently exposes a maintained actor boundary.
+/// Whether a resolved family currently exposes a maintained executable actor
+/// at the model-domain boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActorAvailability {
+    /// A maintained public actor exposes a model-bound executable route.
+    ///
+    /// This is a partial/runtime-scope claim only; it does not claim complete
+    /// model-family parity or that every family component is executable.
     Maintained,
-    PendingPort,
+    /// The model family has a maintained metadata validator, but executable
+    /// inference is owned by another domain or is not available here.
+    MetadataOnly,
+}
+
+/// Reports actor availability without constructing or exposing actor internals.
+///
+/// `Maintained` is reserved for families with a source-backed public
+/// model-bound native route. Families with only metadata validation, optional
+/// callbacks, or incomplete native stages remain `MetadataOnly`.
+#[must_use]
+pub const fn actor_availability(family: Family) -> ActorAvailability {
+    match family {
+        Family::Llama | Family::Qwen3 | Family::Lfm2 | Family::Gemma4 => {
+            ActorAvailability::Maintained
+        }
+        Family::OmniEmbed | Family::Whisper => ActorAvailability::Maintained,
+        Family::Sortformer | Family::Moshi => ActorAvailability::MetadataOnly,
+    }
 }
 
 /// Exact architecture routing result used by model-domain orchestrators.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Route {
+    /// Family identity selected by the registry.
     pub family: Family,
+    /// Whether the family exposes an executable actor at this boundary.
     pub availability: ActorAvailability,
 }
 
@@ -59,19 +92,6 @@ pub const fn resolve_route(name: &[u8]) -> Option<Route> {
         family,
         availability: actor_availability(family),
     })
-}
-
-/// Reports actor availability without constructing or exposing actor internals.
-#[must_use]
-pub const fn actor_availability(family: Family) -> ActorAvailability {
-    match family {
-        Family::Llama | Family::Qwen3 | Family::Lfm2 | Family::Gemma4 => {
-            ActorAvailability::Maintained
-        }
-        Family::OmniEmbed | Family::Sortformer | Family::Whisper | Family::Moshi => {
-            ActorAvailability::PendingPort
-        }
-    }
 }
 
 /// Resolves an exact architecture name to its family identity.
@@ -96,8 +116,8 @@ pub const fn resolve_family(name: &[u8]) -> Option<Family> {
 /// ownership of model data and perform the contract validation itself; callers
 /// use this result to route an explicit typed validation event.
 #[must_use]
-pub fn classify_route(name: &[u8]) -> RouteOutcome {
-    if is_supported_execution_architecture(name) {
+pub const fn classify_route(name: &[u8]) -> RouteOutcome {
+    if resolve_route(name).is_some() {
         RouteOutcome::Supported
     } else {
         RouteOutcome::Unsupported
@@ -127,11 +147,14 @@ pub fn resolve_architecture(name: &str, available: Architectures) -> Option<&'st
 }
 
 #[must_use]
-pub fn is_supported_execution_architecture(name: &[u8]) -> bool {
-    core::str::from_utf8(name)
-        .ok()
-        .and_then(|name| resolve_architecture(name, default_architecture_span()))
-        .is_some()
+pub const fn is_supported_execution_architecture(name: &[u8]) -> bool {
+    matches!(
+        resolve_route(name),
+        Some(Route {
+            availability: ActorAvailability::Maintained,
+            ..
+        })
+    )
 }
 
 /// Returns whether the architecture is the pinned LFM2 execution family.
@@ -146,21 +169,25 @@ pub fn is_gemma4_execution_architecture(name: &[u8]) -> bool {
     name == b"gemma4"
 }
 
+/// Returns whether the architecture is the pinned Moshi execution family.
 #[must_use]
 pub fn is_moshi_execution_architecture(name: &[u8]) -> bool {
     name == b"moshi"
 }
 
+/// Returns whether the architecture is the pinned Whisper execution family.
 #[must_use]
 pub fn is_whisper_execution_architecture(name: &[u8]) -> bool {
     name == b"whisper"
 }
 
+/// Returns whether the architecture is the pinned `OmniEmbed` execution family.
 #[must_use]
 pub fn is_omniembed_execution_architecture(name: &[u8]) -> bool {
     name == b"omniembed"
 }
 
+/// Returns whether the architecture is the pinned Sortformer execution family.
 #[must_use]
 pub fn is_sortformer_execution_architecture(name: &[u8]) -> bool {
     name == b"sortformer"
@@ -179,17 +206,14 @@ mod tests {
             Some("llama")
         );
         assert!(resolve_architecture("missing", architectures).is_none());
-        for name in [
-            b"llama".as_slice(),
-            b"qwen3",
-            b"lfm2",
-            b"gemma4",
-            b"omniembed",
-            b"sortformer",
-            b"whisper",
-            b"moshi",
-        ] {
+        for name in [b"llama".as_slice(), b"qwen3", b"lfm2", b"gemma4"] {
             assert!(is_supported_execution_architecture(name));
+        }
+        for name in [b"omniembed".as_slice(), b"whisper"] {
+            assert!(is_supported_execution_architecture(name));
+        }
+        for name in [b"sortformer".as_slice(), b"moshi"] {
+            assert!(!is_supported_execution_architecture(name));
         }
         assert!(!is_supported_execution_architecture(b"unknown"));
         assert!(is_lfm2_execution_architecture(b"lfm2"));
@@ -197,6 +221,7 @@ mod tests {
         assert!(is_gemma4_execution_architecture(b"gemma4"));
         assert!(!is_gemma4_execution_architecture(b"llama"));
         assert_eq!(classify_route(b"llama"), RouteOutcome::Supported);
+        assert_eq!(classify_route(b"omniembed"), RouteOutcome::Supported);
         assert_eq!(classify_route(b"unknown"), RouteOutcome::Unsupported);
         assert_eq!(resolve_family(b"llama"), Some(Family::Llama));
         assert_eq!(resolve_family(b"qwen3"), Some(Family::Qwen3));
@@ -211,13 +236,27 @@ mod tests {
             resolve_route(b"omniembed"),
             Some(Route {
                 family: Family::OmniEmbed,
-                availability: ActorAvailability::PendingPort,
+                availability: ActorAvailability::Maintained,
             })
         );
         assert_eq!(
             resolve_route(b"llama"),
             Some(Route {
                 family: Family::Llama,
+                availability: ActorAvailability::Maintained,
+            })
+        );
+        assert_eq!(
+            resolve_route(b"moshi"),
+            Some(Route {
+                family: Family::Moshi,
+                availability: ActorAvailability::MetadataOnly,
+            })
+        );
+        assert_eq!(
+            resolve_route(b"whisper"),
+            Some(Route {
+                family: Family::Whisper,
                 availability: ActorAvailability::Maintained,
             })
         );
@@ -229,7 +268,11 @@ mod tests {
         );
         assert_eq!(
             actor_availability(Family::Moshi),
-            ActorAvailability::PendingPort
+            ActorAvailability::MetadataOnly
+        );
+        assert_eq!(
+            actor_availability(Family::Whisper),
+            ActorAvailability::Maintained
         );
         assert!(!is_supported_execution_architecture(&[
             0xff, b'l', b'a', b'm', b'a'
@@ -249,24 +292,42 @@ mod tests {
                 b"llama".as_slice(),
                 Family::Llama,
                 ActorAvailability::Maintained,
+                true,
             ),
-            (b"qwen3", Family::Qwen3, ActorAvailability::Maintained),
-            (b"lfm2", Family::Lfm2, ActorAvailability::Maintained),
-            (b"gemma4", Family::Gemma4, ActorAvailability::Maintained),
+            (b"qwen3", Family::Qwen3, ActorAvailability::Maintained, true),
+            (b"lfm2", Family::Lfm2, ActorAvailability::Maintained, true),
+            (
+                b"gemma4",
+                Family::Gemma4,
+                ActorAvailability::Maintained,
+                true,
+            ),
             (
                 b"omniembed",
                 Family::OmniEmbed,
-                ActorAvailability::PendingPort,
+                ActorAvailability::Maintained,
+                true,
             ),
             (
                 b"sortformer",
                 Family::Sortformer,
-                ActorAvailability::PendingPort,
+                ActorAvailability::MetadataOnly,
+                false,
             ),
-            (b"whisper", Family::Whisper, ActorAvailability::PendingPort),
-            (b"moshi", Family::Moshi, ActorAvailability::PendingPort),
+            (
+                b"whisper",
+                Family::Whisper,
+                ActorAvailability::Maintained,
+                true,
+            ),
+            (
+                b"moshi",
+                Family::Moshi,
+                ActorAvailability::MetadataOnly,
+                false,
+            ),
         ];
-        for (name, family, availability) in cases {
+        for (name, family, availability, executable) in cases {
             assert_eq!(
                 resolve_route(name),
                 Some(Route {
@@ -275,6 +336,9 @@ mod tests {
                 })
             );
             assert_eq!(actor_availability(family), availability);
+            assert_eq!(is_supported_execution_architecture(name), executable);
+            assert_eq!(classify_route(name), RouteOutcome::Supported);
         }
+        assert_eq!(classify_route(b"unknown"), RouteOutcome::Unsupported);
     }
 }

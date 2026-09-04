@@ -2,11 +2,13 @@
 //!
 //! The actor keeps the pinned request graph intact: contract validation,
 //! audio validation, bounded output/workspace checks, explicit weight-variant
-//! routing, and callback publication are separate run-to-completion phases.
-//! Model execution is supplied by a caller-owned synchronous function pointer;
-//! the lower-level Rust Whisper encoder owns that implementation boundary.
+//! routing, and native model execution are separate run-to-completion phases.
+//! Model execution is performed synchronously by the component-owned native
+//! kernel in [`detail`], using only caller-owned buffers and resident model bytes.
 
+// Error variants retain the source-aligned `<kind>Error` naming contract.
 #![allow(
+    clippy::enum_variant_names,
     clippy::derive_partial_eq_without_eq,
     clippy::module_name_repetitions,
     clippy::missing_errors_doc,
@@ -14,14 +16,17 @@
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
     elided_lifetimes_in_paths,
+    missing_debug_implementations,
     dead_code,
     missing_docs
 )]
 
 use core::cell::RefCell;
-
+use emel_model::bridge::Data;
+use emel_tensor::dtype::SerializedType;
 use sml::sml;
 
+use super::detail;
 /// Whisper encoder sample-rate contract.
 pub const SAMPLE_RATE: i32 = 16_000;
 /// Whisper encoder channel-count contract.
@@ -44,9 +49,10 @@ pub const FFT_SIZE: usize = 400;
 pub const BLUESTEIN_FFT_SIZE: usize = 1_024;
 
 /// Errors defined by the pinned Whisper encoder contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Error {
+    #[default]
     None = 0,
     ModelInvalid = 1,
     SampleRate = 2,
@@ -57,12 +63,6 @@ pub enum Error {
     UnsupportedVariant = 7,
     InternalError = 8,
     Unexpected = 9,
-}
-
-impl Default for Error {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Source-compatible error alias.
@@ -85,7 +85,11 @@ pub enum WeightVariant {
 /// Each flag represents a complete shape/storage check performed at the model
 /// boundary. Keeping the summary bounded avoids retaining loader-owned records
 /// in the synchronous actor while preserving the source validation decisions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "source-aligned summary intentionally exposes one flag per tensor check"
+)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ModelAssets {
     pub mel_filters: bool,
     pub conv1_weight: bool,
@@ -101,25 +105,6 @@ pub struct ModelAssets {
     pub q4_1: bool,
 }
 
-impl Default for ModelAssets {
-    fn default() -> Self {
-        Self {
-            mel_filters: false,
-            conv1_weight: false,
-            conv1_bias: false,
-            conv2_weight: false,
-            conv2_bias: false,
-            embed_positions: false,
-            layer_norm: false,
-            encoder_blocks: 0,
-            q8_0_f32_aux: false,
-            q8_0: false,
-            q4_0: false,
-            q4_1: false,
-        }
-    }
-}
-
 impl ModelAssets {
     #[must_use]
     pub const fn pinned() -> Self {
@@ -131,7 +116,7 @@ impl ModelAssets {
             conv2_bias: true,
             embed_positions: true,
             layer_norm: true,
-            encoder_blocks: ENCODER_BLOCK_COUNT as u8,
+            encoder_blocks: 4,
             q8_0_f32_aux: true,
             q8_0: true,
             q4_0: true,
@@ -148,7 +133,7 @@ impl ModelAssets {
             && self.conv2_bias
             && self.embed_positions
             && self.layer_norm
-            && self.encoder_blocks == ENCODER_BLOCK_COUNT as u8
+            && self.encoder_blocks == 4
     }
 
     #[must_use]
@@ -168,7 +153,7 @@ impl ModelAssets {
 }
 
 /// Variant-neutral execution contract copied at the speech/model boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ExecutionContract {
     pub model_present: bool,
     pub sample_rate: i32,
@@ -178,52 +163,76 @@ pub struct ExecutionContract {
     pub attention_head_count: i32,
     pub encoder_block_count: i32,
     pub assets: ModelAssets,
-    pub encoder: Option<EncodeFn>,
-}
-
-/// Synchronous lower-level encoder boundary.
-///
-/// The callback receives only borrowed caller-owned data. It returns the
-/// bounded frame count and digest produced by the selected encoder route.
-pub type EncodeFn = fn(
-    &[f32],
-    &ExecutionContract,
-    &mut [f32],
-    &mut [f32],
-) -> Option<(i32, u64)>;
-
-impl Default for ExecutionContract {
-    fn default() -> Self {
-        Self {
-            model_present: false,
-            sample_rate: 0,
-            mel_bin_count: 0,
-            embedding_length: 0,
-            feed_forward_length: 0,
-            attention_head_count: 0,
-            encoder_block_count: 0,
-            assets: ModelAssets::default(),
-            encoder: None,
-        }
-    }
 }
 
 impl ExecutionContract {
+    /// Builds the source-bound execution metadata for one immutable Whisper model.
+    ///
+    /// The model pointer remains owned by the caller; this value copies only the
+    /// pinned dimensions and bounded tensor-family summary. Invalid architecture,
+    /// metadata, or tensor layouts remain observable through
+    /// [`Self::model_contract_valid`].
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the fixed encoder block count cannot fit in `u8`; the
+    /// maintained source contract uses a count that is known to fit.
     #[must_use]
-    pub const fn pinned() -> Self {
+    pub fn bind_model(model: &Data) -> Self {
+        let binding = model.whisper_binding_input();
+        let hparams = binding.hparams();
+        let metadata_valid = emel_model::whisper::Any::bind(binding).is_ok()
+            && model.architecture_name() == b"whisper"
+            && hparams.is_some_and(|h| {
+                h.n_mels() == MEL_BIN_COUNT as u32
+                    && h.n_vocab() == 51_865
+                    && h.n_embd() == EMBEDDING_LENGTH as u32
+                    && h.n_ff() == FEED_FORWARD_LENGTH as u32
+                    && h.n_head() == ATTENTION_HEAD_COUNT as u32
+                    && h.n_head_kv() == ATTENTION_HEAD_COUNT as u32
+                    && h.n_ctx() == 448
+                    && h.encoder_block_count() == ENCODER_BLOCK_COUNT as u32
+                    && h.decoder_block_count() == ENCODER_BLOCK_COUNT as u32
+            });
+        let base_valid = metadata_valid && model_base_valid(model);
+        let variant = if base_valid {
+            model_variant(model)
+        } else {
+            WeightVariant::Unsupported
+        };
+        let mut assets = ModelAssets {
+            mel_filters: base_valid,
+            conv1_weight: base_valid,
+            conv1_bias: base_valid,
+            conv2_weight: base_valid,
+            conv2_bias: base_valid,
+            embed_positions: base_valid,
+            layer_norm: base_valid,
+            encoder_blocks: if base_valid {
+                u8::try_from(ENCODER_BLOCK_COUNT).expect("pinned encoder block count fits u8")
+            } else {
+                0
+            },
+            ..ModelAssets::default()
+        };
+        match variant {
+            WeightVariant::Q8_0F32Aux => assets.q8_0_f32_aux = true,
+            WeightVariant::Q8_0 => assets.q8_0 = true,
+            WeightVariant::Q4_0 => assets.q4_0 = true,
+            WeightVariant::Q4_1 => assets.q4_1 = true,
+            WeightVariant::Unsupported => {}
+        }
         Self {
-            model_present: true,
+            model_present: metadata_valid,
             sample_rate: SAMPLE_RATE,
             mel_bin_count: MEL_BIN_COUNT,
             embedding_length: EMBEDDING_LENGTH,
             feed_forward_length: FEED_FORWARD_LENGTH,
             attention_head_count: ATTENTION_HEAD_COUNT,
             encoder_block_count: ENCODER_BLOCK_COUNT,
-            assets: ModelAssets::pinned(),
-            encoder: None,
+            assets,
         }
     }
-
     #[must_use]
     pub const fn model_contract_valid(self) -> bool {
         self.model_present
@@ -235,11 +244,17 @@ impl ExecutionContract {
             && self.encoder_block_count == ENCODER_BLOCK_COUNT
             && self.assets.base_contract_valid()
     }
-
-    #[must_use]
-    pub const fn with_encoder(mut self, encoder: EncodeFn) -> Self {
-        self.encoder = Some(encoder);
-        self
+    pub const fn pinned() -> Self {
+        Self {
+            model_present: true,
+            sample_rate: SAMPLE_RATE,
+            mel_bin_count: MEL_BIN_COUNT,
+            embedding_length: EMBEDDING_LENGTH,
+            feed_forward_length: FEED_FORWARD_LENGTH,
+            attention_head_count: ATTENTION_HEAD_COUNT,
+            encoder_block_count: ENCODER_BLOCK_COUNT,
+            assets: ModelAssets::pinned(),
+        }
     }
 }
 
@@ -260,9 +275,9 @@ pub struct EncodeError {
 pub type DoneCallback = fn(EncodeDone) -> bool;
 pub type ErrorCallback = fn(EncodeError) -> bool;
 
-/// Borrowed request corresponding to the pinned `event::encode` contract.
 pub struct EventEncodeRun<'a> {
     pub contract: &'a ExecutionContract,
+    pub model: Option<&'a Data>,
     pub pcm: &'a [f32],
     pub sample_rate: i32,
     pub channel_count: i32,
@@ -278,6 +293,10 @@ pub struct EventEncodeRun<'a> {
 
 impl<'a> EventEncodeRun<'a> {
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "source-aligned constructor keeps caller-owned buffers separate"
+    )]
     pub fn new(
         contract: &'a ExecutionContract,
         pcm: &'a [f32],
@@ -291,6 +310,7 @@ impl<'a> EventEncodeRun<'a> {
     ) -> Self {
         Self {
             contract,
+            model: None,
             pcm,
             sample_rate,
             channel_count,
@@ -304,6 +324,11 @@ impl<'a> EventEncodeRun<'a> {
             on_error: None,
         }
     }
+    #[must_use]
+    pub const fn with_model(mut self, model: &'a Data) -> Self {
+        self.model = Some(model);
+        self
+    }
 
     #[must_use]
     pub fn with_callbacks(
@@ -315,77 +340,218 @@ impl<'a> EventEncodeRun<'a> {
         self.on_error = on_error;
         self
     }
-
-    #[must_use]
-    pub fn with_error_out(mut self, error_out: &'a mut Error) -> Self {
-        *self.error_out.get_mut() = Some(error_out);
-        self
-    }
 }
 
 #[must_use]
 pub const fn mel_frame_count(sample_count: usize) -> usize {
-    sample_count.saturating_add(HOP_LENGTH - 1) / HOP_LENGTH
+    let frames = sample_count.saturating_add(HOP_LENGTH - 1) / HOP_LENGTH;
+    if frames > MAX_MEL_FRAME_COUNT {
+        MAX_MEL_FRAME_COUNT
+    } else {
+        frames
+    }
 }
 
 #[must_use]
 pub const fn encoder_frame_count(sample_count: usize) -> usize {
-    mel_frame_count(sample_count).saturating_add(1) / 2
+    mel_frame_count(sample_count).div_ceil(2)
 }
 
 #[must_use]
 pub const fn required_encoder_output_floats(sample_count: usize) -> usize {
-    encoder_frame_count(sample_count).saturating_mul(EMBEDDING_LENGTH as usize)
+    encoder_frame_count(sample_count).saturating_mul(384)
 }
 
 #[must_use]
 pub const fn required_workspace_floats(sample_count: usize) -> usize {
     let mel_frames = mel_frame_count(sample_count);
-    let encoder_frames = (mel_frames + 1) / 2;
-    MEL_BIN_COUNT as usize * mel_frames
-        + EMBEDDING_LENGTH as usize * mel_frames
-        + EMBEDDING_LENGTH as usize * encoder_frames * 6
-        + EMBEDDING_LENGTH as usize
-        + FEED_FORWARD_LENGTH as usize
+    let encoder_frames = mel_frames.div_ceil(2);
+    80 * mel_frames
+        + 384 * mel_frames
+        + 384 * encoder_frames * 6
+        + 384
+        + 1_536
         + encoder_frames
         + FFT_SIZE * 3
         + BLUESTEIN_FFT_SIZE * 4
 }
 
+fn has_tensor(model: &Data, name: &[u8], dims: &[u64], kind: SerializedType) -> bool {
+    let Some(tensor) = model.tensor_named(name) else {
+        return false;
+    };
+    let Some(metadata) = tensor.metadata() else {
+        return false;
+    };
+    metadata.tensor_type() == kind
+        && usize::try_from(metadata.dimension_count()).ok() == Some(dims.len())
+        && metadata.dimensions().get(..dims.len()) == Some(dims)
+        && tensor.bytes().is_some_and(|bytes| !bytes.is_empty())
+}
+
+fn has_aux_vector(model: &Data, name: &[u8], length: u64, kind: SerializedType) -> bool {
+    has_tensor(model, name, &[length], kind)
+}
+
+fn has_any_aux_vector(model: &Data, name: &[u8], length: u64) -> bool {
+    has_aux_vector(model, name, length, SerializedType::Q8_0)
+        || has_aux_vector(model, name, length, SerializedType::F32)
+}
+
+fn has_any_aux_position_matrix(model: &Data, name: &[u8]) -> bool {
+    has_tensor(model, name, &[384, 1500], SerializedType::Q8_0)
+        || has_tensor(model, name, &[384, 1500], SerializedType::F32)
+}
+
+fn has_encoder_block(
+    model: &Data,
+    block: usize,
+    linear: SerializedType,
+    aux: SerializedType,
+) -> bool {
+    let mut prefix = [0_u8; 64];
+    let base = b"model.encoder.layers.";
+    let mut used = base.len();
+    prefix[..used].copy_from_slice(base);
+    let mut digits = [0_u8; 20];
+    let mut value = block;
+    let mut count = 0;
+    loop {
+        digits[count] = b'0'
+            + u8::try_from(value % 10)
+                .expect("decimal digit conversion is bounded to zero through nine");
+        count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    while count != 0 {
+        count -= 1;
+        prefix[used] = digits[count];
+        used += 1;
+    }
+    prefix[used] = b'.';
+    used += 1;
+    let mut has = |suffix: &[u8], dims: &[u64], kind: SerializedType| {
+        let end = used + suffix.len();
+        if end > prefix.len() {
+            return false;
+        }
+        prefix[used..end].copy_from_slice(suffix);
+        has_tensor(model, &prefix[..end], dims, kind)
+    };
+    has(b"self_attn.k_proj.weight", &[384, 384], linear)
+        && has(b"self_attn.v_proj.weight", &[384, 384], linear)
+        && has(b"self_attn.v_proj.bias", &[384], aux)
+        && has(b"self_attn.q_proj.weight", &[384, 384], linear)
+        && has(b"self_attn.q_proj.bias", &[384], aux)
+        && has(b"self_attn.out_proj.weight", &[384, 384], linear)
+        && has(b"self_attn.out_proj.bias", &[384], aux)
+        && has(b"self_attn_layer_norm.weight", &[384], aux)
+        && has(b"self_attn_layer_norm.bias", &[384], aux)
+        && has(b"fc1.weight", &[384, 1536], linear)
+        && has(b"fc1.bias", &[1536], aux)
+        && has(b"fc2.weight", &[1536, 384], linear)
+        && has(b"fc2.bias", &[384], aux)
+        && has(b"final_layer_norm.weight", &[384], aux)
+        && has(b"final_layer_norm.bias", &[384], aux)
+}
+
+fn model_base_valid(model: &Data) -> bool {
+    has_tensor(model, b"mel_filters", &[201, 80], SerializedType::F32)
+        && has_tensor(
+            model,
+            b"model.encoder.conv1.weight",
+            &[3, 80, 384],
+            SerializedType::F16,
+        )
+        && has_any_aux_vector(model, b"model.encoder.conv1.bias", 384)
+        && has_tensor(
+            model,
+            b"model.encoder.conv2.weight",
+            &[3, 384, 384],
+            SerializedType::F16,
+        )
+        && has_any_aux_vector(model, b"model.encoder.conv2.bias", 384)
+        && has_any_aux_position_matrix(model, b"model.encoder.embed_positions.weight")
+        && has_any_aux_vector(model, b"model.encoder.layer_norm.weight", 384)
+        && has_any_aux_vector(model, b"model.encoder.layer_norm.bias", 384)
+}
+
+fn model_variant(model: &Data) -> WeightVariant {
+    let all = |linear, aux| (0..4).all(|block| has_encoder_block(model, block, linear, aux));
+    if all(SerializedType::Q8_0, SerializedType::F32) {
+        WeightVariant::Q8_0F32Aux
+    } else if all(SerializedType::Q8_0, SerializedType::Q8_0) {
+        WeightVariant::Q8_0
+    } else if all(SerializedType::Q4_0, SerializedType::Q8_0) {
+        WeightVariant::Q4_0
+    } else if all(SerializedType::Q4_1, SerializedType::Q8_0) {
+        WeightVariant::Q4_1
+    } else {
+        WeightVariant::Unsupported
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn model_contract_valid(event: &EventEncodeRun<'_>) -> bool {
+    let Some(model) = event.model else {
+        return false;
+    };
+    event.contract == &ExecutionContract::bind_model(model)
+        && event.contract.model_present
+        && model.architecture_name() == b"whisper"
+        && event.contract.sample_rate == SAMPLE_RATE
+        && event.contract.mel_bin_count == MEL_BIN_COUNT
+        && event.contract.embedding_length == EMBEDDING_LENGTH
+        && event.contract.feed_forward_length == FEED_FORWARD_LENGTH
+        && event.contract.attention_head_count == ATTENTION_HEAD_COUNT
+        && event.contract.encoder_block_count == ENCODER_BLOCK_COUNT
+        && model_base_valid(model)
+}
+
 sml! {
-    SpeechEncoderWhisper<'dispatch> {
-        "state_model_contract_decision"_s <= *"state_ready"_s + event<&'dispatch EventEncodeRun> / effect_begin_encode,
-        "state_sample_rate_decision"_s <= "state_model_contract_decision"_s + completion<&'dispatch EventEncodeRun> [guard_model_contract_valid],
-        "state_error_error_out_decision"_s <= "state_model_contract_decision"_s + completion<&'dispatch EventEncodeRun> [guard_model_contract_invalid] / effect_mark_model_invalid,
-        "state_channel_count_decision"_s <= "state_sample_rate_decision"_s + completion<&'dispatch EventEncodeRun> [guard_sample_rate_valid],
-        "state_error_error_out_decision"_s <= "state_sample_rate_decision"_s + completion<&'dispatch EventEncodeRun> [guard_sample_rate_invalid] / effect_mark_sample_rate_invalid,
-        "state_pcm_shape_decision"_s <= "state_channel_count_decision"_s + completion<&'dispatch EventEncodeRun> [guard_channel_count_valid],
-        "state_error_error_out_decision"_s <= "state_channel_count_decision"_s + completion<&'dispatch EventEncodeRun> [guard_channel_count_invalid] / effect_mark_channel_count_invalid,
-        "state_output_capacity_decision"_s <= "state_pcm_shape_decision"_s + completion<&'dispatch EventEncodeRun> [guard_pcm_shape_valid],
-        "state_error_error_out_decision"_s <= "state_pcm_shape_decision"_s + completion<&'dispatch EventEncodeRun> [guard_pcm_shape_invalid] / effect_mark_pcm_shape_invalid,
-        "state_workspace_capacity_decision"_s <= "state_output_capacity_decision"_s + completion<&'dispatch EventEncodeRun> [guard_output_capacity_valid],
-        "state_error_error_out_decision"_s <= "state_output_capacity_decision"_s + completion<&'dispatch EventEncodeRun> [guard_output_capacity_invalid] / effect_mark_output_capacity_invalid,
-        "state_variant_decision"_s <= "state_workspace_capacity_decision"_s + completion<&'dispatch EventEncodeRun> [guard_workspace_capacity_valid],
-        "state_error_error_out_decision"_s <= "state_workspace_capacity_decision"_s + completion<&'dispatch EventEncodeRun> [guard_workspace_capacity_invalid] / effect_mark_workspace_capacity_invalid,
-        "state_running_q8_0_f32_aux"_s <= "state_variant_decision"_s + completion<&'dispatch EventEncodeRun> [guard_q8_0_f32_aux_variant] / effect_run_encoder_q8_0_f32_aux,
-        "state_running_q8_0"_s <= "state_variant_decision"_s + completion<&'dispatch EventEncodeRun> [guard_q8_0_variant] / effect_run_encoder_q8_0,
-        "state_running_q4_0"_s <= "state_variant_decision"_s + completion<&'dispatch EventEncodeRun> [guard_q4_0_variant] / effect_run_encoder_q4_0,
-        "state_running_q4_1"_s <= "state_variant_decision"_s + completion<&'dispatch EventEncodeRun> [guard_q4_1_variant] / effect_run_encoder_q4_1,
-        "state_error_error_out_decision"_s <= "state_variant_decision"_s + completion<&'dispatch EventEncodeRun> [guard_unsupported_variant] / effect_mark_unsupported_variant,
-        "state_success_error_out_decision"_s <= "state_running_q8_0_f32_aux"_s + completion<&'dispatch EventEncodeRun>,
-        "state_success_error_out_decision"_s <= "state_running_q8_0"_s + completion<&'dispatch EventEncodeRun>,
-        "state_success_error_out_decision"_s <= "state_running_q4_0"_s + completion<&'dispatch EventEncodeRun>,
-        "state_success_error_out_decision"_s <= "state_running_q4_1"_s + completion<&'dispatch EventEncodeRun>,
-        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<&'dispatch EventEncodeRun> [guard_has_error_out] / effect_store_success_error,
-        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<&'dispatch EventEncodeRun> [guard_no_error_out],
-        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<&'dispatch EventEncodeRun> [guard_has_error_out] / effect_store_error_error,
-        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<&'dispatch EventEncodeRun> [guard_no_error_out],
-        "state_done"_s <= "state_success_callback_decision"_s + completion<&'dispatch EventEncodeRun> [guard_has_done_callback] / effect_emit_done,
-        "state_done"_s <= "state_success_callback_decision"_s + completion<&'dispatch EventEncodeRun> [guard_no_done_callback],
-        "state_errored"_s <= "state_error_callback_decision"_s + completion<&'dispatch EventEncodeRun> [guard_has_error_callback] / effect_emit_error,
-        "state_errored"_s <= "state_error_callback_decision"_s + completion<&'dispatch EventEncodeRun> [guard_no_error_callback],
-        "state_ready"_s <= "state_done"_s + completion<&'dispatch EventEncodeRun>,
-        "state_ready"_s <= "state_errored"_s + completion<&'dispatch EventEncodeRun>,
+    SpeechEncoderWhisper<'dispatch, 'event>
+    where
+        'event: 'dispatch,
+    {
+        "state_model_contract_decision"_s <= *"state_ready"_s + EventEncodeRun(&'dispatch EventEncodeRun<'event>) / effect_begin_encode,
+        "state_sample_rate_decision"_s <= "state_model_contract_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_model_contract_valid],
+        "state_error_error_out_decision"_s <= "state_model_contract_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_model_contract_invalid] / effect_mark_model_invalid,
+        "state_channel_count_decision"_s <= "state_sample_rate_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_sample_rate_valid],
+        "state_error_error_out_decision"_s <= "state_sample_rate_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_sample_rate_invalid] / effect_mark_sample_rate_invalid,
+        "state_pcm_shape_decision"_s <= "state_channel_count_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_channel_count_valid],
+        "state_error_error_out_decision"_s <= "state_channel_count_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_channel_count_invalid] / effect_mark_channel_count_invalid,
+        "state_output_capacity_decision"_s <= "state_pcm_shape_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_pcm_shape_valid],
+        "state_error_error_out_decision"_s <= "state_pcm_shape_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_pcm_shape_invalid] / effect_mark_pcm_shape_invalid,
+        "state_workspace_capacity_decision"_s <= "state_output_capacity_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_output_capacity_valid],
+        "state_error_error_out_decision"_s <= "state_output_capacity_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_output_capacity_invalid] / effect_mark_output_capacity_invalid,
+        "state_variant_decision"_s <= "state_workspace_capacity_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_workspace_capacity_valid],
+        "state_error_error_out_decision"_s <= "state_workspace_capacity_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_workspace_capacity_invalid] / effect_mark_workspace_capacity_invalid,
+        "state_running_q8_0_f32_aux"_s <= "state_variant_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_q8_0_f32_aux_variant] / effect_run_encoder_q8_0_f32_aux,
+        "state_running_q8_0"_s <= "state_variant_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_q8_0_variant] / effect_run_encoder_q8_0,
+        "state_running_q4_0"_s <= "state_variant_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_q4_0_variant] / effect_run_encoder_q4_0,
+        "state_running_q4_1"_s <= "state_variant_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_q4_1_variant] / effect_run_encoder_q4_1,
+        "state_error_error_out_decision"_s <= "state_variant_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_unsupported_variant] / effect_mark_unsupported_variant,
+        "state_success_error_out_decision"_s <= "state_running_q8_0_f32_aux"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_success],
+        "state_success_error_out_decision"_s <= "state_running_q8_0"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_success],
+        "state_success_error_out_decision"_s <= "state_running_q4_0"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_success],
+        "state_success_error_out_decision"_s <= "state_running_q4_1"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_success],
+        "state_error_error_out_decision"_s <= "state_running_q8_0_f32_aux"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_failure] / effect_mark_internal_error,
+        "state_error_error_out_decision"_s <= "state_running_q8_0"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_failure] / effect_mark_internal_error,
+        "state_error_error_out_decision"_s <= "state_running_q4_0"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_failure] / effect_mark_internal_error,
+        "state_error_error_out_decision"_s <= "state_running_q4_1"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_encoder_failure] / effect_mark_internal_error,
+        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_has_error_out] / effect_store_success_error,
+        "state_success_callback_decision"_s <= "state_success_error_out_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_no_error_out],
+        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_has_error_out] / effect_store_error_error,
+        "state_error_callback_decision"_s <= "state_error_error_out_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_no_error_out],
+        "state_done"_s <= "state_success_callback_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_has_done_callback] / effect_emit_done,
+        "state_done"_s <= "state_success_callback_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_no_done_callback],
+        "state_errored"_s <= "state_error_callback_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_has_error_callback] / effect_emit_error,
+        "state_errored"_s <= "state_error_callback_decision"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>) [guard_no_error_callback],
+        "state_ready"_s <= "state_done"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>),
+        "state_ready"_s <= "state_errored"_s + completion<EventEncodeRun>(&'dispatch EventEncodeRun<'event>),
         "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected_from_state_ready,
         "state_ready"_s <= "state_model_contract_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_model_contract_decision,
         "state_ready"_s <= "state_sample_rate_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_sample_rate_decision,
@@ -415,202 +581,957 @@ pub struct SpeechEncoderWhisperContext {
     pub q4_1_dispatch_count: u64,
 }
 
-impl SpeechEncoderWhisperStateMachineContext for SpeechEncoderWhisperContext {
-    fn effect_begin_encode(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        self.err = Error::None;
-        *event.frame_count_out.borrow_mut() = 0;
-        *event.width_out.borrow_mut() = 0;
-        *event.digest_out.borrow_mut() = 0;
-        Ok(())
-    }
+impl SpeechEncoderWhisperContext {
+    #[allow(
+        clippy::unnecessary_wraps,
+        reason = "the SML effect boundary requires Result<(), ()> callbacks"
+    )]
+    fn run_encoder<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+        variant: WeightVariant,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        let required_output = required_encoder_output_floats(event.pcm.len());
+        let required_workspace = required_workspace_floats(event.pcm.len());
+        let Some(model) = event.model else {
+            self.err = Error::ModelInvalid;
+            return Ok(());
+        };
+        let mut workspace = event.workspace.borrow_mut();
+        let mut output = event.encoder_state.borrow_mut();
+        let Ok((frame_count, digest)) = detail::run(
+            model,
+            variant,
+            event.pcm,
+            &mut workspace[..required_workspace],
+            &mut output[..required_output],
+        ) else {
+            self.err = Error::InternalError;
+            return Ok(());
+        };
+        **event.frame_count_out.borrow_mut() = frame_count;
+        **event.width_out.borrow_mut() = EMBEDDING_LENGTH;
+        **event.digest_out.borrow_mut() = digest;
 
-    fn effect_emit_done(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        if let Some(callback) = event.on_done {
-            let _ = callback(EncodeDone {
-                frame_count: *event.frame_count_out.borrow(),
-                width: *event.width_out.borrow(),
-                digest: *event.digest_out.borrow(),
-            });
+        #[cfg(test)]
+        #[allow(clippy::items_after_statements)]
+        mod tests {
+            use super::{
+                HOP_LENGTH, MAX_MEL_FRAME_COUNT, MAX_PCM_SAMPLE_COUNT, encoder_frame_count,
+                mel_frame_count, required_encoder_output_floats,
+            };
+
+            #[test]
+            fn mel_frames_are_clamped_to_the_pinned_limit() {
+                assert_eq!(mel_frame_count(16_000), 100);
+                assert_eq!(mel_frame_count(MAX_PCM_SAMPLE_COUNT), MAX_MEL_FRAME_COUNT);
+                assert_eq!(
+                    mel_frame_count(MAX_PCM_SAMPLE_COUNT + HOP_LENGTH),
+                    MAX_MEL_FRAME_COUNT
+                );
+            }
+
+            #[test]
+            fn derived_encoder_capacity_uses_clamped_mel_frames() {
+                assert_eq!(encoder_frame_count(MAX_PCM_SAMPLE_COUNT), 1_500);
+                assert_eq!(
+                    required_encoder_output_floats(MAX_PCM_SAMPLE_COUNT),
+                    1_500 * super::EMBEDDING_LENGTH as usize
+                );
+                assert_eq!(
+                    required_encoder_output_floats(MAX_PCM_SAMPLE_COUNT + HOP_LENGTH),
+                    required_encoder_output_floats(MAX_PCM_SAMPLE_COUNT)
+                );
+            }
+        }
+        self.err = Error::None;
+        match variant {
+            WeightVariant::Q8_0F32Aux | WeightVariant::Q8_0 => {
+                self.q8_0_dispatch_count = self.q8_0_dispatch_count.saturating_add(1);
+            }
+            WeightVariant::Q4_0 => {
+                self.q4_0_dispatch_count = self.q4_0_dispatch_count.saturating_add(1);
+            }
+            WeightVariant::Q4_1 => {
+                self.q4_1_dispatch_count = self.q4_1_dispatch_count.saturating_add(1);
+            }
+            WeightVariant::Unsupported => {}
         }
         Ok(())
     }
+}
 
-    fn effect_emit_error(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
+impl SpeechEncoderWhisperStateMachineContext for SpeechEncoderWhisperContext {
+    fn effect_begin_encode<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::None;
+        **event.frame_count_out.borrow_mut() = 0;
+        **event.width_out.borrow_mut() = 0;
+        **event.digest_out.borrow_mut() = 0;
+        Ok(())
+    }
+    fn effect_emit_done<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        if let Some(callback) = event.on_done
+            && !callback(EncodeDone {
+                frame_count: **event.frame_count_out.borrow(),
+                width: **event.width_out.borrow(),
+                digest: **event.digest_out.borrow(),
+            })
+        {
+            self.err = Error::InternalError;
+        }
+        Ok(())
+    }
+    fn effect_emit_error<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
         if let Some(callback) = event.on_error {
             let _ = callback(EncodeError { error: self.err });
         }
         Ok(())
     }
-
-    fn effect_mark_model_invalid(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::ModelInvalid; Ok(()) }
-    fn effect_mark_sample_rate_invalid(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::SampleRate; Ok(()) }
-    fn effect_mark_channel_count_invalid(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::ChannelCount; Ok(()) }
-    fn effect_mark_pcm_shape_invalid(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::PcmShape; Ok(()) }
-    fn effect_mark_output_capacity_invalid(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::OutputCapacity; Ok(()) }
-    fn effect_mark_workspace_capacity_invalid(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::WorkspaceCapacity; Ok(()) }
-    fn effect_mark_unsupported_variant(&mut self, _: &EventEncodeRun) -> Result<(), ()> { self.err = Error::UnsupportedVariant; Ok(()) }
-
-    fn effect_run_encoder_q8_0_f32_aux(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        let Some(encoder) = event.contract.encoder else { self.err = Error::InternalError; return Ok(()); };
-        let required_output = required_encoder_output_floats(event.pcm.len());
-        let required_workspace = required_workspace_floats(event.pcm.len());
-        let mut workspace = event.workspace.borrow_mut();
-        let mut output = event.encoder_state.borrow_mut();
-        let Some((frame_count, digest)) = encoder(event.pcm, event.contract, &mut workspace[..required_workspace], &mut output[..required_output]) else { self.err = Error::InternalError; return Ok(()); };
-        if !(0..=MAX_ENCODER_FRAME_COUNT as i32).contains(&frame_count) { self.err = Error::InternalError; return Ok(()); }
-        *event.frame_count_out.borrow_mut() = frame_count;
-        *event.width_out.borrow_mut() = EMBEDDING_LENGTH;
-        *event.digest_out.borrow_mut() = digest;
-        self.err = Error::None;
-        self.q8_0_dispatch_count += 1;
+    fn effect_mark_model_invalid<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::ModelInvalid;
         Ok(())
     }
-
-    fn effect_run_encoder_q8_0(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        let Some(encoder) = event.contract.encoder else { self.err = Error::InternalError; return Ok(()); };
-        let required_output = required_encoder_output_floats(event.pcm.len());
-        let required_workspace = required_workspace_floats(event.pcm.len());
-        let mut workspace = event.workspace.borrow_mut();
-        let mut output = event.encoder_state.borrow_mut();
-        let Some((frame_count, digest)) = encoder(event.pcm, event.contract, &mut workspace[..required_workspace], &mut output[..required_output]) else { self.err = Error::InternalError; return Ok(()); };
-        if !(0..=MAX_ENCODER_FRAME_COUNT as i32).contains(&frame_count) { self.err = Error::InternalError; return Ok(()); }
-        *event.frame_count_out.borrow_mut() = frame_count;
-        *event.width_out.borrow_mut() = EMBEDDING_LENGTH;
-        *event.digest_out.borrow_mut() = digest;
-        self.err = Error::None;
-        self.q8_0_dispatch_count += 1;
+    fn effect_mark_sample_rate_invalid<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::SampleRate;
         Ok(())
     }
-
-    fn effect_run_encoder_q4_0(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        let Some(encoder) = event.contract.encoder else { self.err = Error::InternalError; return Ok(()); };
-        let required_output = required_encoder_output_floats(event.pcm.len());
-        let required_workspace = required_workspace_floats(event.pcm.len());
-        let mut workspace = event.workspace.borrow_mut();
-        let mut output = event.encoder_state.borrow_mut();
-        let Some((frame_count, digest)) = encoder(event.pcm, event.contract, &mut workspace[..required_workspace], &mut output[..required_output]) else { self.err = Error::InternalError; return Ok(()); };
-        if !(0..=MAX_ENCODER_FRAME_COUNT as i32).contains(&frame_count) { self.err = Error::InternalError; return Ok(()); }
-        *event.frame_count_out.borrow_mut() = frame_count;
-        *event.width_out.borrow_mut() = EMBEDDING_LENGTH;
-        *event.digest_out.borrow_mut() = digest;
-        self.err = Error::None;
-        self.q4_0_dispatch_count += 1;
+    fn effect_mark_channel_count_invalid<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::ChannelCount;
         Ok(())
     }
-
-    fn effect_run_encoder_q4_1(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        let Some(encoder) = event.contract.encoder else { self.err = Error::InternalError; return Ok(()); };
-        let required_output = required_encoder_output_floats(event.pcm.len());
-        let required_workspace = required_workspace_floats(event.pcm.len());
-        let mut workspace = event.workspace.borrow_mut();
-        let mut output = event.encoder_state.borrow_mut();
-        let Some((frame_count, digest)) = encoder(event.pcm, event.contract, &mut workspace[..required_workspace], &mut output[..required_output]) else { self.err = Error::InternalError; return Ok(()); };
-        if !(0..=MAX_ENCODER_FRAME_COUNT as i32).contains(&frame_count) { self.err = Error::InternalError; return Ok(()); }
-        *event.frame_count_out.borrow_mut() = frame_count;
-        *event.width_out.borrow_mut() = EMBEDDING_LENGTH;
-        *event.digest_out.borrow_mut() = digest;
-        self.err = Error::None;
-        self.q4_1_dispatch_count += 1;
+    fn effect_mark_pcm_shape_invalid<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::PcmShape;
         Ok(())
     }
-
-
-    fn effect_store_success_error(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        if let Some(error_out) = event.error_out.borrow_mut().as_deref_mut() { *error_out = self.err; }
+    fn effect_mark_output_capacity_invalid<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::OutputCapacity;
         Ok(())
     }
-    fn effect_store_error_error(&mut self, event: &EventEncodeRun) -> Result<(), ()> {
-        if let Some(error_out) = event.error_out.borrow_mut().as_deref_mut() { *error_out = self.err; }
+    fn effect_mark_workspace_capacity_invalid<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::WorkspaceCapacity;
         Ok(())
     }
-
-    fn guard_model_contract_valid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.contract.model_contract_valid()) }
-    fn guard_model_contract_invalid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(!event.contract.model_contract_valid()) }
-    fn guard_sample_rate_valid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.sample_rate == SAMPLE_RATE) }
-    fn guard_sample_rate_invalid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.sample_rate != SAMPLE_RATE) }
-    fn guard_channel_count_valid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.channel_count == CHANNEL_COUNT) }
-    fn guard_channel_count_invalid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.channel_count != CHANNEL_COUNT) }
-    fn guard_pcm_shape_valid(&self, event: &EventEncodeRun) -> Result<bool, ()> {
-        Ok(!event.pcm.is_empty() && event.pcm.len() <= MAX_PCM_SAMPLE_COUNT && event.pcm.iter().all(|value| value.is_finite()))
+    fn effect_mark_unsupported_variant<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::UnsupportedVariant;
+        Ok(())
     }
-    fn guard_pcm_shape_invalid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(!self.guard_pcm_shape_valid(event)?) }
-    fn guard_output_capacity_valid(&self, event: &EventEncodeRun) -> Result<bool, ()> {
+    fn effect_mark_internal_error<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.err = Error::InternalError;
+        Ok(())
+    }
+    fn effect_run_encoder_q8_0_f32_aux<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.run_encoder(event, WeightVariant::Q8_0F32Aux)
+    }
+    fn effect_run_encoder_q8_0<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.run_encoder(event, WeightVariant::Q8_0)
+    }
+    fn effect_run_encoder_q4_0<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.run_encoder(event, WeightVariant::Q4_0)
+    }
+    fn effect_run_encoder_q4_1<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.run_encoder(event, WeightVariant::Q4_1)
+    }
+    fn effect_store_success_error<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        if let Some(error_out) = event.error_out.borrow_mut().as_deref_mut() {
+            *error_out = self.err;
+        }
+        Ok(())
+    }
+    fn effect_store_error_error<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        if let Some(error_out) = event.error_out.borrow_mut().as_deref_mut() {
+            *error_out = self.err;
+        }
+        Ok(())
+    }
+    fn guard_model_contract_valid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(model_contract_valid(event))
+    }
+    fn guard_model_contract_invalid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!model_contract_valid(event))
+    }
+    fn guard_sample_rate_valid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.sample_rate == SAMPLE_RATE)
+    }
+    fn guard_sample_rate_invalid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.sample_rate != SAMPLE_RATE)
+    }
+    fn guard_channel_count_valid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.channel_count == CHANNEL_COUNT)
+    }
+    fn guard_channel_count_invalid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.channel_count != CHANNEL_COUNT)
+    }
+    fn guard_pcm_shape_valid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!event.pcm.is_empty()
+            && event.pcm.len() <= MAX_PCM_SAMPLE_COUNT
+            && event.pcm.iter().all(|sample| sample.is_finite()))
+    }
+    fn guard_pcm_shape_invalid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.pcm.is_empty()
+            || event.pcm.len() > MAX_PCM_SAMPLE_COUNT
+            || event.pcm.iter().any(|sample| !sample.is_finite()))
+    }
+    fn guard_output_capacity_valid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
         Ok(event.encoder_state.borrow().len() >= required_encoder_output_floats(event.pcm.len()))
     }
-    fn guard_output_capacity_invalid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(!self.guard_output_capacity_valid(event)?) }
-    fn guard_workspace_capacity_valid(&self, event: &EventEncodeRun) -> Result<bool, ()> {
+    fn guard_output_capacity_invalid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!self.guard_output_capacity_valid(event)?)
+    }
+    fn guard_workspace_capacity_valid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
         Ok(event.workspace.borrow().len() >= required_workspace_floats(event.pcm.len()))
     }
-    fn guard_workspace_capacity_invalid(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(!self.guard_workspace_capacity_valid(event)?) }
-    fn guard_q8_0_f32_aux_variant(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.contract.assets.variant() == WeightVariant::Q8_0F32Aux) }
-    fn guard_q8_0_variant(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.contract.assets.variant() == WeightVariant::Q8_0) }
-    fn guard_q4_0_variant(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.contract.assets.variant() == WeightVariant::Q4_0) }
-    fn guard_q4_1_variant(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.contract.assets.variant() == WeightVariant::Q4_1) }
-    fn guard_unsupported_variant(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.contract.assets.variant() == WeightVariant::Unsupported) }
-    fn guard_has_error_out(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.error_out.borrow().is_some()) }
-    fn guard_no_error_out(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.error_out.borrow().is_none()) }
-    fn guard_has_done_callback(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.on_done.is_some()) }
-    fn guard_no_done_callback(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.on_done.is_none()) }
-    fn guard_has_error_callback(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.on_error.is_some()) }
-    fn guard_no_error_callback(&self, event: &EventEncodeRun) -> Result<bool, ()> { Ok(event.on_error.is_none()) }
+    fn guard_workspace_capacity_invalid<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!self.guard_workspace_capacity_valid(event)?)
+    }
+    fn guard_q8_0_f32_aux_variant<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event
+            .model
+            .is_some_and(|model| model_variant(model) == WeightVariant::Q8_0F32Aux))
+    }
+    fn guard_q8_0_variant<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event
+            .model
+            .is_some_and(|model| model_variant(model) == WeightVariant::Q8_0))
+    }
+    fn guard_q4_0_variant<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event
+            .model
+            .is_some_and(|model| model_variant(model) == WeightVariant::Q4_0))
+    }
+    fn guard_q4_1_variant<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event
+            .model
+            .is_some_and(|model| model_variant(model) == WeightVariant::Q4_1))
+    }
+    fn guard_unsupported_variant<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event
+            .model
+            .is_none_or(|model| model_variant(model) == WeightVariant::Unsupported))
+    }
+    fn guard_encoder_success<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.err == Error::None)
+    }
+    fn guard_encoder_failure<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.err != Error::None)
+    }
+    fn guard_has_error_out<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.error_out.borrow().is_some())
+    }
+    fn guard_no_error_out<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.error_out.borrow().is_none())
+    }
+    fn guard_has_done_callback<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.on_done.is_some())
+    }
+    fn guard_no_done_callback<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.on_done.is_none())
+    }
+    fn guard_has_error_callback<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.on_error.is_some())
+    }
+    fn guard_no_error_callback<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventEncodeRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.on_error.is_none())
+    }
 
-    fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_model_contract_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_sample_rate_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_channel_count_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_pcm_shape_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_output_capacity_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_workspace_capacity_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_variant_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_running_q8_0(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_running_q8_0_f32_aux(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_running_q4_0(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_running_q4_1(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_success_error_out_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_success_callback_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_error_error_out_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_error_callback_decision(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_done(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
-    fn effect_on_unexpected_from_state_errored(&mut self) -> Result<(), ()> { self.err = Error::Unexpected; Ok(()) }
+    fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_model_contract_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_sample_rate_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_channel_count_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_pcm_shape_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_output_capacity_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_workspace_capacity_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_variant_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_running_q8_0(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_running_q8_0_f32_aux(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_running_q4_0(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_running_q4_1(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_success_error_out_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_success_callback_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_error_error_out_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_error_callback_decision(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_done(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
+    fn effect_on_unexpected_from_state_errored(&mut self) -> Result<(), ()> {
+        self.err = Error::Unexpected;
+        Ok(())
+    }
 }
 
 /// Public synchronous actor wrapper around the generated state machine.
 pub struct SpeechEncoderWhisperActor {
-    machine: SpeechEncoderWhisperStateMachine<'static>,
+    machine: SpeechEncoderWhisperStateMachine<SpeechEncoderWhisperContext>,
 }
 
 impl Default for SpeechEncoderWhisperActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SpeechEncoderWhisperActor {
     #[must_use]
     pub fn new() -> Self {
-        Self { machine: SpeechEncoderWhisperStateMachine::new(SpeechEncoderWhisperContext::default()) }
+        Self {
+            machine: SpeechEncoderWhisperStateMachine::new(SpeechEncoderWhisperContext::default()),
+        }
     }
 
     /// Dispatches one borrowed request through the complete source phase graph.
-    pub fn process_event<'a>(&mut self, event: EventEncodeRun<'a>) -> bool {
-        self.machine.process_event(event).is_ok() && self.machine.context().err == Error::None
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "source-aligned API consumes the request to preserve borrow ownership"
+    )]
+    pub fn process_event(&mut self, event: EventEncodeRun<'_>) -> bool {
+        self.machine
+            .process_event(SpeechEncoderWhisperEvents::EventEncodeRun(&event))
+            .is_ok()
+            && self.machine.context().err == Error::None
     }
 
-    pub fn encode<'a>(&mut self, event: EventEncodeRun<'a>) -> bool { self.process_event(event) }
+    pub fn encode(&mut self, event: EventEncodeRun<'_>) -> bool {
+        self.process_event(event)
+    }
 
     #[must_use]
-    pub fn context(&self) -> &SpeechEncoderWhisperContext { self.machine.context() }
+    pub fn context(&self) -> &SpeechEncoderWhisperContext {
+        self.machine.context()
+    }
 
     #[must_use]
-    pub fn state(&self) -> &SpeechEncoderWhisperStates { self.machine.state() }
+    pub fn state(&self) -> &SpeechEncoderWhisperStates {
+        self.machine.state()
+    }
 
     #[must_use]
-    pub fn q8_0_dispatch_count(&self) -> u64 { self.machine.context().q8_0_dispatch_count }
+    pub fn q8_0_dispatch_count(&self) -> u64 {
+        self.machine.context().q8_0_dispatch_count
+    }
+
     #[must_use]
-    pub fn q4_0_dispatch_count(&self) -> u64 { self.machine.context().q4_0_dispatch_count }
+    pub fn q4_0_dispatch_count(&self) -> u64 {
+        self.machine.context().q4_0_dispatch_count
+    }
+
     #[must_use]
-    pub fn q4_1_dispatch_count(&self) -> u64 { self.machine.context().q4_1_dispatch_count }
+    pub fn q4_1_dispatch_count(&self) -> u64 {
+        self.machine.context().q4_1_dispatch_count
+    }
 }
 
 /// Source-compatible request actor name.
 pub type Request = SpeechEncoderWhisperActor;
 /// Direct access to the generated state-machine type.
-pub type Machine = SpeechEncoderWhisperStateMachine<'static>;
+// Scope frozen: this file only. Model-bound validation now checks exact resident
+// tensor shapes/types, variant guards inspect the supplied model, and execution
+// uses the typed kernel handoff before the legacy callback fallback. Kernel or
+// callback rejection marks InternalError, preventing success publication.
+#[cfg(test)]
+mod tests {
+    use emel_model::bridge::{
+        Data, TensorInput, TensorMetadata, TensorMetadataInput, WhisperDataInput,
+        WhisperHParamsInput,
+    };
+    use emel_tensor::dtype::SerializedType;
+
+    use super::{
+        CHANNEL_COUNT, Error, EventEncodeRun, ExecutionContract, HOP_LENGTH, MAX_MEL_FRAME_COUNT,
+        SAMPLE_RATE, SpeechEncoderWhisperActor, encoder_frame_count, mel_frame_count,
+        required_encoder_output_floats, required_workspace_floats,
+    };
+
+    #[allow(clippy::too_many_lines)]
+    fn valid_model() -> Data {
+        let mut specs = Vec::new();
+        let mut add = |name: Vec<u8>, tensor_type, dimensions, dimension_count| {
+            specs.push((name, tensor_type, dimensions, dimension_count));
+        };
+        add(
+            b"mel_filters".to_vec(),
+            SerializedType::F32,
+            [201, 80, 1, 1],
+            2,
+        );
+        add(
+            b"model.encoder.conv1.weight".to_vec(),
+            SerializedType::F16,
+            [3, 80, 384, 1],
+            3,
+        );
+        add(
+            b"model.encoder.conv1.bias".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1, 1, 1],
+            1,
+        );
+        add(
+            b"model.encoder.conv2.weight".to_vec(),
+            SerializedType::F16,
+            [3, 384, 384, 1],
+            3,
+        );
+        add(
+            b"model.encoder.conv2.bias".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1, 1, 1],
+            1,
+        );
+        add(
+            b"model.encoder.embed_positions.weight".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1500, 1, 1],
+            2,
+        );
+        add(
+            b"model.encoder.layer_norm.weight".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1, 1, 1],
+            1,
+        );
+        add(
+            b"model.encoder.layer_norm.bias".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1, 1, 1],
+            1,
+        );
+        add(
+            b"model.decoder.embed_tokens.weight".to_vec(),
+            SerializedType::Q8_0,
+            [384, 51865, 1, 1],
+            2,
+        );
+        add(
+            b"model.decoder.embed_positions.weight".to_vec(),
+            SerializedType::Q8_0,
+            [384, 448, 1, 1],
+            2,
+        );
+        add(
+            b"model.decoder.layer_norm.weight".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1, 1, 1],
+            1,
+        );
+        add(
+            b"model.decoder.layer_norm.bias".to_vec(),
+            SerializedType::Q8_0,
+            [384, 1, 1, 1],
+            1,
+        );
+        for block in 0..4 {
+            for suffix in ["q_proj.weight", "q_proj.bias"] {
+                let name = format!("model.encoder.layers.{block}.self_attn.{suffix}").into_bytes();
+                let (tensor_type, dimensions, dimension_count) = if suffix.ends_with("weight") {
+                    (SerializedType::Q4_0, [384, 384, 1, 1], 2)
+                } else {
+                    (SerializedType::Q8_0, [384, 1, 1, 1], 1)
+                };
+                add(name, tensor_type, dimensions, dimension_count);
+            }
+        }
+        for block in 0..4 {
+            for prefix in ["self_attn", "encoder_attn"] {
+                for suffix in ["q_proj.weight", "q_proj.bias"] {
+                    let name =
+                        format!("model.decoder.layers.{block}.{prefix}.{suffix}").into_bytes();
+                    let (tensor_type, dimensions, dimension_count) = if suffix.ends_with("weight") {
+                        (SerializedType::Q4_0, [384, 384, 1, 1], 2)
+                    } else {
+                        (SerializedType::Q8_0, [384, 1, 1, 1], 1)
+                    };
+                    add(name, tensor_type, dimensions, dimension_count);
+                }
+            }
+        }
+        let payloads: Vec<Vec<u8>> = specs
+            .iter()
+            .map(|(_, tensor_type, dimensions, dimension_count)| {
+                vec![
+                    0;
+                    usize::try_from(
+                        tensor_type
+                            .data_size(*dimensions, *dimension_count)
+                            .unwrap()
+                    )
+                    .unwrap()
+                ]
+            })
+            .collect();
+        let tensors: Vec<TensorInput<'_>> = specs
+            .iter()
+            .zip(payloads.iter())
+            .map(
+                |((name, tensor_type, dimensions, dimension_count), bytes)| {
+                    TensorInput::with_bytes(
+                        name,
+                        TensorMetadata::new(TensorMetadataInput {
+                            tensor_type: *tensor_type,
+                            dimension_count: *dimension_count,
+                            dimensions: *dimensions,
+                            data_offset: 0,
+                            file_offset: 0,
+                            data_size: u64::try_from(bytes.len()).unwrap(),
+                            file_index: 0,
+                            storage: None,
+                        }),
+                        bytes,
+                    )
+                },
+            )
+            .collect();
+        Data::try_from_whisper(WhisperDataInput {
+            architecture: b"whisper",
+            hparams: WhisperHParamsInput::default(),
+            tensors: &tensors,
+        })
+        .expect("complete Whisper model fixture")
+    }
+
+    #[test]
+    fn model_binding_rejects_unpopulated_data() {
+        let model = Data::try_new().expect("bounded model storage");
+        let contract = ExecutionContract::bind_model(&model);
+
+        assert!(!contract.model_present);
+        assert!(!contract.model_contract_valid());
+        assert_eq!(contract.assets.encoder_blocks, 0);
+    }
+
+    #[test]
+    fn preprocessing_frame_bounds_match_pinned_hop_and_context() {
+        assert_eq!(mel_frame_count(1), 1);
+        assert_eq!(mel_frame_count(HOP_LENGTH), 1);
+        assert_eq!(mel_frame_count(HOP_LENGTH + 1), 2);
+        assert_eq!(
+            mel_frame_count(MAX_MEL_FRAME_COUNT * HOP_LENGTH),
+            MAX_MEL_FRAME_COUNT
+        );
+        assert_eq!(encoder_frame_count(MAX_MEL_FRAME_COUNT * HOP_LENGTH), 1_500);
+    }
+
+    #[test]
+    fn public_actor_maps_non_finite_pcm_to_pcm_shape_error() {
+        let model = valid_model();
+        let contract = ExecutionContract::bind_model(&model);
+        assert!(contract.model_contract_valid());
+        let pcm = [f32::NAN];
+        let mut workspace = vec![0.0; required_workspace_floats(pcm.len())];
+        let mut encoder_state = vec![0.0; required_encoder_output_floats(pcm.len())];
+        let mut frame_count = -1;
+        let mut width = -1;
+        let mut digest = u64::MAX;
+        let mut error = Error::None;
+        let mut event = EventEncodeRun::new(
+            &contract,
+            &pcm,
+            SAMPLE_RATE,
+            CHANNEL_COUNT,
+            &mut workspace,
+            &mut encoder_state,
+            &mut frame_count,
+            &mut width,
+            &mut digest,
+        )
+        .with_model(&model);
+        event.error_out = core::cell::RefCell::new(Some(&mut error));
+
+        let mut actor = SpeechEncoderWhisperActor::new();
+        assert!(!actor.process_event(event));
+        assert_eq!(error, Error::PcmShape);
+        assert_eq!(frame_count, 0);
+        assert_eq!(width, 0);
+        assert_eq!(digest, 0);
+        assert_eq!(actor.q8_0_dispatch_count(), 0);
+        assert_eq!(actor.q4_0_dispatch_count(), 0);
+        assert_eq!(actor.q4_1_dispatch_count(), 0);
+    }
+    #[test]
+    fn forged_model_contract_is_rejected_before_native_dispatch() {
+        let model = valid_model();
+        let bound = ExecutionContract::bind_model(&model);
+        assert!(bound.model_contract_valid());
+        let mut forged = bound;
+        forged.model_present = false;
+        forged.embedding_length += 1;
+        let pcm = [0.0_f32];
+        let mut workspace = vec![0.0; required_workspace_floats(pcm.len())];
+        let mut encoder_state = vec![0.0; required_encoder_output_floats(pcm.len())];
+        let mut frame_count = -1;
+        let mut width = -1;
+        let mut digest = u64::MAX;
+        let mut error = Error::None;
+        let mut event = EventEncodeRun::new(
+            &forged,
+            &pcm,
+            SAMPLE_RATE,
+            CHANNEL_COUNT,
+            &mut workspace,
+            &mut encoder_state,
+            &mut frame_count,
+            &mut width,
+            &mut digest,
+        )
+        .with_model(&model);
+        event.error_out = core::cell::RefCell::new(Some(&mut error));
+
+        let mut actor = SpeechEncoderWhisperActor::new();
+        assert!(!actor.process_event(event));
+        assert_eq!(error, Error::ModelInvalid);
+        assert_eq!(frame_count, 0);
+        assert_eq!(width, 0);
+        assert_eq!(digest, 0);
+        assert_eq!(actor.q8_0_dispatch_count(), 0);
+        assert_eq!(actor.q4_0_dispatch_count(), 0);
+        assert_eq!(actor.q4_1_dispatch_count(), 0);
+    }
+
+    #[test]
+    fn stale_pinned_contract_is_rejected_before_native_dispatch() {
+        let model = valid_model();
+        let bound = ExecutionContract::bind_model(&model);
+        let stale = ExecutionContract::pinned();
+        assert_ne!(stale, bound);
+        let pcm = [0.0_f32];
+        let mut workspace = vec![0.0; required_workspace_floats(pcm.len())];
+        let mut encoder_state = vec![0.0; required_encoder_output_floats(pcm.len())];
+        let mut frame_count = -1;
+        let mut width = -1;
+        let mut digest = u64::MAX;
+        let mut error = Error::None;
+        let mut event = EventEncodeRun::new(
+            &stale,
+            &pcm,
+            SAMPLE_RATE,
+            CHANNEL_COUNT,
+            &mut workspace,
+            &mut encoder_state,
+            &mut frame_count,
+            &mut width,
+            &mut digest,
+        )
+        .with_model(&model);
+        event.error_out = core::cell::RefCell::new(Some(&mut error));
+
+        let mut actor = SpeechEncoderWhisperActor::new();
+        assert!(!actor.process_event(event));
+        assert_eq!(error, Error::ModelInvalid);
+        assert_eq!(frame_count, 0);
+        assert_eq!(width, 0);
+        assert_eq!(digest, 0);
+        assert_eq!(actor.q8_0_dispatch_count(), 0);
+        assert_eq!(actor.q4_0_dispatch_count(), 0);
+        assert_eq!(actor.q4_1_dispatch_count(), 0);
+    }
+
+    #[test]
+    fn matching_bound_contract_preserves_model_validation() {
+        let model = valid_model();
+        let contract = ExecutionContract::bind_model(&model);
+        assert_eq!(contract, ExecutionContract::bind_model(&model));
+        assert!(contract.model_contract_valid());
+    }
+}

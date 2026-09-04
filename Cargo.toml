@@ -88,6 +88,7 @@ emel-diarization = { path = "crates/emel-diarization", version = "0.1.0" }
 emel = { path = "crates/emel", version = "0.1.0" }
 sml = { package = "stateforward-sml", version = "=1.2.0" }
 pulp = { version = "=0.22.3", default-features = true }
+opentelemetry = { version = "=0.31.0", default-features = false, features = ["trace"] }
 
 [workspace.lints.rust]
 missing_debug_implementations = "warn"

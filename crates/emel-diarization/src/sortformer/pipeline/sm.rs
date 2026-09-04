@@ -23,12 +23,8 @@
 use super::super::encoder::feature_extractor::{
     Error as NativeFeatureExtractorError, Route as NativeFeatureExtractorRoute,
 };
-use super::super::executor::native_projection::{
-    Error as NativeProjectionError, Route as NativeProjectionRoute,
-};
-use super::super::executor::native_transformer::{
-    Error as NativeTransformerError, Route as NativeTransformerRoute,
-};
+use super::super::executor::native_projection::Route as NativeProjectionRoute;
+use super::super::executor::native_transformer::Route as NativeTransformerRoute;
 use super::super::{NativeOutputError, NativeOutputRoute};
 use core::cell::RefCell;
 use sml::sml;
@@ -158,9 +154,13 @@ impl PipelineContract {
             && self.sample_rate == SAMPLE_RATE
             && self.speaker_count == SPEAKER_COUNT
             && self.chunk_len == CHUNK_LEN
+            && self.feature_extractor_ready
             && self.feature_extractor_tensors != 0
+            && self.encoder_ready
             && self.encoder_tensors != 0
+            && self.modules_ready
             && self.modules_tensors != 0
+            && self.transformer_encoder_ready
             && self.transformer_encoder_tensors != 0
     }
 }
@@ -201,6 +201,7 @@ pub struct EventRunFlow<'a> {
     pub probability_count_out: RefCell<&'a mut i32>,
     pub segment_count_out: RefCell<&'a mut i32>,
     pub error_out: RefCell<&'a mut PipelineError>,
+    pub(crate) extraction_outcome: RefCell<Option<Result<(), NativeFeatureExtractorError>>>,
     /// Caller-owned native feature-extractor route and reusable workspace.
     pub native_feature_extractor_route: RefCell<Option<&'a mut NativeFeatureExtractorRoute<'a>>>,
     /// Caller-owned native encoder-projection route and reusable workspace.
@@ -250,6 +251,7 @@ impl<'a> EventRunFlow<'a> {
             native_output_route: RefCell::new(None),
             on_done: None,
             on_error: None,
+            extraction_outcome: RefCell::new(None),
         }
     }
     #[must_use]
@@ -319,7 +321,13 @@ sml! {
         "state_publish_error"_s <= "state_segment_capacity_decision"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_segment_capacity_invalid] / effect_mark_segment_capacity_invalid,
         "state_preparing_features"_s <= "state_tensor_contract_decision"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_tensor_contract_valid],
         "state_publish_error"_s <= "state_tensor_contract_decision"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_tensor_contract_invalid] / effect_mark_tensor_contract_invalid,
-        "state_prepare_decision"_s <= "state_preparing_features"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) / effect_prepare_features,
+        "state_native_feature_extracting"_s <= "state_preparing_features"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_native_feature_extractor_route] / effect_prepare_features_native,
+        "state_callback_feature_extracting"_s <= "state_preparing_features"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_callback_feature_extractor_route] / effect_prepare_features_callback,
+        "state_publish_error"_s <= "state_preparing_features"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_feature_extractor_route_missing] / effect_mark_feature_extractor_missing,
+        "state_prepare_decision"_s <= "state_native_feature_extracting"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_native_extraction_succeeded],
+        "state_publish_error"_s <= "state_native_feature_extracting"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_native_extraction_failed] / effect_mark_native_extraction_failed,
+        "state_prepare_decision"_s <= "state_callback_feature_extracting"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_no_error],
+        "state_publish_error"_s <= "state_callback_feature_extracting"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_has_error],
         "state_binding_encoder"_s <= "state_prepare_decision"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_no_error],
         "state_publish_error"_s <= "state_prepare_decision"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) [guard_has_error],
         "state_computing_encoder"_s <= "state_binding_encoder"_s + completion<EventRunFlow>(&'dispatch EventRunFlow<'event>) / effect_bind_encoder,
@@ -351,6 +359,8 @@ sml! {
         "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_on_unexpected_from_state_ready,
         "state_ready"_s <= "state_model_contract_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_model_contract_decision,
         "state_ready"_s <= "state_sample_rate_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_sample_rate_decision,
+        "state_ready"_s <= "state_native_feature_extracting"_s + unexpected_event<_> / effect_on_unexpected_from_state_native_feature_extracting,
+        "state_ready"_s <= "state_callback_feature_extracting"_s + unexpected_event<_> / effect_on_unexpected_from_state_callback_feature_extracting,
         "state_ready"_s <= "state_channel_count_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_channel_count_decision,
         "state_ready"_s <= "state_pcm_shape_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_pcm_shape_decision,
         "state_ready"_s <= "state_probability_capacity_decision"_s + unexpected_event<_> / effect_on_unexpected_from_state_probability_capacity_decision,
@@ -408,6 +418,7 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
     where
         'event: 'dispatch,
     {
+        *event.extraction_outcome.borrow_mut() = None;
         self.err = PipelineError::None;
         self.encoder_bound = false;
         self.modules_bound = false;
@@ -476,11 +487,14 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
             return Ok(());
         };
         let mut output = event.probabilities.borrow_mut();
-        if !compute(
+        let success = compute(
             &event.hidden.borrow()[..REQUIRED_HIDDEN_VALUE_COUNT],
             event.contract,
             &mut output[..REQUIRED_PROBABILITY_VALUE_COUNT],
-        ) {
+        );
+        **event.probability_count_out.borrow_mut() =
+            REQUIRED_PROBABILITY_VALUE_COUNT_I32 * i32::from(success);
+        if !success {
             self.err = PipelineError::Kernel;
         }
         Ok(())
@@ -818,7 +832,35 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
     {
         self.mark(PipelineError::SegmentCapacity)
     }
-    fn effect_prepare_features<'dispatch, 'event>(
+    fn effect_prepare_features_native<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventRunFlow<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        let route = event
+            .native_feature_extractor_route
+            .take()
+            .expect("native feature extractor route required by guard");
+        let extraction = {
+            let mut features = event.features.borrow_mut();
+            route.extract(event.pcm, &mut features[..REQUIRED_FEATURE_COUNT])
+        };
+        event.native_feature_extractor_route.replace(Some(route));
+        *event.extraction_outcome.borrow_mut() = Some(extraction);
+        Ok(())
+    }
+    fn effect_mark_native_extraction_failed<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventRunFlow<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.mark(PipelineError::Request)
+    }
+    fn effect_prepare_features_callback<'dispatch, 'event>(
         &mut self,
         event: &'dispatch EventRunFlow<'event>,
     ) -> Result<(), ()>
@@ -838,6 +880,15 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
             self.err = PipelineError::Request;
         }
         Ok(())
+    }
+    fn effect_mark_feature_extractor_missing<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventRunFlow<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.mark(PipelineError::Request)
     }
     fn effect_publish_error<'dispatch, 'event>(
         &mut self,
@@ -868,6 +919,59 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
             });
         }
         Ok(())
+    }
+    fn guard_native_feature_extractor_route<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventRunFlow<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.native_feature_extractor_route.borrow().is_some())
+    }
+    fn guard_native_extraction_succeeded<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventRunFlow<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(matches!(
+            event.extraction_outcome.borrow().as_ref(),
+            Some(Ok(()))
+        ))
+    }
+    fn guard_native_extraction_failed<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventRunFlow<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(matches!(
+            event.extraction_outcome.borrow().as_ref(),
+            Some(Err(_))
+        ))
+    }
+    fn guard_callback_feature_extractor_route<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventRunFlow<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.native_feature_extractor_route.borrow().is_none()
+            && event.contract.extract_features.is_some())
+    }
+    fn guard_feature_extractor_route_missing<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventRunFlow<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.native_feature_extractor_route.borrow().is_none()
+            && event.contract.extract_features.is_none())
     }
     fn guard_feature_capacity_valid<'dispatch, 'event>(
         &self,
@@ -1110,6 +1214,12 @@ impl DiarizationSortformerPipelineStateMachineContext for DiarizationSortformerP
     }
 
     #[allow(clippy::unnecessary_wraps)]
+    fn effect_on_unexpected_from_state_native_feature_extracting(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_callback_feature_extracting(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
     fn effect_on_unexpected_from_state_binding_encoder(&mut self) -> Result<(), ()> {
         self.unexpected()
     }
@@ -1219,65 +1329,10 @@ impl DiarizationSortformerPipeline {
             ),
         }
     }
-    pub fn run(&mut self, event: EventRunFlow<'_>) -> Result<(), PipelineError> {
-        let EventRunFlow {
-            contract,
-            pcm,
-            sample_rate,
-            channel_count,
-            features,
-            encoder_frames,
-            hidden,
-            probabilities,
-            segments,
-            frame_count_out,
-            probability_count_out,
-            segment_count_out,
-            error_out,
-            native_feature_extractor_route,
-            native_projection_route,
-            native_transformer_route,
-            on_done,
-            on_error,
-            native_output_route,
-        } = event;
-        let features = features.into_inner();
-        let encoder_frames = encoder_frames.into_inner();
-        let hidden = hidden.into_inner();
-        let probabilities = probabilities.into_inner();
-        let segments = segments.into_inner();
-        let frame_count_out = frame_count_out.into_inner();
-        let probability_count_out = probability_count_out.into_inner();
-        let segment_count_out = segment_count_out.into_inner();
-        let error_out = error_out.into_inner();
-        let native_feature_extractor_route = native_feature_extractor_route.into_inner();
-        let native_projection_route = native_projection_route.into_inner();
-        let native_transformer_route = native_transformer_route.into_inner();
-        let native_output_route = native_output_route.into_inner();
-        let event = EventRunFlow {
-            contract,
-            pcm,
-            sample_rate,
-            channel_count,
-            features: RefCell::new(features),
-            encoder_frames: RefCell::new(encoder_frames),
-            hidden: RefCell::new(hidden),
-            probabilities: RefCell::new(probabilities),
-            segments: RefCell::new(segments),
-            frame_count_out: RefCell::new(frame_count_out),
-            probability_count_out: RefCell::new(probability_count_out),
-            segment_count_out: RefCell::new(segment_count_out),
-            error_out: RefCell::new(error_out),
-            native_feature_extractor_route: RefCell::new(native_feature_extractor_route),
-            native_projection_route: RefCell::new(native_projection_route),
-            native_transformer_route: RefCell::new(native_transformer_route),
-            on_done,
-            on_error,
-            native_output_route: RefCell::new(native_output_route),
-        };
+    pub fn run(&mut self, event: &mut EventRunFlow<'_>) -> Result<(), PipelineError> {
         if self
             .machine
-            .process_event(DiarizationSortformerPipelineEvents::EventRunFlow(&event))
+            .process_event(DiarizationSortformerPipelineEvents::EventRunFlow(&*event))
             .is_err()
         {
             self.machine.context_mut().err = PipelineError::Unexpected;
@@ -1312,9 +1367,213 @@ impl DiarizationSortformerPipeline {
             .is(&DiarizationSortformerPipelineStates::StateReady)
     }
 
-    #[must_use]
     pub fn context(&self) -> &DiarizationSortformerPipelineContext {
         self.machine.context()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sortformer::encoder::feature_extractor::{
+        Binding as NativeFeatureExtractorBinding, Route as NativeFeatureExtractorRoute,
+        Workspace as NativeFeatureExtractorWorkspace,
+    };
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static NATIVE_PREFERENCE_CALLBACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn extract_features(_pcm: &[f32], _contract: &PipelineContract, features: &mut [f32]) -> bool {
+        features.fill(2.5);
+        true
+    }
+
+    fn extract_features_counted(
+        _pcm: &[f32],
+        _contract: &PipelineContract,
+        features: &mut [f32],
+    ) -> bool {
+        NATIVE_PREFERENCE_CALLBACK_CALLS.fetch_add(1, Ordering::Relaxed);
+        features.fill(2.5);
+        true
+    }
+
+    fn bind(_contract: &PipelineContract) -> bool {
+        true
+    }
+
+    fn encode_frames(_features: &[f32], _contract: &PipelineContract, output: &mut [f32]) -> bool {
+        output.fill(3.5);
+        true
+    }
+
+    fn execute_hidden(_frames: &[f32], _contract: &PipelineContract, output: &mut [f32]) -> bool {
+        output.fill(4.5);
+        true
+    }
+
+    fn compute_probabilities(
+        _hidden: &[f32],
+        _contract: &PipelineContract,
+        output: &mut [f32],
+    ) -> bool {
+        output.fill(5.5);
+        true
+    }
+
+    fn decode_segments(
+        _probabilities: &[f32],
+        _segments: &mut [SegmentRecord],
+        count: &mut i32,
+    ) -> bool {
+        *count = 0;
+        true
+    }
+
+    fn complete_contract(extract: Option<ExtractFeaturesFn>) -> PipelineContract {
+        PipelineContract {
+            extract_features: extract,
+            bind_encoder: Some(bind),
+            encode_frames: Some(encode_frames),
+            execute_hidden: Some(execute_hidden),
+            bind_modules: Some(bind),
+            compute_probabilities: Some(compute_probabilities),
+            decode_segments: Some(decode_segments),
+            ..PipelineContract::pinned()
+        }
+    }
+
+    #[test]
+    fn native_feature_route_takes_precedence_and_remains_usable() {
+        NATIVE_PREFERENCE_CALLBACK_CALLS.store(0, Ordering::Relaxed);
+        let contract = complete_contract(Some(extract_features_counted));
+        let pcm = vec![0.0; REQUIRED_SAMPLE_COUNT];
+        let binding = NativeFeatureExtractorBinding::test_fixture();
+        let mut workspace = NativeFeatureExtractorWorkspace::default();
+        let mut route = NativeFeatureExtractorRoute::new(&binding, &mut workspace);
+        let mut features = vec![f32::NAN; REQUIRED_FEATURE_COUNT];
+        let mut encoder_frames = vec![0.0; REQUIRED_ENCODER_VALUE_COUNT];
+        let mut hidden = vec![0.0; REQUIRED_HIDDEN_VALUE_COUNT];
+        let mut probabilities = vec![0.0; REQUIRED_PROBABILITY_VALUE_COUNT];
+        let mut segments = vec![SegmentRecord::default(); MAX_SEGMENT_COUNT];
+        let mut frame_count = -1;
+        let mut probability_count = -1;
+        let mut segment_count = -1;
+        let mut error = PipelineError::Unexpected;
+        let mut event = EventRunFlow::new(
+            &contract,
+            &pcm,
+            SAMPLE_RATE,
+            CHANNEL_COUNT,
+            &mut features,
+            &mut encoder_frames,
+            &mut hidden,
+            &mut probabilities,
+            &mut segments,
+            &mut frame_count,
+            &mut probability_count,
+            &mut segment_count,
+            &mut error,
+        )
+        .with_native_feature_extractor_route(&mut route);
+        let mut pipeline = DiarizationSortformerPipeline::new();
+
+        assert_eq!(pipeline.run(&mut event), Ok(()));
+        assert_eq!(NATIVE_PREFERENCE_CALLBACK_CALLS.load(Ordering::Relaxed), 0);
+        assert!(
+            event
+                .features
+                .borrow()
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert!(event.features.borrow().iter().any(|value| *value != 2.5));
+        assert_eq!(**event.error_out.borrow(), PipelineError::None);
+
+        let mut second_features = vec![f32::NAN; REQUIRED_FEATURE_COUNT];
+        let restored_route = event
+            .native_feature_extractor_route
+            .get_mut()
+            .take()
+            .expect("pipeline must restore the caller-owned native route");
+        restored_route.extract(&pcm, &mut second_features).unwrap();
+        let first_features = event.features.borrow();
+        assert_eq!(&second_features[..], &first_features[..]);
+    }
+
+    #[test]
+    fn callback_feature_route_still_runs_when_native_route_is_absent() {
+        let contract = complete_contract(Some(extract_features));
+        let pcm = vec![0.0; REQUIRED_SAMPLE_COUNT];
+        let mut features = vec![f32::NAN; REQUIRED_FEATURE_COUNT];
+        let mut encoder_frames = vec![0.0; REQUIRED_ENCODER_VALUE_COUNT];
+        let mut hidden = vec![0.0; REQUIRED_HIDDEN_VALUE_COUNT];
+        let mut probabilities = vec![0.0; REQUIRED_PROBABILITY_VALUE_COUNT];
+        let mut segments = vec![SegmentRecord::default(); MAX_SEGMENT_COUNT];
+        let mut frame_count = -1;
+        let mut probability_count = -1;
+        let mut segment_count = -1;
+        let mut error = PipelineError::Unexpected;
+        let mut event = EventRunFlow::new(
+            &contract,
+            &pcm,
+            SAMPLE_RATE,
+            CHANNEL_COUNT,
+            &mut features,
+            &mut encoder_frames,
+            &mut hidden,
+            &mut probabilities,
+            &mut segments,
+            &mut frame_count,
+            &mut probability_count,
+            &mut segment_count,
+            &mut error,
+        );
+        let mut pipeline = DiarizationSortformerPipeline::new();
+
+        assert_eq!(pipeline.run(&mut event), Ok(()));
+        assert_eq!(features, vec![2.5; REQUIRED_FEATURE_COUNT]);
+        assert_eq!(frame_count, FRAME_COUNT);
+        assert_eq!(probability_count, REQUIRED_PROBABILITY_VALUE_COUNT as i32);
+        assert_eq!(error, PipelineError::None);
+    }
+
+    #[test]
+    fn missing_feature_route_fails_without_a_callback() {
+        let contract = complete_contract(None);
+        let pcm = vec![0.0; REQUIRED_SAMPLE_COUNT];
+        let mut features = vec![f32::NAN; REQUIRED_FEATURE_COUNT];
+        let mut encoder_frames = vec![0.0; REQUIRED_ENCODER_VALUE_COUNT];
+        let mut hidden = vec![0.0; REQUIRED_HIDDEN_VALUE_COUNT];
+        let mut probabilities = vec![0.0; REQUIRED_PROBABILITY_VALUE_COUNT];
+        let mut segments = vec![SegmentRecord::default(); MAX_SEGMENT_COUNT];
+        let mut frame_count = -1;
+        let mut probability_count = -1;
+        let mut segment_count = -1;
+        let mut error = PipelineError::None;
+        let mut event = EventRunFlow::new(
+            &contract,
+            &pcm,
+            SAMPLE_RATE,
+            CHANNEL_COUNT,
+            &mut features,
+            &mut encoder_frames,
+            &mut hidden,
+            &mut probabilities,
+            &mut segments,
+            &mut frame_count,
+            &mut probability_count,
+            &mut segment_count,
+            &mut error,
+        );
+        let mut pipeline = DiarizationSortformerPipeline::new();
+
+        assert_eq!(pipeline.run(&mut event), Err(PipelineError::Request));
+        assert!(features.iter().all(|value| value.is_nan()));
+        assert_eq!(frame_count, 0);
+        assert_eq!(probability_count, 0);
+        assert_eq!(segment_count, 0);
+        assert_eq!(error, PipelineError::Request);
     }
 }
 

@@ -8,6 +8,12 @@
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
+    clippy::large_stack_frames,
+    clippy::unused_self,
+    clippy::needless_pass_by_ref_mut,
+    clippy::collapsible_if,
+    clippy::ptr_as_ptr,
+    clippy::elidable_lifetime_names,
     dead_code,
     missing_docs
 )]
@@ -39,17 +45,27 @@ pub enum EncoderError {
 pub trait VocabularyView {
     fn token_count(&self) -> usize;
     fn token(&self, index: usize) -> Option<&[u8]>;
-    fn merge_count(&self) -> usize { 0 }
-    fn merge(&self, _index: usize) -> Option<(&[u8], &[u8])> { None }
-    fn ignore_merges(&self) -> bool { false }
+    fn merge_count(&self) -> usize {
+        0
+    }
+    fn merge(&self, _index: usize) -> Option<(&[u8], &[u8])> {
+        None
+    }
+    fn ignore_merges(&self) -> bool {
+        false
+    }
 }
 
 /// Successful synchronous completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EncodingDone { pub token_count: usize }
+pub struct EncodingDone {
+    pub token_count: usize,
+}
 /// Failed synchronous completion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EncodingError { pub error: EncoderError }
+pub struct EncodingError {
+    pub error: EncoderError,
+}
 pub type DoneCallback = fn(EncodingDone) -> bool;
 pub type ErrorCallback = fn(EncodingError) -> bool;
 
@@ -83,7 +99,14 @@ impl<'event> EncodeRequest<'event> {
         dispatch_done: DoneCallback,
         dispatch_error: ErrorCallback,
     ) -> Self {
-        Self { vocabulary, text, preprocessed: false, token_ids, dispatch_done: Some(dispatch_done), dispatch_error: Some(dispatch_error) }
+        Self {
+            vocabulary,
+            text,
+            preprocessed: false,
+            token_ids,
+            dispatch_done: Some(dispatch_done),
+            dispatch_error: Some(dispatch_error),
+        }
     }
 
     #[must_use]
@@ -95,11 +118,19 @@ impl<'event> EncodeRequest<'event> {
         dispatch_done: Option<DoneCallback>,
         dispatch_error: Option<ErrorCallback>,
     ) -> Self {
-        Self { vocabulary, text, preprocessed, token_ids, dispatch_done, dispatch_error }
+        Self {
+            vocabulary,
+            text,
+            preprocessed,
+            token_ids,
+            dispatch_done,
+            dispatch_error,
+        }
     }
 }
 
-/// Runtime event carrying a request, result context, and phase outputs.
+/// Runtime event is clonable for generated SML event storage while preserving borrowed buffers.
+#[derive(Clone)]
 pub struct RuntimeEncodeRuntime<'event> {
     pub request: EncodeRequest<'event>,
     pub context: &'event RefCell<EncodeContext>,
@@ -113,7 +144,10 @@ impl core::fmt::Debug for RuntimeEncodeRuntime<'_> {
             .field("request", &self.request)
             .field("context", &self.context.borrow())
             .field("encode_result_error", &self.encode_result_error.get())
-            .field("encode_result_token_count", &self.encode_result_token_count.get())
+            .field(
+                "encode_result_token_count",
+                &self.encode_result_token_count.get(),
+            )
             .finish()
     }
 }
@@ -126,7 +160,12 @@ pub struct EventsEncodingDone;
 pub struct EventsEncodingError;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct Symbol { start: usize, len: usize, next: usize, alive: bool }
+struct Symbol {
+    start: usize,
+    len: usize,
+    next: usize,
+    alive: bool,
+}
 
 sml! {
     TextEncodersBpe<'event> {
@@ -221,11 +260,28 @@ sml! {
 
 /// Mutable result context for one dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EncodeContext { pub error: EncoderError, pub token_count: usize, pub unexpected: bool }
-impl Default for EncodeContext { fn default() -> Self { Self { error: EncoderError::None, token_count: 0, unexpected: false } } }
+pub struct EncodeContext {
+    pub error: EncoderError,
+    pub token_count: usize,
+    pub unexpected: bool,
+}
+impl Default for EncodeContext {
+    fn default() -> Self {
+        Self {
+            error: EncoderError::None,
+            token_count: 0,
+            unexpected: false,
+        }
+    }
+}
 impl EncodeContext {
-    fn reset(&mut self) { *self = Self::default(); }
-    fn reject(&mut self, error: EncoderError) { self.token_count = 0; self.error = error; }
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+    fn reject(&mut self, error: EncoderError) {
+        self.token_count = 0;
+        self.error = error;
+    }
 }
 
 #[derive(Debug)]
@@ -236,161 +292,571 @@ pub struct TextEncodersBpeContext {
     symbols: [Symbol; MAX_ENCODE_SYMBOLS],
 }
 impl Default for TextEncodersBpeContext {
+    #[allow(clippy::large_stack_frames)]
     fn default() -> Self {
-        Self { vocabulary_identity: 0, tables_ready: false, unexpected: false, symbols: [Symbol::default(); MAX_ENCODE_SYMBOLS] }
+        Self {
+            vocabulary_identity: 0,
+            tables_ready: false,
+            unexpected: false,
+            symbols: [Symbol::default(); MAX_ENCODE_SYMBOLS],
+        }
     }
 }
 impl TextEncodersBpeContext {
-    fn clear(&mut self, identity: usize) { self.vocabulary_identity = identity; self.tables_ready = false; }
-    fn mark_unexpected(&mut self) { self.unexpected = true; }
+    fn clear(&mut self, identity: usize) {
+        self.vocabulary_identity = identity;
+        self.tables_ready = false;
+    }
+    fn mark_unexpected(&mut self) {
+        self.unexpected = true;
+    }
     fn lookup(vocabulary: &dyn VocabularyView, needle: &[u8]) -> Option<i32> {
-        (0..vocabulary.token_count().min(MAX_VOCAB_ENTRIES)).find_map(|i| vocabulary.token(i).filter(|token| *token == needle).and_then(|_| i32::try_from(i).ok()))
+        if needle.is_empty() {
+            return None;
+        }
+        (0..vocabulary.token_count().min(MAX_VOCAB_ENTRIES)).find_map(|i| {
+            vocabulary
+                .token(i)
+                .filter(|token| *token == needle)
+                .and_then(|_| i32::try_from(i).ok())
+        })
     }
     fn merge_rank(vocabulary: &dyn VocabularyView, left: &[u8], right: &[u8]) -> Option<usize> {
-        (0..vocabulary.merge_count().min(MAX_VOCAB_MERGES)).find(|&i| vocabulary.merge(i).is_some_and(|(a, b)| a == left && b == right))
+        (0..vocabulary.merge_count().min(MAX_VOCAB_MERGES)).find(|&i| {
+            vocabulary
+                .merge(i)
+                .is_some_and(|(a, b)| a == left && b == right)
+        })
     }
+
     fn push(event: &RuntimeEncodeRuntime<'_>, id: i32, count: &mut usize) -> bool {
         let mut output = event.request.token_ids.borrow_mut();
-        if *count >= output.len() || *count >= MAX_ENCODE_TOKENS { return false; }
-        output[*count] = id; *count += 1; true
+        if *count >= output.len() || *count >= MAX_ENCODE_TOKENS {
+            return false;
+        }
+        output[*count] = id;
+        *count += 1;
+        true
     }
+    #[allow(clippy::unused_self)]
     fn encode_ignore(&mut self, event: &RuntimeEncodeRuntime<'_>) {
         let mut count = 0;
         if let Some(id) = Self::lookup(event.request.vocabulary, event.request.text) {
-            if !Self::push(event, id, &mut count) { event.context.borrow_mut().error = EncoderError::InvalidArgument; }
-        } else { event.context.borrow_mut().error = EncoderError::Backend; }
-        event.context.borrow_mut().token_count = count;
+            if !Self::push(event, id, &mut count) {
+                event.context.borrow_mut().error = EncoderError::InvalidArgument;
+            }
+        } else {
+            event.context.borrow_mut().error = EncoderError::Backend;
+        }
+        let mut context = event.context.borrow_mut();
+        context.token_count = count;
         event.encode_result_token_count.set(count);
-        event.encode_result_error.set(event.context.borrow().error);
+        event.encode_result_error.set(context.error);
     }
     fn encode_merge(&mut self, event: &RuntimeEncodeRuntime<'_>) {
         let text = event.request.text;
         let mut output_count = 0usize;
         let mut symbol_count = 0usize;
-        for (start, _) in text.iter().enumerate() {
-            if symbol_count >= self.symbols.len() { event.context.borrow_mut().reject(EncoderError::InvalidArgument); return; }
-            self.symbols[symbol_count] = Symbol { start, len: 1, next: symbol_count + 1, alive: true };
+        let mut offset = 0usize;
+        while offset < text.len() {
+            if symbol_count >= self.symbols.len() {
+                event
+                    .context
+                    .borrow_mut()
+                    .reject(EncoderError::InvalidArgument);
+                return;
+            }
+            let len = utf8_len(text[offset]).min(text.len() - offset);
+            self.symbols[symbol_count] = Symbol {
+                start: offset,
+                len,
+                next: symbol_count + 1,
+                alive: true,
+            };
             symbol_count += 1;
+            offset += len;
         }
-        if symbol_count > 0 { self.symbols[symbol_count - 1].next = symbol_count; }
+        if symbol_count > 0 {
+            self.symbols[symbol_count - 1].next = symbol_count;
+        }
         for _ in 0..symbol_count.saturating_sub(1) {
             let mut best: Option<(usize, usize, usize)> = None;
             let mut left_index = 0usize;
             while left_index < symbol_count {
                 let right_index = self.symbols[left_index].next;
-                if right_index >= symbol_count { break; }
+                if right_index >= symbol_count {
+                    break;
+                }
                 if self.symbols[left_index].alive && self.symbols[right_index].alive {
-                    let left = &text[self.symbols[left_index].start..self.symbols[left_index].start + self.symbols[left_index].len];
-                    let right = &text[self.symbols[right_index].start..self.symbols[right_index].start + self.symbols[right_index].len];
-                    if let Some(rank) = Self::merge_rank(event.request.vocabulary, left, right) && best.is_none_or(|(_, _, current)| rank < current) { best = Some((left_index, right_index, rank)); }
+                    let left = &text[self.symbols[left_index].start
+                        ..self.symbols[left_index].start + self.symbols[left_index].len];
+                    let right = &text[self.symbols[right_index].start
+                        ..self.symbols[right_index].start + self.symbols[right_index].len];
+                    if let Some(rank) = Self::merge_rank(event.request.vocabulary, left, right) {
+                        let better = best.is_none_or(|(best_left, _, best_rank)| {
+                            rank < best_rank || (rank == best_rank && left_index < best_left)
+                        });
+                        if better {
+                            best = Some((left_index, right_index, rank));
+                        }
+                    }
                 }
                 left_index = right_index;
             }
-            let Some((left, right, _)) = best else { break; };
-            self.symbols[left].len = self.symbols[right].start + self.symbols[right].len - self.symbols[left].start;
+            let Some((left, right, _)) = best else {
+                break;
+            };
+            self.symbols[left].len =
+                self.symbols[right].start + self.symbols[right].len - self.symbols[left].start;
             self.symbols[left].next = self.symbols[right].next;
             self.symbols[right].alive = false;
         }
         let mut index = 0usize;
         while index < symbol_count {
             if self.symbols[index].alive {
-                let piece = &text[self.symbols[index].start..self.symbols[index].start + self.symbols[index].len];
+                let piece = &text[self.symbols[index].start
+                    ..self.symbols[index].start + self.symbols[index].len];
                 if let Some(id) = Self::lookup(event.request.vocabulary, piece) {
-                    if !Self::push(event, id, &mut output_count) { event.context.borrow_mut().reject(EncoderError::InvalidArgument); return; }
+                    if !Self::push(event, id, &mut output_count) {
+                        event
+                            .context
+                            .borrow_mut()
+                            .reject(EncoderError::InvalidArgument);
+                        return;
+                    }
                 } else {
-                    for unit in piece.chunks(1) {
-                        let Some(id) = Self::lookup(event.request.vocabulary, unit) else { event.context.borrow_mut().error = EncoderError::Backend; return; };
-                        if !Self::push(event, id, &mut output_count) { event.context.borrow_mut().reject(EncoderError::InvalidArgument); return; }
+                    let mut byte_offset = 0usize;
+                    while byte_offset < piece.len() {
+                        let len = utf8_len(piece[byte_offset]).min(piece.len() - byte_offset);
+                        let unit = &piece[byte_offset..byte_offset + len];
+                        let Some(id) = Self::lookup(event.request.vocabulary, unit) else {
+                            event.context.borrow_mut().reject(EncoderError::Backend);
+                            return;
+                        };
+                        if !Self::push(event, id, &mut output_count) {
+                            event
+                                .context
+                                .borrow_mut()
+                                .reject(EncoderError::InvalidArgument);
+                            return;
+                        }
+                        byte_offset += len;
                     }
                 }
             }
             let next = self.symbols[index].next;
-            if next >= symbol_count || next == index { break; }
+            if next >= symbol_count || next == index {
+                break;
+            }
             index = next;
         }
-        event.context.borrow_mut().token_count = output_count;
+        let mut context = event.context.borrow_mut();
+        context.token_count = output_count;
         event.encode_result_token_count.set(output_count);
-        event.encode_result_error.set(event.context.borrow().error);
+        event.encode_result_error.set(context.error);
+    }
+}
+
+fn utf8_len(byte: u8) -> usize {
+    match byte >> 4 {
+        0..=11 => 1,
+        12..=13 => 2,
+        14 => 3,
+        _ => 4,
     }
 }
 
 impl TextEncodersBpeStateMachineContext for TextEncodersBpeContext {
-    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reset(); event.encode_result_error.set(EncoderError::None); event.encode_result_token_count.set(0); self.unexpected = false; Ok(()) }
-    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.begin_encode(event)?; self.clear(core::ptr::from_ref(event.request.vocabulary) as *const () as usize); Ok(()) }
-    fn direct_word_token_available(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(Self::lookup(event.request.vocabulary, event.request.text).is_some()) }
-    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::Backend) }
-    fn encode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::InvalidArgument) }
-    fn encode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::ModelInvalid) }
-    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::None) }
-    fn encode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(matches!(event.context.borrow().error, EncoderError::Unexpected)) }
-    fn ensure_last_error_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ensure_last_error_from_encode_table_prepare(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_last_error(event) }
-    fn ignore_merges_enabled(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.vocabulary.ignore_merges()) }
-    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!valid_request(event)) }
-    fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
-    fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().error = EncoderError::None; Ok(()) }
-    fn merge_symbol_capacity_exceeded(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.len() > MAX_ENCODE_SYMBOLS) }
-    fn merge_symbol_capacity_within_limit(&self, event: &RuntimeEncodeRuntime<'event>) -> Result<bool, ()> { Ok(!self.merge_symbol_capacity_exceeded(event)?) }
-    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
-    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::Unexpected); self.mark_unexpected(); Ok(()) }
-    fn on_unexpected_events_encoding_done(&mut self, _: &EventsEncodingDone) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
-    fn on_unexpected_events_encoding_error(&mut self, _: &EventsEncodingError) -> Result<(), ()> { self.mark_unexpected(); Ok(()) }
-    fn prepare_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let vocabulary = event.request.vocabulary; if vocabulary.token_count() > MAX_VOCAB_ENTRIES || vocabulary.merge_count() > MAX_VOCAB_MERGES { event.context.borrow_mut().error = EncoderError::ModelInvalid; } else { self.tables_ready = true; event.context.borrow_mut().error = EncoderError::None; } Ok(()) }
-    fn preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.preprocessed) }
-    fn reject_invalid_encode_from_encode_input_policy_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
-    fn reject_invalid_encode_from_encode_merge_input_capacity_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
-    fn reject_invalid_encode_from_encode_validity_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
-    fn reject_invalid_encode_from_encode_vocab_sync_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject_invalid(event) }
-    fn run_encode_ignore_merges(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.encode_ignore(event); Ok(()) }
-    fn run_encode_merge_path(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.encode_merge(event); Ok(()) }
-    fn table_prepare_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::Backend) }
-    fn table_prepare_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::InvalidArgument) }
-    fn table_prepare_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.context.borrow().error == EncoderError::ModelInvalid) }
-    fn table_prepare_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.tables_ready && event.context.borrow().error == EncoderError::None) }
-    fn table_prepare_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(matches!(event.context.borrow().error, EncoderError::Unexpected)) }
-    fn text_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.is_empty()) }
-    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.text.is_empty()) }
-    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(valid_request(event)) }
-    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.vocabulary_identity != core::ptr::from_ref(event.request.vocabulary) as *const () as usize) }
-    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.vocabulary_identity == core::ptr::from_ref(event.request.vocabulary) as *const () as usize) }
+    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        event.context.borrow_mut().reset();
+        event.encode_result_error.set(EncoderError::None);
+        event.encode_result_token_count.set(0);
+        self.unexpected = false;
+        Ok(())
+    }
+    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        self.begin_encode(event)?;
+        self.clear(core::ptr::from_ref(event.request.vocabulary) as *const () as usize);
+        Ok(())
+    }
+    fn direct_word_token_available(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(Self::lookup(event.request.vocabulary, event.request.text).is_some())
+    }
+    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::Backend)
+    }
+    fn encode_result_invalid_argument_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::InvalidArgument)
+    }
+    fn encode_result_model_invalid_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::ModelInvalid)
+    }
+    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::None)
+    }
+    fn encode_result_unclassified_error_code(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(matches!(
+            event.context.borrow().error,
+            EncoderError::Unexpected
+        ))
+    }
+    fn ensure_last_error_from_encode_precheck_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        ensure_last_error(event)
+    }
+    fn ensure_last_error_from_encode_result_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        ensure_last_error(event)
+    }
+    fn ensure_last_error_from_encode_table_prepare(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        ensure_last_error(event)
+    }
+    fn ignore_merges_enabled(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.vocabulary.ignore_merges())
+    }
+    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(!valid_request(event))
+    }
+    fn mark_done_from_encode_precheck_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        event.context.borrow_mut().error = EncoderError::None;
+        Ok(())
+    }
+    fn mark_done_from_encode_result_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        event.context.borrow_mut().error = EncoderError::None;
+        Ok(())
+    }
+    fn merge_symbol_capacity_exceeded(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.text.len() > MAX_ENCODE_SYMBOLS)
+    }
+    fn merge_symbol_capacity_within_limit(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(!self.merge_symbol_capacity_exceeded(event)?)
+    }
+    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> {
+        self.mark_unexpected();
+        Ok(())
+    }
+    fn on_unexpected_runtime_encode_runtime(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        event.context.borrow_mut().reject(EncoderError::Unexpected);
+        self.mark_unexpected();
+        Ok(())
+    }
+    fn on_unexpected_events_encoding_done(&mut self, _: &EventsEncodingDone) -> Result<(), ()> {
+        self.mark_unexpected();
+        Ok(())
+    }
+    fn on_unexpected_events_encoding_error(&mut self, _: &EventsEncodingError) -> Result<(), ()> {
+        self.mark_unexpected();
+        Ok(())
+    }
+    fn prepare_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        let vocabulary = event.request.vocabulary;
+        if vocabulary.token_count() > MAX_VOCAB_ENTRIES
+            || vocabulary.merge_count() > MAX_VOCAB_MERGES
+        {
+            event.context.borrow_mut().error = EncoderError::ModelInvalid;
+        } else {
+            let mut malformed = false;
+            for index in 0..vocabulary.token_count() {
+                if vocabulary.token(index).is_none() {
+                    malformed = true;
+                    break;
+                }
+            }
+            if !malformed {
+                for index in 0..vocabulary.merge_count() {
+                    if vocabulary.merge(index).is_none() {
+                        malformed = true;
+                        break;
+                    }
+                }
+            }
+            if malformed {
+                event.context.borrow_mut().error = EncoderError::ModelInvalid;
+            } else {
+                self.tables_ready = true;
+                event.context.borrow_mut().error = EncoderError::None;
+            }
+        }
+        Ok(())
+    }
+    fn preprocessed<'event>(&self, event: &RuntimeEncodeRuntime<'event>) -> Result<bool, ()> {
+        Ok(event.request.preprocessed)
+    }
+    fn not_preprocessed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(!event.request.preprocessed)
+    }
+    fn reject_invalid_encode_from_encode_input_policy_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        reject_invalid(event)
+    }
+    fn reject_invalid_encode_from_encode_merge_input_capacity_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        reject_invalid(event)
+    }
+    fn reject_invalid_encode_from_encode_validity_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        reject_invalid(event)
+    }
+    fn reject_invalid_encode_from_encode_vocab_sync_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        reject_invalid(event)
+    }
+    fn run_encode_ignore_merges(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        self.encode_ignore(event);
+        Ok(())
+    }
+    fn run_encode_merge_path(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        self.encode_merge(event);
+        Ok(())
+    }
+    fn table_prepare_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::Backend)
+    }
+    fn table_prepare_invalid_argument_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::InvalidArgument)
+    }
+    fn table_prepare_model_invalid_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::ModelInvalid)
+    }
+    fn table_prepare_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.tables_ready && event.context.borrow().error == EncoderError::None)
+    }
+    fn table_prepare_unclassified_error_code(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(matches!(
+            event.context.borrow().error,
+            EncoderError::Unexpected
+        ))
+    }
+    fn text_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.text.is_empty())
+    }
+    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(!event.request.text.is_empty())
+    }
+    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(valid_request(event))
+    }
+    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.vocabulary_identity
+            != core::ptr::from_ref(event.request.vocabulary) as *const () as usize)
+    }
+    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.vocabulary_identity
+            == core::ptr::from_ref(event.request.vocabulary) as *const () as usize)
+    }
 }
 
-fn valid_request(event: &RuntimeEncodeRuntime<'_>) -> bool { !event.request.token_ids.borrow().is_empty() && event.request.text.len() <= MAX_ENCODE_SYMBOLS * 4 && event.request.vocabulary.token_count() <= MAX_VOCAB_ENTRIES && event.request.vocabulary.merge_count() <= MAX_VOCAB_MERGES }
-fn reject_invalid(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.context.borrow_mut().reject(EncoderError::InvalidArgument); Ok(()) }
-fn ensure_last_error(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { let mut context = event.context.borrow_mut(); if context.error == EncoderError::None { context.error = EncoderError::Backend; } Ok(()) }
+fn valid_request(event: &RuntimeEncodeRuntime<'_>) -> bool {
+    !event.request.token_ids.borrow().is_empty()
+        && event.request.text.len() <= MAX_ENCODE_SYMBOLS * 4
+        && event.request.vocabulary.token_count() <= MAX_VOCAB_ENTRIES
+        && event.request.vocabulary.merge_count() <= MAX_VOCAB_MERGES
+}
+fn reject_invalid(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+    event
+        .context
+        .borrow_mut()
+        .reject(EncoderError::InvalidArgument);
+    Ok(())
+}
+fn ensure_last_error(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+    let mut context = event.context.borrow_mut();
+    if context.error == EncoderError::None {
+        context.error = EncoderError::Backend;
+    }
+    Ok(())
+}
 
 /// Synchronous bounded actor around the generated BPE machine.
-pub struct TextEncodersBpeActor<'event> { machine: TextEncodersBpeStateMachine<TextEncodersBpeContext> }
-impl<'event> Default for TextEncodersBpeActor<'event> { fn default() -> Self { Self::new() } }
-impl<'event> TextEncodersBpeActor<'event> {
-    #[must_use] pub fn new() -> Self { Self { machine: TextEncodersBpeStateMachine::new(TextEncodersBpeContext::default()) } }
-    pub fn process_event(&mut self, request: EncodeRequest<'event>) -> Result<EncodingDone, EncodingError> {
-        let result = RefCell::new(EncodeContext::default());
-        let runtime = RuntimeEncodeRuntime { request, context: &result, encode_result_error: Cell::new(EncoderError::None), encode_result_token_count: Cell::new(0) };
-        if self.machine.process_event(TextEncodersBpeEvents::RuntimeEncodeRuntime(runtime)).is_err() {
-            result.borrow_mut().reject(EncoderError::Unexpected);
+pub struct TextEncodersBpeActor {
+    machine: TextEncodersBpeStateMachine<TextEncodersBpeContext>,
+    result: RefCell<EncodeContext>,
+}
+impl Default for TextEncodersBpeActor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl TextEncodersBpeActor {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: TextEncodersBpeStateMachine::new(TextEncodersBpeContext::default()),
+            result: RefCell::new(EncodeContext::default()),
+        }
+    }
+    pub fn process_event<'event>(
+        &'event mut self,
+        request: EncodeRequest<'event>,
+    ) -> Result<EncodingDone, EncodingError> {
+        *self.result.borrow_mut() = EncodeContext::default();
+        let runtime = RuntimeEncodeRuntime {
+            request,
+            context: &self.result,
+            encode_result_error: Cell::new(EncoderError::None),
+            encode_result_token_count: Cell::new(0),
+        };
+        if self
+            .machine
+            .process_event(TextEncodersBpeEvents::RuntimeEncodeRuntime(runtime))
+            .is_err()
+        {
+            self.result.borrow_mut().reject(EncoderError::Unexpected);
             self.machine.set_state(TextEncodersBpeStates::Unexpected);
         }
-        let context = *result.borrow();
+        let context = *self.result.borrow();
         if context.unexpected || self.machine.context().unexpected {
-            let error = EncodingError { error: EncoderError::Unexpected };
-            if let Some(callback) = request.dispatch_error { let _ = callback(error); }
+            let error = EncodingError {
+                error: EncoderError::Unexpected,
+            };
+            if let Some(callback) = request.dispatch_error {
+                let _ = callback(error);
+            }
             return Err(error);
         }
         if context.error == EncoderError::None {
-            let done = EncodingDone { token_count: context.token_count };
-            if let Some(callback) = request.dispatch_done { let _ = callback(done); }
+            let done = EncodingDone {
+                token_count: context.token_count,
+            };
+            if let Some(callback) = request.dispatch_done {
+                let _ = callback(done);
+            }
             Ok(done)
         } else {
-            let error = EncodingError { error: context.error };
-            if let Some(callback) = request.dispatch_error { let _ = callback(error); }
+            let error = EncodingError {
+                error: context.error,
+            };
+            if let Some(callback) = request.dispatch_error {
+                let _ = callback(error);
+            }
             Err(error)
         }
     }
-    #[must_use] pub fn state(&self) -> &TextEncodersBpeStates { self.machine.state() }
-    #[must_use] pub fn is(&self, state: &TextEncodersBpeStates) -> bool { self.machine.is(state) }
-    #[must_use] pub fn context(&self) -> &TextEncodersBpeContext { self.machine.context() }
+    #[must_use]
+    pub fn state(&self) -> &TextEncodersBpeStates {
+        self.machine.state()
+    }
+    #[must_use]
+    pub fn is(&self, state: &TextEncodersBpeStates) -> bool {
+        self.machine.is(state)
+    }
+    #[must_use]
+    pub fn context(&self) -> &TextEncodersBpeContext {
+        self.machine.context()
+    }
 }
+pub type Bpe = TextEncodersBpeActor;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
-pub type Bpe<'event> = TextEncodersBpeActor<'event>;
+    static DONE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static ERROR_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    struct MissingUnitVocabulary;
+
+    impl VocabularyView for MissingUnitVocabulary {
+        fn token_count(&self) -> usize {
+            1
+        }
+
+        fn token(&self, index: usize) -> Option<&[u8]> {
+            (index == 0).then_some(b"a".as_slice())
+        }
+
+        fn merge_count(&self) -> usize {
+            1
+        }
+
+        fn merge(&self, index: usize) -> Option<(&[u8], &[u8])> {
+            (index == 0).then_some((b"a".as_slice(), b"b".as_slice()))
+        }
+    }
+
+    fn done_callback(_: EncodingDone) -> bool {
+        DONE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn error_callback(_: EncodingError) -> bool {
+        ERROR_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    #[test]
+    fn missing_utf8_fallback_unit_rejects_without_success_callback() {
+        DONE_CALLBACKS.store(0, Ordering::Relaxed);
+        ERROR_CALLBACKS.store(0, Ordering::Relaxed);
+
+        let vocabulary = MissingUnitVocabulary;
+        let mut output = [77; 2];
+        let token_ids = RefCell::new(&mut output[..]);
+        let request = EncodeRequest::with_callbacks(
+            &vocabulary,
+            b"ab",
+            &token_ids,
+            true,
+            Some(done_callback),
+            Some(error_callback),
+        );
+
+        let mut actor = TextEncodersBpeActor::new();
+        let result = actor.process_event(request);
+
+        assert_eq!(
+            result,
+            Err(EncodingError {
+                error: EncoderError::Backend,
+            })
+        );
+        assert!(actor.is(&TextEncodersBpeStates::Errored));
+        assert_eq!(DONE_CALLBACKS.load(Ordering::Relaxed), 0);
+        assert_eq!(ERROR_CALLBACKS.load(Ordering::Relaxed), 1);
+    }
+}

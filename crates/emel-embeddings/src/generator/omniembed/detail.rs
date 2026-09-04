@@ -24,7 +24,7 @@ const RESIDUAL_NORM_BIAS: &[u8] = b"text_projection.residual_blocks.0.2.bias";
 const PROJECT: &[u8] = b"text_projection.project.weight";
 const PROJECT_BIAS: &[u8] = b"text_projection.project.bias";
 const LAYER_PREFIX: &[u8] = b"text_encoder.0.auto_model.encoder.layer.";
-pub(crate) const MAX_TEXT_LAYERS: usize = 16;
+pub const MAX_TEXT_LAYERS: usize = 16;
 const MAX_WORK: usize = 4096;
 const MAX_TOKEN_POSITIONS: usize = 4096;
 
@@ -198,7 +198,7 @@ fn l2_normalize(values: &mut [f32]) -> bool {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct LayerTensors<'a> {
+pub struct LayerTensors<'a> {
     query: &'a [u8],
     query_bias: &'a [u8],
     key: &'a [u8],
@@ -306,7 +306,9 @@ fn bind_layer<'a>(
             return Err(Error::UnsupportedTensor);
         }
         let bytes = tensor.bytes().ok_or(Error::ModelInvalid)?;
-        f32_count(bytes, length).then_some(bytes).ok_or(Error::ModelInvalid)
+        f32_count(bytes, length)
+            .then_some(bytes)
+            .ok_or(Error::ModelInvalid)
     };
     Ok(LayerTensors {
         query: matrix(q, hidden, hidden)?,
@@ -329,9 +331,9 @@ fn bind_layer<'a>(
 }
 
 /// Validates and binds the contiguous, bounded transformer-layer inventory.
-pub(crate) fn bind_layer_inventory<'a>(
-    data: &'a emel_model::bridge::Data,
-) -> Result<([Option<LayerTensors<'a>>; MAX_TEXT_LAYERS], usize), Error> {
+pub fn bind_layer_inventory(
+    data: &emel_model::bridge::Data,
+) -> Result<([Option<LayerTensors<'_>>; MAX_TEXT_LAYERS], usize), Error> {
     let word = tensor_named(data, WORD)?;
     let metadata = word.metadata().ok_or(Error::ModelInvalid)?;
     let dimensions = metadata.dimensions();
@@ -339,12 +341,13 @@ pub(crate) fn bind_layer_inventory<'a>(
         return Err(Error::UnsupportedTensor);
     }
     let hidden = usize::try_from(dimensions[0]).map_err(|_| Error::UnsupportedTensor)?;
-    if hidden == 0 || hidden > MAX_WORK || hidden.checked_mul(4).ok_or(Error::Capacity)? > MAX_WORK {
+    if hidden == 0 || hidden > MAX_WORK || hidden.checked_mul(4).ok_or(Error::Capacity)? > MAX_WORK
+    {
         return Err(Error::Capacity);
     }
     let mut layers = [None; MAX_TEXT_LAYERS];
     let mut count = 0;
-    for index in 0..MAX_TEXT_LAYERS {
+    for (index, layer_slot) in layers.iter_mut().enumerate() {
         let mut present = false;
         for suffix in LAYER_SUFFIXES {
             let mut name = [0_u8; 128];
@@ -357,8 +360,11 @@ pub(crate) fn bind_layer_inventory<'a>(
         if !present {
             break;
         }
-        layers[index] = Some(bind_layer(data, index, hidden)?);
+        *layer_slot = Some(bind_layer(data, index, hidden)?);
         count += 1;
+    }
+    if count == 0 {
+        return Err(Error::ModelInvalid);
     }
     for index in 0..data.tensor_count() {
         let tensor = data.tensor(index).ok_or(Error::ModelInvalid)?;
@@ -373,46 +379,90 @@ pub(crate) fn bind_layer_inventory<'a>(
                 }
             }
             if !found {
-                return Err(if count == MAX_TEXT_LAYERS { Error::Capacity } else { Error::ModelInvalid });
+                return Err(if count == MAX_TEXT_LAYERS {
+                    Error::Capacity
+                } else {
+                    Error::ModelInvalid
+                });
             }
         }
     }
     Ok((layers, count))
 }
 
+#[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
 fn run_layered(
-    binding: &NativeTensorBinding<'_>, token_ids: &[i32], hidden: usize, vocabulary: usize,
-    max_positions: usize, position: &[u8], token_type: &[u8], norm_weight: &[u8], norm_bias: &[u8],
+    binding: &NativeTensorBinding<'_>,
+    token_ids: &[i32],
+    hidden: usize,
+    vocabulary: usize,
+    max_positions: usize,
+    position: &[u8],
+    token_type: &[u8],
+    norm_weight: &[u8],
+    norm_bias: &[u8],
     pooled: &mut [f32],
 ) -> Result<(), Error> {
     let heads = 12;
-    if hidden == 0 || hidden % heads != 0 || token_ids.is_empty() || token_ids.len() > max_positions || max_positions > MAX_TOKEN_POSITIONS { return Err(Error::UnsupportedTensor); }
+    if hidden == 0
+        || !hidden.is_multiple_of(heads)
+        || token_ids.is_empty()
+        || token_ids.len() > max_positions
+        || max_positions > MAX_TOKEN_POSITIONS
+    {
+        return Err(Error::UnsupportedTensor);
+    }
     let elements = token_ids.len().checked_mul(hidden).ok_or(Error::Capacity)?;
-    if elements > MAX_WORK || binding.text_layer_count > MAX_TEXT_LAYERS { return Err(Error::Capacity); }
+    if elements > MAX_WORK || binding.text_layer_count > MAX_TEXT_LAYERS {
+        return Err(Error::Capacity);
+    }
     let head_dim = hidden / heads;
-    let mut sequence_a = [0.0_f32; MAX_WORK]; let mut sequence_b = [0.0_f32; MAX_WORK];
-    let mut query = [0.0_f32; MAX_WORK]; let mut key = [0.0_f32; MAX_WORK]; let mut value = [0.0_f32; MAX_WORK];
-    let mut context = [0.0_f32; MAX_WORK]; let mut scores = [0.0_f32; MAX_TOKEN_POSITIONS];
-    let mut hidden_values = [0.0_f32; MAX_WORK]; let mut feed_forward = [0.0_f32; MAX_WORK];
+    let mut sequence_a = [0.0_f32; MAX_WORK];
+    let mut sequence_b = [0.0_f32; MAX_WORK];
+    let mut query = [0.0_f32; MAX_WORK];
+    let mut key = [0.0_f32; MAX_WORK];
+    let mut value = [0.0_f32; MAX_WORK];
+    let mut context = [0.0_f32; MAX_WORK];
+    let mut scores = [0.0_f32; MAX_TOKEN_POSITIONS];
+    let mut hidden_values = [0.0_f32; MAX_WORK];
+    let mut feed_forward = [0.0_f32; MAX_WORK];
     let word = view(binding, WORD)?.bytes().ok_or(Error::ModelInvalid)?;
     for (token_index, token_id) in token_ids.iter().copied().enumerate() {
         let token = usize::try_from(token_id).map_err(|_| Error::InvalidRequest)?;
-        if token >= vocabulary { return Err(Error::InvalidRequest); }
+        if token >= vocabulary {
+            return Err(Error::InvalidRequest);
+        }
         let start = token_index.checked_mul(hidden).ok_or(Error::Capacity)?;
         let word_start = token.checked_mul(hidden).ok_or(Error::Capacity)?;
         for feature in 0..hidden {
-            sequence_a[start + feature] = read_f32(word, word_start + feature).ok_or(Error::ModelInvalid)?
+            sequence_a[start + feature] = read_f32(word, word_start + feature)
+                .ok_or(Error::ModelInvalid)?
                 + read_f32(position, start + feature).ok_or(Error::ModelInvalid)?
                 + read_f32(token_type, feature).ok_or(Error::ModelInvalid)?;
         }
-        if !layer_norm(&mut sequence_a[start..start + hidden], norm_weight, norm_bias, 1.0e-12) { return Err(Error::ModelInvalid); }
+        if !layer_norm(
+            &mut sequence_a[start..start + hidden],
+            norm_weight,
+            norm_bias,
+            1.0e-12,
+        ) {
+            return Err(Error::ModelInvalid);
+        }
     }
     for layer_index in 0..binding.text_layer_count {
         let layer = binding.text_layers[layer_index].ok_or(Error::ModelInvalid)?;
         for token_index in 0..token_ids.len() {
-            let start = token_index * hidden; let input = &sequence_a[start..start + hidden];
-            let q = &mut query[start..start + hidden]; let k = &mut key[start..start + hidden]; let v = &mut value[start..start + hidden];
-            if !matvec(layer.query, hidden, hidden, input, q) || !matvec(layer.key, hidden, hidden, input, k) || !matvec(layer.value, hidden, hidden, input, v) { return Err(Error::ModelInvalid); }
+            let start = token_index * hidden;
+            let input = &sequence_a[start..start + hidden];
+            let q = &mut query[start..start + hidden];
+            let k = &mut key[start..start + hidden];
+            let v = &mut value[start..start + hidden];
+            if !matvec(layer.query, hidden, hidden, input, q)
+                || !matvec(layer.key, hidden, hidden, input, k)
+                || !matvec(layer.value, hidden, hidden, input, v)
+            {
+                return Err(Error::ModelInvalid);
+            }
             for feature in 0..hidden {
                 q[feature] += read_f32(layer.query_bias, feature).ok_or(Error::ModelInvalid)?;
                 k[feature] += read_f32(layer.key_bias, feature).ok_or(Error::ModelInvalid)?;
@@ -420,38 +470,112 @@ fn run_layered(
             }
         }
         for token_index in 0..token_ids.len() {
-            let start = token_index * hidden; context[start..start + hidden].fill(0.0);
+            let start = token_index * hidden;
+            context[start..start + hidden].fill(0.0);
             for head in 0..heads {
                 let qstart = start + head * head_dim;
-                for other in 0..token_ids.len() {
-                    let ostart = other * hidden + head * head_dim; let mut score = 0.0;
-                    for feature in 0..head_dim { score += query[qstart + feature] * key[ostart + feature]; }
-                    scores[other] = score * 0.176_776_7;
+                for (other, score_slot) in scores.iter_mut().enumerate().take(token_ids.len()) {
+                    let ostart = other * hidden + head * head_dim;
+                    let mut score = 0.0;
+                    for feature in 0..head_dim {
+                        score = query[qstart + feature].mul_add(key[ostart + feature], score);
+                    }
+                    *score_slot = score * 0.176_776_7;
                 }
-                let max_score = scores[..token_ids.len()].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let max_score = scores[..token_ids.len()]
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
                 let mut sum = 0.0_f32;
-                for score in &mut scores[..token_ids.len()] { *score = (*score - max_score).exp(); sum += *score; }
-                if !sum.is_finite() || sum <= 0.0 { return Err(Error::ModelInvalid); }
-                for score in &mut scores[..token_ids.len()] { *score /= sum; }
-                for other in 0..token_ids.len() {
+                for score in &mut scores[..token_ids.len()] {
+                    *score = (*score - max_score).exp();
+                    sum += *score;
+                }
+                if !sum.is_finite() || sum <= 0.0 {
+                    return Err(Error::ModelInvalid);
+                }
+                for score in &mut scores[..token_ids.len()] {
+                    *score /= sum;
+                }
+                for (other, score) in scores.iter().enumerate().take(token_ids.len()) {
                     let vstart = other * hidden + head * head_dim;
-                    for feature in 0..head_dim { context[start + head * head_dim + feature] += value[vstart + feature] * scores[other]; }
+                    for feature in 0..head_dim {
+                        let index = start + head * head_dim + feature;
+                        context[index] = value[vstart + feature].mul_add(*score, context[index]);
+                    }
                 }
             }
-            if !matvec(layer.attention_output, hidden, hidden, &context[start..start + hidden], &mut hidden_values[..hidden]) { return Err(Error::ModelInvalid); }
-            for feature in 0..hidden { hidden_values[feature] += read_f32(layer.attention_output_bias, feature).ok_or(Error::ModelInvalid)? + sequence_a[start + feature]; }
-            if !layer_norm(&mut hidden_values[..hidden], layer.attention_norm_weight, layer.attention_norm_bias, 1.0e-12) { return Err(Error::ModelInvalid); }
-            if !matvec(layer.intermediate, hidden * 4, hidden, &hidden_values[..hidden], &mut feed_forward[..hidden * 4]) { return Err(Error::ModelInvalid); }
-            for feature in 0..hidden * 4 { feed_forward[feature] = gelu(feed_forward[feature] + read_f32(layer.intermediate_bias, feature).ok_or(Error::ModelInvalid)?); }
+            if !matvec(
+                layer.attention_output,
+                hidden,
+                hidden,
+                &context[start..start + hidden],
+                &mut hidden_values[..hidden],
+            ) {
+                return Err(Error::ModelInvalid);
+            }
+            for feature in 0..hidden {
+                hidden_values[feature] += read_f32(layer.attention_output_bias, feature)
+                    .ok_or(Error::ModelInvalid)?
+                    + sequence_a[start + feature];
+            }
+            if !layer_norm(
+                &mut hidden_values[..hidden],
+                layer.attention_norm_weight,
+                layer.attention_norm_bias,
+                1.0e-12,
+            ) {
+                return Err(Error::ModelInvalid);
+            }
+            if !matvec(
+                layer.intermediate,
+                hidden * 4,
+                hidden,
+                &hidden_values[..hidden],
+                &mut feed_forward[..hidden * 4],
+            ) {
+                return Err(Error::ModelInvalid);
+            }
+            for (feature, value) in feed_forward.iter_mut().enumerate().take(hidden * 4) {
+                *value = gelu(
+                    *value
+                        + read_f32(layer.intermediate_bias, feature).ok_or(Error::ModelInvalid)?,
+                );
+            }
             let output_row = &mut sequence_b[start..start + hidden];
-            if !matvec(layer.output, hidden, hidden * 4, &feed_forward[..hidden * 4], output_row) { return Err(Error::ModelInvalid); }
-            for feature in 0..hidden { output_row[feature] += read_f32(layer.output_bias, feature).ok_or(Error::ModelInvalid)? + hidden_values[feature]; }
-            if !layer_norm(output_row, layer.output_norm_weight, layer.output_norm_bias, 1.0e-12) { return Err(Error::ModelInvalid); }
+            if !matvec(
+                layer.output,
+                hidden,
+                hidden * 4,
+                &feed_forward[..hidden * 4],
+                output_row,
+            ) {
+                return Err(Error::ModelInvalid);
+            }
+            for feature in 0..hidden {
+                output_row[feature] += read_f32(layer.output_bias, feature)
+                    .ok_or(Error::ModelInvalid)?
+                    + hidden_values[feature];
+            }
+            if !layer_norm(
+                output_row,
+                layer.output_norm_weight,
+                layer.output_norm_bias,
+                1.0e-12,
+            ) {
+                return Err(Error::ModelInvalid);
+            }
         }
         core::mem::swap(&mut sequence_a, &mut sequence_b);
     }
-    pooled[..hidden].fill(0.0); let scale = 1.0 / token_ids.len() as f32;
-    for token_index in 0..token_ids.len() { for feature in 0..hidden { pooled[feature] += sequence_a[token_index * hidden + feature] * scale; } }
+    pooled[..hidden].fill(0.0);
+    let scale = 1.0 / token_ids.len() as f32;
+    for token_index in 0..token_ids.len() {
+        for feature in 0..hidden {
+            pooled[feature] =
+                sequence_a[token_index * hidden + feature].mul_add(scale, pooled[feature]);
+        }
+    }
     Ok(())
 }
 
@@ -466,45 +590,80 @@ pub fn execute_text(
     token_ids: &[i32],
     output: &mut [f32],
 ) -> Result<usize, Error> {
-    if token_ids.is_empty() || output.is_empty() { return Err(Error::InvalidRequest); }
-    if token_ids.len() > MAX_TOKEN_POSITIONS { return Err(Error::Capacity); }
+    if token_ids.is_empty() || output.is_empty() {
+        return Err(Error::InvalidRequest);
+    }
+    if token_ids.len() > MAX_TOKEN_POSITIONS {
+        return Err(Error::Capacity);
+    }
     let layer_count = binding.text_layer_count;
-    if layer_count > MAX_TEXT_LAYERS { return Err(Error::Capacity); }
+    if layer_count > MAX_TEXT_LAYERS {
+        return Err(Error::Capacity);
+    }
     let word_tensor = view(binding, WORD)?;
     let word_meta = word_tensor.metadata().ok_or(Error::ModelInvalid)?;
     let word_dims = word_meta.dimensions();
-    if word_meta.tensor_type().wire_code() != 0 || word_meta.dimension_count() != 2 { return Err(Error::UnsupportedTensor); }
+    if word_meta.tensor_type().wire_code() != 0 || word_meta.dimension_count() != 2 {
+        return Err(Error::UnsupportedTensor);
+    }
     let hidden = usize::try_from(word_dims[0]).map_err(|_| Error::UnsupportedTensor)?;
     let vocabulary = usize::try_from(word_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
-    if hidden == 0 || hidden > MAX_WORK || hidden % 12 != 0 || vocabulary == 0 { return Err(Error::Capacity); }
+    if hidden == 0 || hidden > MAX_WORK || hidden % 12 != 0 || vocabulary == 0 {
+        return Err(Error::Capacity);
+    }
     let word = word_tensor.bytes().ok_or(Error::ModelInvalid)?;
-    if !f32_count(word, hidden.checked_mul(vocabulary).ok_or(Error::Capacity)?) { return Err(Error::ModelInvalid); }
+    if !f32_count(word, hidden.checked_mul(vocabulary).ok_or(Error::Capacity)?) {
+        return Err(Error::ModelInvalid);
+    }
     let position_tensor = view(binding, POSITION)?;
     let position_meta = position_tensor.metadata().ok_or(Error::ModelInvalid)?;
     let position_dims = position_meta.dimensions();
-    if position_meta.tensor_type().wire_code() != 0 || position_meta.dimension_count() != 2 { return Err(Error::UnsupportedTensor); }
+    if position_meta.tensor_type().wire_code() != 0 || position_meta.dimension_count() != 2 {
+        return Err(Error::UnsupportedTensor);
+    }
     let max_positions = usize::try_from(position_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
-    if position_dims[0] != u64::try_from(hidden).map_err(|_| Error::UnsupportedTensor)? || max_positions == 0 || max_positions < token_ids.len() { return Err(Error::UnsupportedTensor); }
+    if position_dims[0] != u64::try_from(hidden).map_err(|_| Error::UnsupportedTensor)?
+        || max_positions == 0
+        || max_positions < token_ids.len()
+    {
+        return Err(Error::UnsupportedTensor);
+    }
     let position = matrix(binding, POSITION, max_positions, hidden)?;
     let token_type_tensor = view(binding, TOKEN_TYPE)?;
     let token_type_meta = token_type_tensor.metadata().ok_or(Error::ModelInvalid)?;
     let token_type_dims = token_type_meta.dimensions();
-    if token_type_meta.tensor_type().wire_code() != 0 || token_type_meta.dimension_count() != 2 { return Err(Error::UnsupportedTensor); }
-    let token_type_rows = usize::try_from(token_type_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
-    if token_type_rows == 0 || token_type_dims[0] != u64::try_from(hidden).map_err(|_| Error::UnsupportedTensor)? { return Err(Error::UnsupportedTensor); }
+    if token_type_meta.tensor_type().wire_code() != 0 || token_type_meta.dimension_count() != 2 {
+        return Err(Error::UnsupportedTensor);
+    }
+    let token_type_rows =
+        usize::try_from(token_type_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
+    if token_type_rows == 0
+        || token_type_dims[0] != u64::try_from(hidden).map_err(|_| Error::UnsupportedTensor)?
+    {
+        return Err(Error::UnsupportedTensor);
+    }
     let token_type = matrix(binding, TOKEN_TYPE, token_type_rows, hidden)?;
     let norm_weight = vector(binding, NORM_WEIGHT, hidden)?;
     let norm_bias = vector(binding, NORM_BIAS, hidden)?;
-    let dense_meta = view(binding, DENSE)?.metadata().ok_or(Error::ModelInvalid)?;
+    let dense_meta = view(binding, DENSE)?
+        .metadata()
+        .ok_or(Error::ModelInvalid)?;
     let dense_dims = dense_meta.dimensions();
     let dense_output = usize::try_from(dense_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
-    if dense_output > MAX_WORK { return Err(Error::Capacity); }
+    if dense_output > MAX_WORK {
+        return Err(Error::Capacity);
+    }
     let dense = matrix(binding, DENSE, dense_output, hidden)?;
     let dense_bias = vector(binding, DENSE_BIAS, dense_output)?;
-    let expand_meta = view(binding, EXPAND)?.metadata().ok_or(Error::ModelInvalid)?;
+    let expand_meta = view(binding, EXPAND)?
+        .metadata()
+        .ok_or(Error::ModelInvalid)?;
     let expand_dims = expand_meta.dimensions();
-    let projection_hidden = usize::try_from(expand_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
-    if projection_hidden > MAX_WORK { return Err(Error::Capacity); }
+    let projection_hidden =
+        usize::try_from(expand_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
+    if projection_hidden > MAX_WORK {
+        return Err(Error::Capacity);
+    }
     let expand = matrix(binding, EXPAND, projection_hidden, dense_output)?;
     let expand_bias = vector(binding, EXPAND_BIAS, projection_hidden)?;
     let expand_norm_weight = vector(binding, EXPAND_NORM_WEIGHT, projection_hidden)?;
@@ -513,46 +672,108 @@ pub fn execute_text(
     let residual_bias = vector(binding, RESIDUAL_BIAS, projection_hidden)?;
     let residual_norm_weight = vector(binding, RESIDUAL_NORM_WEIGHT, projection_hidden)?;
     let residual_norm_bias = vector(binding, RESIDUAL_NORM_BIAS, projection_hidden)?;
-    let project_meta = view(binding, PROJECT)?.metadata().ok_or(Error::ModelInvalid)?;
+    let project_meta = view(binding, PROJECT)?
+        .metadata()
+        .ok_or(Error::ModelInvalid)?;
     let project_dims = project_meta.dimensions();
     let embedding = usize::try_from(project_dims[1]).map_err(|_| Error::UnsupportedTensor)?;
-    if embedding == 0 || embedding > output.len() || embedding > MAX_WORK { return Err(Error::Capacity); }
+    if embedding == 0 || embedding > output.len() || embedding > MAX_WORK {
+        return Err(Error::Capacity);
+    }
     let project = matrix(binding, PROJECT, embedding, projection_hidden)?;
     let project_bias = vector(binding, PROJECT_BIAS, embedding)?;
     let mut pooled = [0.0_f32; MAX_WORK];
     let mut dense_values = [0.0_f32; MAX_WORK];
     let mut expanded = [0.0_f32; MAX_WORK];
-    if layer_count == 0 {
-        for (position_index, token_id) in token_ids.iter().copied().enumerate() {
-            let token = usize::try_from(token_id).map_err(|_| Error::InvalidRequest)?;
-            if token >= vocabulary { return Err(Error::InvalidRequest); }
-            let position_start = position_index.checked_mul(hidden).ok_or(Error::Capacity)?;
-            let word_start = token.checked_mul(hidden).ok_or(Error::Capacity)?;
-            for feature in 0..hidden {
-                expanded[position_start + feature] = read_f32(word, word_start + feature).ok_or(Error::ModelInvalid)? + read_f32(position, position_start + feature).ok_or(Error::ModelInvalid)? + read_f32(token_type, feature).ok_or(Error::ModelInvalid)?;
-            }
-            if !layer_norm(&mut expanded[position_start..position_start + hidden], norm_weight, norm_bias, 1.0e-12) { return Err(Error::ModelInvalid); }
-        }
-        pooled[..hidden].fill(0.0);
-        let scale = 1.0 / token_ids.len() as f32;
-        for token_index in 0..token_ids.len() { let start = token_index.checked_mul(hidden).ok_or(Error::Capacity)?; for feature in 0..hidden { pooled[feature] += expanded[start + feature] * scale; } }
-    } else {
-        run_layered(binding, token_ids, hidden, vocabulary, max_positions, position, token_type, norm_weight, norm_bias, &mut pooled)?;
+    run_layered(
+        binding,
+        token_ids,
+        hidden,
+        vocabulary,
+        max_positions,
+        position,
+        token_type,
+        norm_weight,
+        norm_bias,
+        &mut pooled,
+    )?;
+    if !matvec(
+        dense,
+        dense_output,
+        hidden,
+        &pooled[..hidden],
+        &mut dense_values[..dense_output],
+    ) {
+        return Err(Error::ModelInvalid);
     }
-    if !matvec(dense, dense_output, hidden, &pooled[..hidden], &mut dense_values[..dense_output]) { return Err(Error::ModelInvalid); }
-    for (index, value) in dense_values[..dense_output].iter_mut().enumerate() { *value += read_f32(dense_bias, index).ok_or(Error::ModelInvalid)?; }
-    if !l2_normalize(&mut dense_values[..dense_output]) { return Err(Error::ModelInvalid); }
-    if !matvec(expand, projection_hidden, dense_output, &dense_values[..dense_output], &mut expanded[..projection_hidden]) { return Err(Error::ModelInvalid); }
-    for (index, value) in expanded[..projection_hidden].iter_mut().enumerate() { *value = gelu(*value + read_f32(expand_bias, index).ok_or(Error::ModelInvalid)?); }
-    if !layer_norm(&mut expanded[..projection_hidden], expand_norm_weight, expand_norm_bias, 1.0e-5) { return Err(Error::ModelInvalid); }
+    for (index, value) in dense_values[..dense_output].iter_mut().enumerate() {
+        *value += read_f32(dense_bias, index).ok_or(Error::ModelInvalid)?;
+    }
+    if !l2_normalize(&mut dense_values[..dense_output]) {
+        return Err(Error::ModelInvalid);
+    }
+    if !matvec(
+        expand,
+        projection_hidden,
+        dense_output,
+        &dense_values[..dense_output],
+        &mut expanded[..projection_hidden],
+    ) {
+        return Err(Error::ModelInvalid);
+    }
+    for (index, value) in expanded[..projection_hidden].iter_mut().enumerate() {
+        *value = gelu(*value + read_f32(expand_bias, index).ok_or(Error::ModelInvalid)?);
+    }
+    if !layer_norm(
+        &mut expanded[..projection_hidden],
+        expand_norm_weight,
+        expand_norm_bias,
+        1.0e-5,
+    ) {
+        return Err(Error::ModelInvalid);
+    }
     let mut residual_values = [0.0_f32; MAX_WORK];
-    if !matvec(residual, projection_hidden, projection_hidden, &expanded[..projection_hidden], &mut residual_values[..projection_hidden]) { return Err(Error::ModelInvalid); }
-    for (index, value) in residual_values[..projection_hidden].iter_mut().enumerate() { *value = gelu(*value + read_f32(residual_bias, index).ok_or(Error::ModelInvalid)?); }
-    if !layer_norm(&mut residual_values[..projection_hidden], residual_norm_weight, residual_norm_bias, 1.0e-5) { return Err(Error::ModelInvalid); }
-    for (expanded_value, residual_value) in expanded[..projection_hidden].iter_mut().zip(residual_values[..projection_hidden].iter().copied()) { *expanded_value += residual_value; }
-    if !matvec(project, embedding, projection_hidden, &expanded[..projection_hidden], &mut output[..embedding]) { return Err(Error::ModelInvalid); }
-    for (index, value) in output[..embedding].iter_mut().enumerate() { *value += read_f32(project_bias, index).ok_or(Error::ModelInvalid)?; }
-    if !l2_normalize(&mut output[..embedding]) { return Err(Error::ModelInvalid); }
+    if !matvec(
+        residual,
+        projection_hidden,
+        projection_hidden,
+        &expanded[..projection_hidden],
+        &mut residual_values[..projection_hidden],
+    ) {
+        return Err(Error::ModelInvalid);
+    }
+    for (index, value) in residual_values[..projection_hidden].iter_mut().enumerate() {
+        *value = gelu(*value + read_f32(residual_bias, index).ok_or(Error::ModelInvalid)?);
+    }
+    if !layer_norm(
+        &mut residual_values[..projection_hidden],
+        residual_norm_weight,
+        residual_norm_bias,
+        1.0e-5,
+    ) {
+        return Err(Error::ModelInvalid);
+    }
+    for (expanded_value, residual_value) in expanded[..projection_hidden]
+        .iter_mut()
+        .zip(residual_values[..projection_hidden].iter().copied())
+    {
+        *expanded_value += residual_value;
+    }
+    if !matvec(
+        project,
+        embedding,
+        projection_hidden,
+        &expanded[..projection_hidden],
+        &mut output[..embedding],
+    ) {
+        return Err(Error::ModelInvalid);
+    }
+    for (index, value) in output[..embedding].iter_mut().enumerate() {
+        *value += read_f32(project_bias, index).ok_or(Error::ModelInvalid)?;
+    }
+    if !l2_normalize(&mut output[..embedding]) {
+        return Err(Error::ModelInvalid);
+    }
     Ok(embedding)
 }
 #[cfg(test)]

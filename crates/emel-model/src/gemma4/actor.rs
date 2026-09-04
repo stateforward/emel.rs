@@ -313,8 +313,8 @@ impl Context {
             .block_count
             .saturating_sub(self.parameters.attention_shared_kv_layers);
         let shared = index >= shared_start;
-        let sliding = usize::try_from(index).ok().is_some_and(|index| {
-            index < self.parameters.sliding_window_pattern_count as usize
+        let sliding = usize::try_from(index).is_ok_and(|index| {
+            index < usize::try_from(self.parameters.sliding_window_pattern_count).unwrap_or(0)
                 && self
                     .parameters
                     .sliding_window_pattern
@@ -381,7 +381,7 @@ impl Context {
 }
 
 const fn child_ok(result: &Cell<ChildResult>) -> bool {
-    result.get().is_ok()
+    matches!(result.get(), Ok(()))
 }
 
 impl Gemma4MachineStateMachineContext for Context {
@@ -583,10 +583,10 @@ impl Gemma4MachineStateMachineContext for Context {
         Ok(())
     }
     fn guard_validate_visit_ok(&self, event: &ValidateRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.descriptor.get().is_ok())
+        Ok(event.descriptor.get().is_ok_and(|_| true))
     }
     fn guard_validate_visit_error(&self, event: &ValidateRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.descriptor.get().is_err())
+        Ok(!event.descriptor.get().is_ok_and(|_| true))
     }
     fn effect_cache_validated_block(&mut self, event: ValidateRuntime<'_>) -> Result<(), ()> {
         let index = usize::try_from(event.event.index).expect("validated index");
@@ -655,10 +655,10 @@ impl Gemma4MachineStateMachineContext for Context {
         Ok(())
     }
     fn guard_visit_child_ok(&self, event: &VisitRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.child_result.get().is_ok())
+        Ok(event.child_result.get().is_ok_and(|_| true))
     }
     fn guard_visit_child_error(&self, event: &VisitRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.child_result.get().is_err())
+        Ok(!event.child_result.get().is_ok_and(|_| true))
     }
     fn effect_visit_ok(&mut self, event: VisitRuntime<'_>) -> Result<(), ()> {
         event.result.set(event.child_result.get());
@@ -721,10 +721,10 @@ impl Gemma4MachineStateMachineContext for Context {
         Ok(())
     }
     fn guard_release_child_ok(&self, event: &ReleaseRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.child_result.borrow().is_ok())
+        Ok(event.child_result.borrow().as_ref().is_ok_and(|_| true))
     }
     fn guard_release_child_error(&self, event: &ReleaseRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.child_result.borrow().is_err())
+        Ok(!event.child_result.borrow().as_ref().is_ok_and(|_| true))
     }
     fn effect_release_ok(&mut self, event: ReleaseRuntime<'_>) -> Result<(), ()> {
         let common =

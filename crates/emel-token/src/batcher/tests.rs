@@ -421,6 +421,66 @@ fn sequence_payload_checks_cover_masks_primary_ids_and_short_inputs() {
 }
 
 #[test]
+fn short_primary_ids_are_invalid_before_sequence_mode_and_do_not_write_outputs() {
+    let ids = [1, 2];
+    let mut primary = [9; 2];
+    let mut masks = [9; 2];
+    let mut positions = [9; 2];
+    let mut output = [9; 2];
+    let result = TokenBatcher::new().process_event(request(
+        &ids,
+        32,
+        None,
+        1,
+        Some(&[0]),
+        None,
+        &mut primary,
+        &mut masks,
+        &mut positions,
+        &mut output,
+    ));
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+    assert_eq!(primary, [9; 2]);
+    assert_eq!(masks, [9; 2]);
+    assert_eq!(positions, [9; 2]);
+    assert_eq!(output, [9; 2]);
+}
+
+#[test]
+fn short_output_mask_input_is_invalid_before_output_mode_and_does_not_write_output() {
+    let ids = [1, 2];
+    let mut primary = [9; 2];
+    let mut masks = [9; 2];
+    let mut positions = [9; 2];
+    let mut output = [9; 2];
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 32,
+        seq_masks: None,
+        seq_mask_words: 1,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: Some(&[1]),
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
+    assert_eq!(result, Err(BatchError::InvalidRequest));
+    assert_eq!(output, [9; 2]);
+}
+
+#[test]
 fn incomplete_multiword_masks_are_invalid_before_mode_selection() {
     let ids = [1, 2];
     let short_masks = [1_u64, 0_u64];
@@ -1025,30 +1085,29 @@ fn short_flattened_masks_are_invalid_before_mode_selection() {
     let mut masks = [0; 2];
     let mut positions = [0; 2];
     let mut output = [0; 2];
-    let result = TokenBatcher::new()
-        .process_event(BatchRequest {
-            token_ids: &ids,
-            vocab_size: 10,
-            seq_masks: Some(&short_masks),
-            seq_mask_words: 1,
-            seq_primary_ids: None,
-            positions: None,
-            output_mask_input: None,
-            output_all: false,
-            enforce_single_output_per_seq: false,
-            resolve_position_seed: None,
-            seq_mask_words_out: None,
-            positions_count_out: None,
-            outputs_total_out: None,
-            on_done: None,
-            on_error: None,
-            outputs: BatchOutputs {
-                seq_primary_ids: &mut primary,
-                seq_masks: &mut masks,
-                positions: &mut positions,
-                output_mask: &mut output,
-            },
-        });
+    let result = TokenBatcher::new().process_event(BatchRequest {
+        token_ids: &ids,
+        vocab_size: 10,
+        seq_masks: Some(&short_masks),
+        seq_mask_words: 1,
+        seq_primary_ids: None,
+        positions: None,
+        output_mask_input: None,
+        output_all: false,
+        enforce_single_output_per_seq: false,
+        resolve_position_seed: None,
+        seq_mask_words_out: None,
+        positions_count_out: None,
+        outputs_total_out: None,
+        on_done: None,
+        on_error: None,
+        outputs: BatchOutputs {
+            seq_primary_ids: &mut primary,
+            seq_masks: &mut masks,
+            positions: &mut positions,
+            output_mask: &mut output,
+        },
+    });
     assert_eq!(result, Err(BatchError::InvalidRequest));
     assert_eq!(primary, [0, 0]);
     assert_eq!(masks, [0, 0]);

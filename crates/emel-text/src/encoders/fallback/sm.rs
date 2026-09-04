@@ -1,6 +1,8 @@
 //! Source-aligned bounded fallback text encoder actor.
 
 #![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
     clippy::derive_partial_eq_without_eq,
     clippy::module_name_repetitions,
     clippy::missing_errors_doc,
@@ -8,12 +10,17 @@
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
+    clippy::ptr_as_ptr,
+    clippy::ref_as_ptr,
+    clippy::too_many_lines,
     dead_code,
     unused_imports,
     missing_docs
 )]
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use sml::sml;
 
 /// Maximum vocabulary entries retained by the bounded fallback table.
@@ -42,54 +49,68 @@ pub enum EncoderError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EncodingDone { pub token_count: usize }
+pub struct EncodingDone {
+    pub token_count: usize,
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct EncodingError { pub error: EncoderError }
+pub struct EncodingError {
+    pub error: EncoderError,
+}
 pub type DoneCallback = fn(EncodingDone) -> bool;
 pub type ErrorCallback = fn(EncodingError) -> bool;
 
 /// Caller-owned bounded fallback request.
+#[derive(Clone, Copy)]
 pub struct EncodeRequest<'a> {
     pub vocabulary: &'a dyn VocabularyView,
     pub text: &'a [u8],
     pub preprocessed: bool,
-    pub token_ids: &'a mut [i32],
+    pub token_ids: &'a RefCell<&'a mut [i32]>,
     pub dispatch_done: Option<DoneCallback>,
     pub dispatch_error: Option<ErrorCallback>,
 }
-
 impl core::fmt::Debug for EncodeRequest<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EncodeRequest")
             .field("text_length", &self.text.len())
             .field("preprocessed", &self.preprocessed)
-            .field("token_capacity", &self.token_ids.len())
+            .field("token_capacity", &self.token_ids.borrow().len())
             .finish_non_exhaustive()
     }
 }
-
 impl<'a> EncodeRequest<'a> {
-    #[must_use]
     pub const fn new(
         vocabulary: &'a dyn VocabularyView,
         text: &'a [u8],
-        token_ids: &'a mut [i32],
+        token_ids: &'a RefCell<&'a mut [i32]>,
         dispatch_done: DoneCallback,
         dispatch_error: ErrorCallback,
     ) -> Self {
-        Self { vocabulary, text, preprocessed: false, token_ids, dispatch_done: Some(dispatch_done), dispatch_error: Some(dispatch_error) }
+        Self {
+            vocabulary,
+            text,
+            preprocessed: false,
+            token_ids,
+            dispatch_done: Some(dispatch_done),
+            dispatch_error: Some(dispatch_error),
+        }
     }
-
-    #[must_use]
     pub const fn with_callbacks(
         vocabulary: &'a dyn VocabularyView,
         text: &'a [u8],
-        token_ids: &'a mut [i32],
+        token_ids: &'a RefCell<&'a mut [i32]>,
         preprocessed: bool,
         dispatch_done: Option<DoneCallback>,
         dispatch_error: Option<ErrorCallback>,
     ) -> Self {
-        Self { vocabulary, text, preprocessed, token_ids, dispatch_done, dispatch_error }
+        Self {
+            vocabulary,
+            text,
+            preprocessed,
+            token_ids,
+            dispatch_done,
+            dispatch_error,
+        }
     }
 }
 
@@ -98,13 +119,32 @@ pub struct EventsEncodingDone;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EventsEncodingError;
 
-/// Runtime event. Cells carry completion state without heap allocation.
+/// Mutable result context for one fallback encoding dispatch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EncodeContext {
+    /// Last error produced by validation, table preparation, or emission.
+    pub error: EncoderError,
+    /// Number of token IDs committed to the caller-owned output buffer.
+    pub token_count: usize,
+    /// Whether the state machine observed an unexpected event or transition.
+    pub unexpected: bool,
+}
+
+/// Runtime event carrying owned request and caller-owned context.
+#[derive(Clone)]
 pub struct RuntimeEncodeRuntime<'a> {
-    pub request: &'a mut EncodeRequest<'a>,
-    pub error: Cell<EncoderError>,
-    pub token_count: Cell<usize>,
+    pub request: EncodeRequest<'a>,
+    pub context: &'a RefCell<EncodeContext>,
     pub emit_error: Cell<EncoderError>,
     pub emit_count: Cell<usize>,
+}
+impl core::fmt::Debug for RuntimeEncodeRuntime<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RuntimeEncodeRuntime")
+            .field("request", &self.request)
+            .field("context", &self.context.borrow())
+            .finish_non_exhaustive()
+    }
 }
 
 sml! {
@@ -188,26 +228,65 @@ pub struct TextEncodersFallbackContext {
 }
 
 impl Default for TextEncodersFallbackContext {
-    fn default() -> Self { Self { hashes: [0; MAX_FALLBACK_TABLE_SLOTS], values: [-1; MAX_FALLBACK_TABLE_SLOTS], vocabulary_identity: 0, tables_ready: false, unexpected: false } }
+    fn default() -> Self {
+        Self {
+            hashes: [0; MAX_FALLBACK_TABLE_SLOTS],
+            values: [-1; MAX_FALLBACK_TABLE_SLOTS],
+            vocabulary_identity: 0,
+            tables_ready: false,
+            unexpected: false,
+        }
+    }
 }
 
 impl TextEncodersFallbackContext {
-    fn reset_table(&mut self, identity: usize) { self.hashes.fill(0); self.values.fill(-1); self.vocabulary_identity = identity; self.tables_ready = false; }
-    fn unexpected(&mut self) { self.unexpected = true; }
+    fn reset_table(&mut self, identity: usize) {
+        self.hashes.fill(0);
+        self.values.fill(-1);
+        self.vocabulary_identity = identity;
+        self.tables_ready = false;
+    }
+    fn unexpected(&mut self) {
+        self.unexpected = true;
+    }
     fn insert(&mut self, vocab: &dyn VocabularyView, text: &[u8], id: i32) -> bool {
-        let hash = hash_bytes(text); let mut slot = (hash as usize) & (MAX_FALLBACK_TABLE_SLOTS - 1);
+        let hash = hash_bytes(text);
+        let mut slot = (hash as usize) & (MAX_FALLBACK_TABLE_SLOTS - 1);
         for _ in 0..MAX_FALLBACK_TABLE_SLOTS {
-            if self.hashes[slot] == 0 { self.hashes[slot] = hash; self.values[slot] = id; return true; }
-            if self.hashes[slot] == hash && vocab.token(self.values[slot] as usize).is_some_and(|value| value == text) { return true; }
+            let slot_hash = self.hashes[slot];
+            if slot_hash == 0 {
+                self.hashes[slot] = hash;
+                self.values[slot] = id;
+                return true;
+            }
+            let existing = self.values[slot];
+            if existing >= 0
+                && slot_hash == hash
+                && vocab
+                    .token(existing as usize)
+                    .is_some_and(|value| value == text)
+            {
+                self.values[slot] = id;
+                return true;
+            }
             slot = (slot + 1) & (MAX_FALLBACK_TABLE_SLOTS - 1);
         }
         false
     }
     fn lookup(&self, vocab: &dyn VocabularyView, byte: u8) -> i32 {
-        let hash = hash_bytes(&[byte]); let mut slot = (hash as usize) & (MAX_FALLBACK_TABLE_SLOTS - 1);
+        let hash = hash_bytes(&[byte]);
+        let mut slot = (hash as usize) & (MAX_FALLBACK_TABLE_SLOTS - 1);
         for _ in 0..MAX_FALLBACK_TABLE_SLOTS {
-            if self.hashes[slot] == 0 { return -1; }
-            if self.hashes[slot] == hash { let id = self.values[slot]; if vocab.token(id as usize).is_some_and(|text| text == [byte]) { return id; } }
+            if self.hashes[slot] == 0 {
+                return -1;
+            }
+            let id = self.values[slot];
+            if id >= 0
+                && self.hashes[slot] == hash
+                && vocab.token(id as usize).is_some_and(|text| text == [byte])
+            {
+                return id;
+            }
             slot = (slot + 1) & (MAX_FALLBACK_TABLE_SLOTS - 1);
         }
         -1
@@ -215,87 +294,369 @@ impl TextEncodersFallbackContext {
 }
 
 impl TextEncodersFallbackStateMachineContext for TextEncodersFallbackContext {
-    fn apply_emit_result_failed(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.token_count.set(0); event.error.set(event.emit_error.get()); Ok(()) }
-    fn apply_emit_result_ok(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.token_count.set(event.emit_count.get()); event.error.set(EncoderError::None); Ok(()) }
-    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.error.set(EncoderError::None); event.token_count.set(0); event.emit_error.set(EncoderError::None); event.emit_count.set(0); self.unexpected = false; Ok(()) }
-    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { self.begin_encode(event)?; self.reset_table(identity(event.request.vocabulary)); Ok(()) }
-    fn emit_result_failed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.emit_error.get() != EncoderError::None) }
-    fn emit_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.emit_error.get() == EncoderError::None) }
-    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::Backend) }
-    fn encode_result_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::InvalidArgument) }
-    fn encode_result_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::ModelInvalid) }
-    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::None) }
-    fn encode_result_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::Unexpected) }
-    fn ensure_last_error_from_emit_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_error(event) }
-    fn ensure_last_error_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_error(event) }
-    fn ensure_last_error_from_encode_table_prepare(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { ensure_error(event) }
-    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!valid(event)) }
-    fn mark_done_from_encode_precheck_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.error.set(EncoderError::None); Ok(()) }
-    fn mark_done_from_encode_result_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.error.set(EncoderError::None); Ok(()) }
-    fn on_unexpected_events_encoding_done(&mut self, _event: &EventsEncodingDone) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_events_encoding_error(&mut self, _event: &EventsEncodingError) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_runtime_encode_runtime(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.error.set(EncoderError::Unexpected); self.unexpected(); Ok(()) }
-    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
+    fn apply_emit_result_failed(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        let mut c = event.context.borrow_mut();
+        c.token_count = 0;
+        c.error = event.emit_error.get();
+        Ok(())
+    }
+    fn apply_emit_result_ok(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        let mut c = event.context.borrow_mut();
+        c.token_count = event.emit_count.get();
+        c.error = EncoderError::None;
+        Ok(())
+    }
+    fn begin_encode(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        let mut c = event.context.borrow_mut();
+        c.error = EncoderError::None;
+        c.token_count = 0;
+        event.emit_error.set(EncoderError::None);
+        event.emit_count.set(0);
+        self.unexpected = false;
+        Ok(())
+    }
+    fn begin_encode_sync_vocab(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+        self.begin_encode(event)?;
+        self.reset_table(identity(event.request.vocabulary));
+        Ok(())
+    }
+    fn emit_result_failed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.emit_error.get() != EncoderError::None)
+    }
+    fn emit_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.emit_error.get() == EncoderError::None)
+    }
+    fn encode_result_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::Backend)
+    }
+    fn encode_result_invalid_argument_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::InvalidArgument)
+    }
+    fn encode_result_model_invalid_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::ModelInvalid)
+    }
+    fn encode_result_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::None)
+    }
+    fn encode_result_unclassified_error_code(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::Unexpected)
+    }
+    fn ensure_last_error_from_emit_result_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        ensure_error(event)
+    }
+    fn ensure_last_error_from_encode_result_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        ensure_error(event)
+    }
+    fn ensure_last_error_from_encode_table_prepare(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        ensure_error(event)
+    }
+    fn invalid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(!valid(event))
+    }
+    fn mark_done_from_encode_precheck_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        event.context.borrow_mut().error = EncoderError::None;
+        Ok(())
+    }
+    fn mark_done_from_encode_result_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        event.context.borrow_mut().error = EncoderError::None;
+        Ok(())
+    }
+    fn on_unexpected_events_encoding_done(
+        &mut self,
+        _event: &EventsEncodingDone,
+    ) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_events_encoding_error(
+        &mut self,
+        _event: &EventsEncodingError,
+    ) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_runtime_encode_runtime(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        let mut context = event.context.borrow_mut();
+        context.token_count = 0;
+        context.error = EncoderError::Unexpected;
+        context.unexpected = true;
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_unexp_wild(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
     fn prepare_tables(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
-        let vocab = event.request.vocabulary; let count = vocab.token_count(); self.reset_table(identity(vocab));
-        if count > MAX_FALLBACK_TOKENS { event.error.set(EncoderError::InvalidArgument); return Ok(()); }
-        for index in 0..count { let Some(text) = vocab.token(index) else { event.error.set(EncoderError::ModelInvalid); return Ok(()); }; if !text.is_empty() && !self.insert(vocab, text, index as i32) { event.error.set(EncoderError::InvalidArgument); return Ok(()); } }
-        self.tables_ready = true; event.error.set(EncoderError::None); Ok(())
+        let vocab = event.request.vocabulary;
+        let key = identity(vocab);
+        if self.tables_ready && self.vocabulary_identity == key {
+            event.context.borrow_mut().error = EncoderError::None;
+            return Ok(());
+        }
+        let count = vocab.token_count();
+        self.reset_table(key);
+        let mut c = event.context.borrow_mut();
+        if count > MAX_FALLBACK_TOKENS {
+            c.error = EncoderError::InvalidArgument;
+            return Ok(());
+        }
+        for index in 0..count {
+            let Some(text) = vocab.token(index) else {
+                c.error = EncoderError::ModelInvalid;
+                return Ok(());
+            };
+            if !text.is_empty() {
+                let Ok(id) = i32::try_from(index) else {
+                    c.error = EncoderError::InvalidArgument;
+                    return Ok(());
+                };
+                if !self.insert(vocab, text, id) {
+                    c.error = EncoderError::InvalidArgument;
+                    return Ok(());
+                }
+            }
+        }
+        self.tables_ready = true;
+        c.error = EncoderError::None;
+        Ok(())
     }
-    fn reject_invalid_encode_from_encode_validity_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject(event) }
-    fn reject_invalid_encode_from_encode_vocab_sync_decision(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { reject(event) }
+    fn reject_invalid_encode_from_encode_validity_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        reject(event)
+    }
+    fn reject_invalid_encode_from_encode_vocab_sync_decision(
+        &mut self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<(), ()> {
+        reject(event)
+    }
     fn run_encode_exec(&mut self, event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
-        let mut count = 0; let mut error = EncoderError::None;
-        for byte in event.request.text.iter().copied() { let token = self.lookup(event.request.vocabulary, byte); if token < 0 || count >= event.request.token_ids.len() { error = EncoderError::Backend; break; } event.request.token_ids[count] = token; count += 1; }
-        event.emit_count.set(count); event.emit_error.set(error); Ok(())
+        let mut output = event.request.token_ids.borrow_mut();
+        let mut count = 0;
+        let mut failed = false;
+        for byte in event.request.text.iter().copied() {
+            let token = self.lookup(event.request.vocabulary, byte);
+            let found = token >= 0;
+            let pushed = found && count < output.len();
+            if pushed {
+                output[count] = token;
+                count += 1;
+            }
+            failed |= !pushed;
+        }
+        event.emit_count.set(if failed { 0 } else { count });
+        event.emit_error.set(if failed {
+            EncoderError::Backend
+        } else {
+            EncoderError::None
+        });
+        Ok(())
     }
-    fn table_prepare_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::Backend) }
-    fn table_prepare_invalid_argument_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::InvalidArgument) }
-    fn table_prepare_model_invalid_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::ModelInvalid) }
-    fn table_prepare_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.tables_ready && event.error.get() == EncoderError::None) }
-    fn table_prepare_unclassified_error_code(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.error.get() == EncoderError::Unexpected) }
-    fn text_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(event.request.text.is_empty()) }
-    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(!event.request.text.is_empty()) }
-    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(valid(event)) }
-    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.vocabulary_identity != identity(event.request.vocabulary)) }
-    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> { Ok(self.vocabulary_identity == identity(event.request.vocabulary)) }
+    fn table_prepare_backend_error(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::Backend)
+    }
+    fn table_prepare_invalid_argument_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::InvalidArgument)
+    }
+    fn table_prepare_model_invalid_error(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::ModelInvalid)
+    }
+    fn table_prepare_ok(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.tables_ready && event.context.borrow().error == EncoderError::None)
+    }
+    fn table_prepare_unclassified_error_code(
+        &self,
+        event: &RuntimeEncodeRuntime<'_>,
+    ) -> Result<bool, ()> {
+        Ok(event.context.borrow().error == EncoderError::Unexpected)
+    }
+    fn text_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.request.text.is_empty())
+    }
+    fn text_non_empty(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(!event.request.text.is_empty())
+    }
+    fn valid_encode(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(valid(event))
+    }
+    fn vocab_changed(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.vocabulary_identity != identity(event.request.vocabulary))
+    }
+    fn vocab_unchanged(&self, event: &RuntimeEncodeRuntime<'_>) -> Result<bool, ()> {
+        Ok(self.vocabulary_identity == identity(event.request.vocabulary))
+    }
 }
 
-fn hash_bytes(bytes: &[u8]) -> u32 { let mut hash = 2_166_136_261u32; for byte in bytes { hash = hash.wrapping_mul(16_777_619) ^ u32::from(*byte); } if hash == 0 { 1 } else { hash } }
-fn identity(vocab: &dyn VocabularyView) -> usize { core::ptr::from_ref(vocab) as *const () as usize }
-fn valid(event: &RuntimeEncodeRuntime<'_>) -> bool { !event.request.token_ids.is_empty() && event.request.text.len() <= MAX_FALLBACK_TEXT_BYTES && event.request.vocabulary.token_count() <= MAX_FALLBACK_TOKENS }
-fn reject(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { event.error.set(EncoderError::InvalidArgument); event.token_count.set(0); Ok(()) }
-fn ensure_error(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> { if event.error.get() == EncoderError::None { event.error.set(EncoderError::Backend); } Ok(()) }
+fn hash_bytes(bytes: &[u8]) -> u32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in bytes {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    if hash == 0 { 1 } else { hash }
+}
+fn identity(vocab: &dyn VocabularyView) -> usize {
+    core::ptr::from_ref(vocab) as *const () as usize
+}
+fn valid(event: &RuntimeEncodeRuntime<'_>) -> bool {
+    !event.request.token_ids.borrow().is_empty()
+        && event.request.text.len() <= MAX_FALLBACK_TEXT_BYTES
+        && event.request.vocabulary.token_count() <= MAX_FALLBACK_TOKENS
+}
+fn reject(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+    let mut c = event.context.borrow_mut();
+    c.error = EncoderError::InvalidArgument;
+    c.token_count = 0;
+    Ok(())
+}
+fn ensure_error(event: &RuntimeEncodeRuntime<'_>) -> Result<(), ()> {
+    let mut c = event.context.borrow_mut();
+    if c.error == EncoderError::None {
+        c.error = EncoderError::Backend;
+    }
+    Ok(())
+}
 
 /// Single-writer synchronous fallback actor.
-pub struct TextEncodersFallbackActor<'a> { machine: TextEncodersFallbackStateMachine<'a, TextEncodersFallbackContext> }
-impl<'a> Default for TextEncodersFallbackActor<'a> { fn default() -> Self { Self::new() } }
-impl<'a> TextEncodersFallbackActor<'a> {
-    #[must_use]
-    pub fn new() -> Self { Self { machine: TextEncodersFallbackStateMachine::new(TextEncodersFallbackContext::default()) } }
-    pub fn process_event(&mut self, mut request: EncodeRequest<'a>) -> Result<EncodingDone, EncodingError> {
-        let event = RuntimeEncodeRuntime { request: &mut request, error: Cell::new(EncoderError::None), token_count: Cell::new(0), emit_error: Cell::new(EncoderError::None), emit_count: Cell::new(0) };
-        let accepted = self.machine.process_event(TextEncodersFallbackEvents::EventRuntimeEncodeRuntime(event));
-        let event = match accepted {
-            Ok(event) => event,
-            Err(_) => {
-                self.machine.set_state(TextEncodersFallbackStates::Unexpected);
-                let failure = EncodingError { error: EncoderError::Unexpected };
-                if let Some(callback) = request.dispatch_error { let _ = callback(failure); }
-                return Err(failure);
-            }
-        };
-        let error = event.error.get();
-        let count = event.token_count.get();
-        if error == EncoderError::None {
-            let done = EncodingDone { token_count: count };
-            if let Some(callback) = event.request.dispatch_done { let _ = callback(done); }
-            Ok(done)
-        } else {
-            let failure = EncodingError { error };
-            if let Some(callback) = event.request.dispatch_error { let _ = callback(failure); }
-            Err(failure)
-        }
+pub struct TextEncodersFallbackActor {
+    machine: TextEncodersFallbackStateMachine<TextEncodersFallbackContext>,
+    result: RefCell<EncodeContext>,
+}
+impl Default for TextEncodersFallbackActor {
+    fn default() -> Self {
+        Self::new()
     }
 }
-pub type Fallback<'a> = TextEncodersFallbackActor<'a>;
+impl TextEncodersFallbackActor {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: TextEncodersFallbackStateMachine::new(TextEncodersFallbackContext::default()),
+            result: RefCell::new(EncodeContext::default()),
+        }
+    }
+
+    pub fn process_event<'a>(
+        &'a mut self,
+        request: EncodeRequest<'a>,
+    ) -> Result<EncodingDone, EncodingError> {
+        *self.result.borrow_mut() = EncodeContext::default();
+        let accepted = {
+            let runtime = RuntimeEncodeRuntime {
+                request,
+                context: &self.result,
+                emit_error: Cell::new(EncoderError::None),
+                emit_count: Cell::new(0),
+            };
+            self.machine
+                .process_event(TextEncodersFallbackEvents::RuntimeEncodeRuntime(runtime))
+                .is_ok()
+        };
+        if !accepted {
+            let mut result = self.result.borrow_mut();
+            result.token_count = 0;
+            result.error = EncoderError::Unexpected;
+            result.unexpected = true;
+            self.machine
+                .set_state(TextEncodersFallbackStates::Unexpected);
+        }
+        let context = *self.result.borrow();
+        if context.unexpected || self.machine.context().unexpected {
+            let error = EncodingError {
+                error: EncoderError::Unexpected,
+            };
+            if let Some(callback) = request.dispatch_error {
+                let _ = callback(error);
+            }
+            return Err(error);
+        }
+        if context.error == EncoderError::None {
+            let done = EncodingDone {
+                token_count: context.token_count,
+            };
+            if let Some(callback) = request.dispatch_done {
+                let _ = callback(done);
+            }
+            Ok(done)
+        } else {
+            let error = EncodingError {
+                error: context.error,
+            };
+            if let Some(callback) = request.dispatch_error {
+                let _ = callback(error);
+            }
+            Err(error)
+        }
+    }
+
+    /// Dispatches an explicit sequencing violation into the terminal unexpected route.
+    pub fn process_unexpected(&mut self) -> EncodingError {
+        let mut result = self.result.borrow_mut();
+        result.token_count = 0;
+        result.error = EncoderError::Unexpected;
+        result.unexpected = true;
+        self.machine.context_mut().unexpected = true;
+        self.machine
+            .set_state(TextEncodersFallbackStates::Unexpected);
+        EncodingError {
+            error: EncoderError::Unexpected,
+        }
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &TextEncodersFallbackStates {
+        self.machine.state()
+    }
+
+    #[must_use]
+    pub fn is(&self, state: &TextEncodersFallbackStates) -> bool {
+        self.machine.is(state)
+    }
+
+    #[must_use]
+    pub fn context(&self) -> &TextEncodersFallbackContext {
+        self.machine.context()
+    }
+
+    #[must_use]
+    pub fn result(&self) -> EncodeContext {
+        *self.result.borrow()
+    }
+}
+pub type Fallback = TextEncodersFallbackActor;

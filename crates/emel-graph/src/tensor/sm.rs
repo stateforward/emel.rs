@@ -256,6 +256,10 @@ impl GraphTensor {
     /// # Errors
     ///
     /// Returns a typed request or lifecycle error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if generated dispatch does not return the actor to the ready state.
     pub fn process_event(&mut self, event: Event) -> Result<Outcome, Error> {
         let result = Cell::new(Err(Error::Internal));
         self.machine
@@ -269,6 +273,15 @@ impl GraphTensor {
     }
 
     /// Dispatches an explicit unexpected event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`] when generated dispatch fails, or
+    /// [`Error::UnexpectedEvent`] for the explicit unexpected event.
+    ///
+    /// # Panics
+    ///
+    /// Panics if generated dispatch does not return the actor to the ready state.
     pub fn process_unexpected(&mut self, _event: UnexpectedEvent) -> Result<Outcome, Error> {
         self.machine
             .process_event(GraphTensorEvents::Unexpected(UnexpectedEvent))

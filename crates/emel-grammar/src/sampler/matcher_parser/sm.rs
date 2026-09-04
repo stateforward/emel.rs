@@ -68,11 +68,11 @@ pub enum MatcherParserError {
     /// The caller supplied an invalid request.
     InvalidRequest = 1,
     /// The token kind could not be matched.
-    ParseFailed = 2,
+    ParseFailed = 1 << 1,
     /// An event arrived outside the supported machine contract.
-    InternalError = 4,
+    InternalError = 1 << 2,
     /// The preceding sampler stage reported an untracked error.
-    Untracked = 8,
+    Untracked = 1 << 3,
 }
 
 /// Copied, bounded input for one matcher-parser dispatch.
@@ -88,18 +88,26 @@ impl MatcherInput {
     /// Creates an error-free matcher input.
     #[must_use]
     pub const fn new(token_kind: TokenKind) -> Self {
-        Self { token_kind, error: MatcherParserError::None }
+        Self {
+            token_kind,
+            error: MatcherParserError::None,
+        }
     }
 
     /// Creates an input carrying a preceding sampler error.
     #[must_use]
     pub const fn failed(error: MatcherParserError) -> Self {
-        Self { token_kind: TokenKind::Unknown, error }
+        Self {
+            token_kind: TokenKind::Unknown,
+            error,
+        }
     }
 
     /// Creates an explicitly invalid request input.
     #[must_use]
-    pub const fn invalid() -> Self { Self::failed(MatcherParserError::InvalidRequest) }
+    pub const fn invalid() -> Self {
+        Self::failed(MatcherParserError::InvalidRequest)
+    }
 }
 
 /// Copied runtime event corresponding to `sampler::event::sample_runtime`.
@@ -110,7 +118,9 @@ pub struct SamplerEventSampleRuntime {
 }
 
 impl From<MatcherInput> for SamplerEventSampleRuntime {
-    fn from(input: MatcherInput) -> Self { Self { input } }
+    fn from(input: MatcherInput) -> Self {
+        Self { input }
+    }
 }
 
 // Source mapping: matcher_parser/sm.hpp's deciding -> parsed, deciding ->
@@ -166,16 +176,18 @@ impl GbnfSamplerMatcherParserContext {
         self.accept_result = AcceptResult::Unknown;
     }
 
-    fn unexpected(&mut self) -> Result<(), ()> {
+    fn unexpected(&mut self) {
         // Source mapping: actions.hpp::on_unexpected only writes `err`.
         self.error = MatcherParserError::InternalError;
-        Ok(())
     }
 }
 
 impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserContext {
     // Source mapping: actions.hpp::consume_match_accepted.
-    fn consume_match_accepted(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_match_accepted(
+        &mut self,
+        _event_data: &SamplerEventSampleRuntime,
+    ) -> Result<(), ()> {
         self.error = MatcherParserError::None;
         self.match_result = MatchResult::Accepted;
         self.candidate_allowed = true;
@@ -184,7 +196,10 @@ impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserCon
     }
 
     // Source mapping: actions.hpp::consume_match_rejected.
-    fn consume_match_rejected(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
+    fn consume_match_rejected(
+        &mut self,
+        _event_data: &SamplerEventSampleRuntime,
+    ) -> Result<(), ()> {
         self.error = MatcherParserError::None;
         self.match_result = MatchResult::Rejected;
         self.candidate_allowed = false;
@@ -202,10 +217,22 @@ impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserCon
     }
 
     // Source mapping: actions.hpp::on_unexpected, origin-explicit per row.
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
 
     // Source mapping: guards.hpp::parse_failed.
     fn parse_failed(&self, event_data: &SamplerEventSampleRuntime) -> Result<bool, ()> {
@@ -228,40 +255,68 @@ impl GbnfSamplerMatcherParserStateMachineContext for GbnfSamplerMatcherParserCon
 }
 
 /// Synchronous bounded actor around the generated matcher-parser machine.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
 pub struct GbnfSamplerMatcherParserActor {
     machine: GbnfSamplerMatcherParserStateMachine<GbnfSamplerMatcherParserContext>,
 }
 
 impl Default for GbnfSamplerMatcherParserActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GbnfSamplerMatcherParserActor {
     /// Creates an actor in generated `deciding` state.
     #[must_use]
     pub fn new() -> Self {
-        Self { machine: GbnfSamplerMatcherParserStateMachine::new(Default::default()) }
+        Self {
+            machine: GbnfSamplerMatcherParserStateMachine::new(
+                GbnfSamplerMatcherParserContext::default(),
+            ),
+        }
     }
 
     /// Dispatches one copied runtime event to completion.
-    pub fn process_event(&mut self, input: MatcherInput) -> Result<MatchResult, MatcherParserError> {
+    pub fn process_event(
+        &mut self,
+        input: MatcherInput,
+    ) -> Result<MatchResult, MatcherParserError> {
         if !self.machine.is(&GbnfSamplerMatcherParserStates::Deciding) {
             self.machine.context_mut().error = MatcherParserError::InternalError;
+            self.machine.context_mut().match_result = MatchResult::Unknown;
+            self.machine.context_mut().candidate_allowed = false;
+            self.machine.context_mut().accept_result = AcceptResult::Unknown;
+            self.machine
+                .set_state(GbnfSamplerMatcherParserStates::UnexpectedEvent);
             return self.outcome();
         }
         self.machine.context_mut().set_input(input);
-        if self.machine.process_event(GbnfSamplerMatcherParserEvents::SamplerEventSampleRuntime(input.into())).is_err() {
+        let process_failed = self
+            .machine
+            .process_event(GbnfSamplerMatcherParserEvents::SamplerEventSampleRuntime(
+                input.into(),
+            ))
+            .is_err();
+        if process_failed || self.machine.initialize().is_err() {
             self.machine.context_mut().error = MatcherParserError::InternalError;
-        } else if self.machine.initialize().is_err() {
-            self.machine.context_mut().error = MatcherParserError::InternalError;
+            self.machine.context_mut().match_result = MatchResult::Unknown;
+            self.machine.context_mut().candidate_allowed = false;
+            self.machine.context_mut().accept_result = AcceptResult::Unknown;
+            self.machine
+                .set_state(GbnfSamplerMatcherParserStates::UnexpectedEvent);
         }
         self.outcome()
     }
 
     /// Dispatches an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> Result<MatchResult, MatcherParserError> {
-        let _ = self.machine.context_mut().unexpected();
-        self.machine.set_state(GbnfSamplerMatcherParserStates::UnexpectedEvent);
+        self.machine.context_mut().unexpected();
+        self.machine
+            .set_state(GbnfSamplerMatcherParserStates::UnexpectedEvent);
         self.outcome()
     }
 
@@ -275,19 +330,22 @@ impl GbnfSamplerMatcherParserActor {
 
     /// Returns generated state inspection data.
     #[must_use]
-    pub fn state(&self) -> &GbnfSamplerMatcherParserStates { self.machine.state() }
+    pub fn state(&self) -> &GbnfSamplerMatcherParserStates {
+        self.machine.state()
+    }
 
     /// Reports whether the generated machine is in `state`.
     #[must_use]
-    pub fn is(&self, state: &GbnfSamplerMatcherParserStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &GbnfSamplerMatcherParserStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns the actor context for result inspection.
     #[must_use]
-    pub fn context(&self) -> &GbnfSamplerMatcherParserContext { self.machine.context() }
+    pub fn context(&self) -> &GbnfSamplerMatcherParserContext {
+        self.machine.context()
+    }
 }
-
-/// Short actor alias for matcher-parser callers.
-pub type MatcherParser = GbnfSamplerMatcherParserActor;
 
 #[cfg(test)]
 mod tests {
@@ -295,8 +353,11 @@ mod tests {
 
     #[test]
     fn accepts_text_and_allows_candidate() {
-        let mut parser = MatcherParser::new();
-        assert_eq!(parser.process_event(MatcherInput::new(TokenKind::Text)), Ok(MatchResult::Accepted));
+        let mut parser = GbnfSamplerMatcherParserActor::new();
+        assert_eq!(
+            parser.process_event(MatcherInput::new(TokenKind::Text)),
+            Ok(MatchResult::Accepted)
+        );
         assert!(parser.is(&GbnfSamplerMatcherParserStates::X));
         assert_eq!(parser.context().match_result, MatchResult::Accepted);
         assert!(parser.context().candidate_allowed);
@@ -305,8 +366,11 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_disallows_candidate() {
-        let mut parser = MatcherParser::new();
-        assert_eq!(parser.process_event(MatcherInput::new(TokenKind::Empty)), Ok(MatchResult::Rejected));
+        let mut parser = GbnfSamplerMatcherParserActor::new();
+        assert_eq!(
+            parser.process_event(MatcherInput::new(TokenKind::Empty)),
+            Ok(MatchResult::Rejected)
+        );
         assert!(parser.is(&GbnfSamplerMatcherParserStates::X));
         assert!(!parser.context().candidate_allowed);
         assert_eq!(parser.context().accept_result, AcceptResult::Rejected);
@@ -314,8 +378,11 @@ mod tests {
 
     #[test]
     fn unknown_token_is_parse_failed() {
-        let mut parser = MatcherParser::new();
-        assert_eq!(parser.process_event(MatcherInput::new(TokenKind::Unknown)), Err(MatcherParserError::ParseFailed));
+        let mut parser = GbnfSamplerMatcherParserActor::new();
+        assert_eq!(
+            parser.process_event(MatcherInput::new(TokenKind::Unknown)),
+            Err(MatcherParserError::ParseFailed)
+        );
         assert!(parser.is(&GbnfSamplerMatcherParserStates::X));
         assert_eq!(parser.context().match_result, MatchResult::Unknown);
         assert!(!parser.context().candidate_allowed);
@@ -324,8 +391,11 @@ mod tests {
 
     #[test]
     fn explicit_unexpected_event_is_internal_error() {
-        let mut parser = MatcherParser::new();
-        assert_eq!(parser.process_unexpected(), Err(MatcherParserError::InternalError));
+        let mut parser = GbnfSamplerMatcherParserActor::new();
+        assert_eq!(
+            parser.process_unexpected(),
+            Err(MatcherParserError::InternalError)
+        );
         assert!(parser.is(&GbnfSamplerMatcherParserStates::UnexpectedEvent));
     }
 }

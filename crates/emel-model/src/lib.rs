@@ -15,7 +15,7 @@ pub mod generation;
 pub mod generation_audit;
 pub mod lfm2;
 pub mod llama;
-pub(crate) mod loader;
+pub mod loader;
 pub mod moshi;
 pub mod omniembed;
 pub mod qwen3;
@@ -28,8 +28,20 @@ pub mod whisper;
 pub mod bridge {
     pub use crate::data::{
         Data, DataError, MimiBindingInput, MimiDataInput, MimiHParams, MimiHParamsError,
-        MimiHParamsInput, MoshiComponent, TensorBinding, TensorInput, TensorMetadata,
+        MimiHParamsInput, MoshiComponent, MoshiLmBindingInput, MoshiLmDataInput, MoshiLmHParams,
+        MoshiLmHParamsError, MoshiLmHParamsInput, MoshiVoiceBindingInput, MoshiVoiceDataInput,
+        OmniEmbedBindingInput, OmniEmbedDataInput, TensorBinding, TensorInput, TensorMetadata,
         TensorMetadataInput, TensorView,
+    };
+    pub use crate::omniembed::{
+        AudioPreprocessing, Encoder as OmniEmbedEncoder, Error as OmniEmbedError,
+        Family as OmniEmbedFamily, HParams as OmniEmbedHParams,
+        HParamsInput as OmniEmbedHParamsInput, TensorFamilies as OmniEmbedTensorFamilies,
+        VisionPreprocessing,
+    };
+    pub use crate::whisper::{
+        WhisperBindingInput, WhisperDataError, WhisperDataInput, WhisperFamily, WhisperFamilyView,
+        WhisperHParams, WhisperHParamsError, WhisperHParamsInput,
     };
 }
 

@@ -145,10 +145,12 @@ impl GbnfRuleParserDefinitionParserStateMachineContext for GbnfRuleParserDefinit
 }
 
 /// Synchronous actor around the generated definition-parser machine.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
 pub struct GbnfRuleParserDefinitionParserActor {
-    machine: GbnfRuleParserDefinitionParserStateMachine<
-        GbnfRuleParserDefinitionParserContext,
-    >,
+    machine: GbnfRuleParserDefinitionParserStateMachine<GbnfRuleParserDefinitionParserContext>,
 }
 
 impl Default for GbnfRuleParserDefinitionParserActor {
@@ -162,28 +164,34 @@ impl GbnfRuleParserDefinitionParserActor {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: GbnfRuleParserDefinitionParserStateMachine::new(Default::default()),
+            machine: GbnfRuleParserDefinitionParserStateMachine::new(
+                GbnfRuleParserDefinitionParserContext::default(),
+            ),
         }
     }
 
     pub fn process_event(&mut self, event: RuleParserEventParseRules) -> ParseOutcome {
-        if !self.machine.is(&GbnfRuleParserDefinitionParserStates::Deciding) {
+        if !self
+            .machine
+            .is(&GbnfRuleParserDefinitionParserStates::Deciding)
+        {
             self.machine.context_mut().result = ParseOutcome::Unexpected;
-            self.machine.set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
+            self.machine
+                .set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
             return ParseOutcome::Unexpected;
         }
-        if self.machine.process_event(
-            GbnfRuleParserDefinitionParserEvents::RuleParserEventParseRules(event),
-        ).is_err() {
+        let failed = self
+            .machine
+            .process_event(GbnfRuleParserDefinitionParserEvents::RuleParserEventParseRules(event))
+            .is_err()
+            || self.machine.initialize().is_err();
+        if failed {
             self.machine.context_mut().result = ParseOutcome::Unexpected;
-            self.machine.set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
-        } else if self.machine.initialize().is_err() {
-            self.machine.context_mut().result = ParseOutcome::Unexpected;
-            self.machine.set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
+            self.machine
+                .set_state(GbnfRuleParserDefinitionParserStates::UnexpectedEvent);
         }
         self.machine.context().result
     }
-
     /// Classifies one lexer token kind.
     pub fn classify(&mut self, token_kind: TokenKind) -> ParseOutcome {
         self.process_event(token_kind.into())
@@ -215,16 +223,13 @@ impl GbnfRuleParserDefinitionParserActor {
     }
 }
 
-/// Short actor alias for definition-parser callers.
-pub type DefinitionParser = GbnfRuleParserDefinitionParserActor;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn classifies_definition_operator() {
-        let mut parser = DefinitionParser::new();
+        let mut parser = GbnfRuleParserDefinitionParserActor::new();
         assert_eq!(
             parser.classify(TokenKind::DefinitionOperator),
             ParseOutcome::Parsed(ParseResult::DefinitionOperator)
@@ -234,21 +239,21 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_and_absent_input() {
-        let mut parser = DefinitionParser::new();
+        let mut parser = GbnfRuleParserDefinitionParserActor::new();
         assert_eq!(
             parser.classify(TokenKind::Identifier),
             ParseOutcome::ParseFailed
         );
         assert!(parser.is(&GbnfRuleParserDefinitionParserStates::X));
 
-        let mut parser = DefinitionParser::new();
+        let mut parser = GbnfRuleParserDefinitionParserActor::new();
         assert_eq!(parser.process_absent(), ParseOutcome::ParseFailed);
         assert!(parser.is(&GbnfRuleParserDefinitionParserStates::X));
     }
 
     #[test]
     fn reports_explicit_unexpected_event() {
-        let mut parser = DefinitionParser::new();
+        let mut parser = GbnfRuleParserDefinitionParserActor::new();
         assert_eq!(
             parser.classify(TokenKind::DefinitionOperator),
             ParseOutcome::Parsed(ParseResult::DefinitionOperator)

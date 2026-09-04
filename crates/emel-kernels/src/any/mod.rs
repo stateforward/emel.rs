@@ -144,6 +144,12 @@ impl Any {
     /// target. A target not compiled for this binary is rejected explicitly;
     /// a compiled target whose capability probe failed is reported as
     /// unavailable rather than silently falling back to another actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KernelUnavailable`] when the requested compiled target
+    /// failed its capability probe, or [`Error::UnsupportedKernelKind`] when
+    /// the target is not compiled for this binary.
     pub fn set_kind(&mut self, kind: crate::KernelKind) -> Result<(), Error> {
         if kind == self.kind {
             return self.target_available(kind);
@@ -223,6 +229,12 @@ impl Any {
     ///
     /// The event's native result remains intact inside `Ok`; a selection or
     /// capability error is represented by the facade's typed [`Error`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::KernelUnavailable`] when the selected target failed
+    /// its capability probe, or [`Error::UnsupportedKernelKind`] when the
+    /// selected target is not compiled for this binary.
     pub fn process_target_event<E: TargetEvent>(
         &mut self,
         event: E,
@@ -244,106 +256,6 @@ impl Any {
             Core::Portable { .. } => Err(Error::UnsupportedKernelKind(self.kind)),
         }
     }
-
-    /// Returns zero when the selected actor has no flash dispatch counter.
-    #[must_use]
-    pub const fn optimized_flash_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no flash dispatch counter.
-    #[must_use]
-    pub const fn shared_flash_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no F16 vector counter.
-    #[must_use]
-    pub const fn optimized_f16_vector_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no F32 vector counter.
-    #[must_use]
-    pub const fn optimized_f32_vector_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no convolution counter.
-    #[must_use]
-    pub const fn optimized_conv_transpose_f32_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q2 counter.
-    #[must_use]
-    pub const fn optimized_q2_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q2 shared counter.
-    #[must_use]
-    pub const fn shared_q2_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q3 counter.
-    #[must_use]
-    pub const fn optimized_q3_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q3 shared counter.
-    #[must_use]
-    pub const fn shared_q3_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q4 counter.
-    #[must_use]
-    pub const fn optimized_q4_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q4 vector counter.
-    #[must_use]
-    pub const fn optimized_q4_vector_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no packed q4 vector counter.
-    #[must_use]
-    pub const fn optimized_q4_vector_packed_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no packed q4 q8-RHS counter.
-    #[must_use]
-    pub const fn optimized_q4_vector_packed_q8_rhs_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q4 shared counter.
-    #[must_use]
-    pub const fn shared_q4_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q6 counter.
-    #[must_use]
-    pub const fn optimized_q6_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q6 vector counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q6 vector argmax counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_argmax_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no packed q6 vector counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_packed_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no packed q6 q8-RHS counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_packed_q8_rhs_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no packed q6 q8-RHS argmax counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_packed_q8_rhs_argmax_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no prepared q6 counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_prepared_q8_rhs_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no prepared q6 i8mm counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_prepared_q8_rhs_i8mm_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no prepared q6 argmax counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_prepared_q8_rhs_argmax_i8mm_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no prepared q6 argmax counter.
-    #[must_use]
-    pub const fn optimized_q6_vector_q8_argmax_prepared_i8mm_dispatch_count(&self) -> u64 { 0 }
-
-    /// Returns zero when the selected actor has no q6 shared counter.
-    #[must_use]
-    pub const fn shared_q6_dispatch_count(&self) -> u64 { 0 }
 }
 
 /// A target actor event accepted by [`Any::process_target_event`].
@@ -390,3 +302,85 @@ where
 
 /// Runtime facade alias retained for call sites that name the owner by role.
 pub type RuntimeKernel = Any;
+#[cfg(test)]
+#[allow(clippy::float_cmp)]
+mod tests {
+    use super::Error;
+    use crate::KernelKind;
+
+    #[test]
+    fn portable_event_routes_independently_of_selected_target() {
+        let mut kernel = super::Any::with_kind(KernelKind::Aarch64);
+        let input = [1.0_f32, -2.0, 3.5];
+        let mut output = [0.0_f32; 3];
+
+        let result = kernel.process_event(super::event::OpDup::new(&input, &mut output));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(output, input);
+        assert!(kernel.is_ready());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn target_event_preserves_native_output_and_errors() {
+        let mut kernel = super::Any::new();
+        let input = [2.0_f32, 4.0, 8.0];
+        let mut output = [0.0_f32; 3];
+
+        let result = kernel.process_target_event(crate::x86_64::X86Dup::new(&input), &mut output);
+
+        assert!(matches!(result, Ok(Ok(()))));
+        assert_eq!(output, input);
+
+        let mut invalid_output = [9.0_f32; 2];
+        let invalid =
+            kernel.process_target_event(crate::x86_64::X86Dup::new(&input), &mut invalid_output);
+
+        assert!(matches!(
+            invalid,
+            Ok(Err(crate::x86_64::X86DupF32Error::InvalidShape))
+        ));
+        assert_eq!(invalid_output, [9.0_f32; 2]);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn target_event_preserves_native_output_and_errors() {
+        let mut kernel = super::Any::new();
+        let input = [2.0_f32, 4.0, 8.0];
+        let mut output = [0.0_f32; 3];
+
+        let result = kernel.process_target_event(crate::aarch64::Dup::new(&input), &mut output);
+
+        assert!(matches!(result, Ok(Ok(()))));
+        assert_eq!(output, input);
+
+        let mut invalid_output = [9.0_f32; 2];
+        let invalid =
+            kernel.process_target_event(crate::aarch64::Dup::new(&input), &mut invalid_output);
+
+        assert!(matches!(
+            invalid,
+            Ok(Err(crate::aarch64::DupF32Error::InvalidShape))
+        ));
+        assert_eq!(invalid_output, [9.0_f32; 2]);
+    }
+
+    #[test]
+    fn unsupported_target_is_reported_without_fallback() {
+        let mut kernel = super::Any::new();
+
+        assert_eq!(
+            kernel.set_kind(KernelKind::Aarch64),
+            if cfg!(target_arch = "aarch64") {
+                Ok(())
+            } else {
+                Err(Error::UnsupportedKernelKind(KernelKind::Aarch64))
+            }
+        );
+
+        #[cfg(not(target_arch = "aarch64"))]
+        assert_eq!(kernel.kind(), KernelKind::X86_64);
+    }
+}

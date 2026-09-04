@@ -1,5 +1,6 @@
 //! Allocation-free synchronous GBNF rule-parser lexer.
 
+#![allow(clippy::enum_variant_names)]
 pub mod sm;
 
 /// A caller-owned cursor into a grammar source.
@@ -76,28 +77,54 @@ pub struct EventScanNext<'input, 'callback> {
 
 impl<'input, 'callback> EventScanNext<'input, 'callback> {
     #[must_use]
-    pub fn new(cursor: Cursor<'input>, on_done: &'callback mut DoneCallback<'callback>, on_error: &'callback mut ErrorCallback<'callback>) -> Self { Self { cursor, on_done: Some(on_done), on_error: Some(on_error) } }
+    pub fn new(
+        cursor: Cursor<'input>,
+        on_done: &'callback mut DoneCallback<'callback>,
+        on_error: &'callback mut ErrorCallback<'callback>,
+    ) -> Self {
+        Self {
+            cursor,
+            on_done: Some(on_done),
+            on_error: Some(on_error),
+        }
+    }
     #[must_use]
-    pub fn with_callbacks(cursor: Cursor<'input>, on_done: Option<&'callback mut DoneCallback<'callback>>, on_error: Option<&'callback mut ErrorCallback<'callback>>) -> Self { Self { cursor, on_done, on_error } }
+    pub fn with_callbacks(
+        cursor: Cursor<'input>,
+        on_done: Option<&'callback mut DoneCallback<'callback>>,
+        on_error: Option<&'callback mut ErrorCallback<'callback>>,
+    ) -> Self {
+        Self {
+            cursor,
+            on_done,
+            on_error,
+        }
+    }
 }
-
 
 impl core::fmt::Debug for EventScanNext<'_, '_> {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.debug_struct("EventScanNext").field("cursor", &self.cursor).finish_non_exhaustive()
+        formatter
+            .debug_struct("EventScanNext")
+            .field("cursor", &self.cursor)
+            .finish_non_exhaustive()
     }
 }
 
 /// Namespace aliases mirroring the C++ event layout.
+#[allow(unused_imports)]
 pub mod event {
-    pub use super::{Cursor, DoneCallback, Error, ErrorCallback, EventScanNext, NextDone, NextError, Token, TokenKind};
+    pub use super::{
+        Cursor, DoneCallback, Error, ErrorCallback, EventScanNext, NextDone, NextError, Token,
+        TokenKind,
+    };
 }
 
 /// Namespace aliases mirroring the C++ completion layout.
+#[allow(unused_imports)]
 pub mod events {
     pub use super::{NextDone, NextError};
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -106,13 +133,19 @@ mod tests {
 
     fn scan(input: &str) -> Vec<(TokenKind, String)> {
         let mut machine = GbnfRuleParserLexerStateMachine::default();
-        let mut cursor = Cursor { input, offset: 0, token_count: 0 };
+        let mut cursor = Cursor {
+            input,
+            offset: 0,
+            token_count: 0,
+        };
         let mut tokens = Vec::new();
         while (cursor.offset as usize) < input.len() {
             let mut next_offset = cursor.offset;
             let mut next_count = cursor.token_count;
             let mut done = |event: NextDone<'_>| {
-                if event.has_token { tokens.push((event.token.kind, event.token.text.to_owned())); }
+                if event.has_token {
+                    tokens.push((event.token.kind, event.token.text.to_owned()));
+                }
                 next_offset = event.next_cursor.offset;
                 next_count = event.next_cursor.token_count;
                 true
@@ -128,14 +161,22 @@ mod tests {
     #[test]
     fn tokenizes_operators_layout_and_literals() {
         let tokens = scan(" # c\r\nroot ::= (foo|\"x\")+[a-z]{2,3}");
-        assert_eq!(tokens, vec![
-            (TokenKind::Newline, "\r\n".into()), (TokenKind::Identifier, "root".into()),
-            (TokenKind::DefinitionOperator, "::=".into()), (TokenKind::OpenGroup, "(".into()),
-            (TokenKind::Identifier, "foo".into()), (TokenKind::Alternation, "|".into()),
-            (TokenKind::StringLiteral, "\"x\"".into()), (TokenKind::CloseGroup, ")".into()),
-            (TokenKind::Quantifier, "+".into()), (TokenKind::CharacterClass, "[a-z]".into()),
-            (TokenKind::Quantifier, "{2,3}".into()),
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                (TokenKind::Newline, "\r\n".into()),
+                (TokenKind::Identifier, "root".into()),
+                (TokenKind::DefinitionOperator, "::=".into()),
+                (TokenKind::OpenGroup, "(".into()),
+                (TokenKind::Identifier, "foo".into()),
+                (TokenKind::Alternation, "|".into()),
+                (TokenKind::StringLiteral, "\"x\"".into()),
+                (TokenKind::CloseGroup, ")".into()),
+                (TokenKind::Quantifier, "+".into()),
+                (TokenKind::CharacterClass, "[a-z]".into()),
+                (TokenKind::Quantifier, "{2,3}".into()),
+            ]
+        );
     }
 
     #[test]
@@ -150,9 +191,77 @@ mod tests {
     fn starts_initialized_and_rejects_missing_callbacks() {
         let mut machine = GbnfRuleParserLexerStateMachine::default();
         assert!(machine.is(GbnfRuleParserLexerStates::Initialized));
-        let cursor = Cursor { input: "a", offset: 0, token_count: 0 };
-        let mut error = |event: NextError| { assert_eq!(event.err, Error::InvalidRequest); true };
-        assert!(machine.process_event(EventScanNext::with_callbacks(cursor, None, Some(&mut error))));
+        let cursor = Cursor {
+            input: "a",
+            offset: 0,
+            token_count: 0,
+        };
+        let mut error = |event: NextError| {
+            assert_eq!(event.err, Error::InvalidRequest);
+            true
+        };
+        assert!(machine.process_event(EventScanNext::with_callbacks(
+            cursor,
+            None,
+            Some(&mut error)
+        )));
         assert!(machine.is(GbnfRuleParserLexerStates::Initialized));
+    }
+
+    #[test]
+    fn accepts_interior_utf8_cursor_with_byte_progress_and_empty_text() {
+        let mut machine = GbnfRuleParserLexerStateMachine::default();
+        let cursor = Cursor {
+            input: "é",
+            offset: 1,
+            token_count: 9,
+        };
+        let mut done_called = false;
+        let mut done = |event: NextDone<'_>| {
+            done_called = true;
+            assert!(event.has_token);
+            assert_eq!(event.token.kind, TokenKind::Unknown);
+            assert!(event.token.text.is_empty());
+            assert_eq!((event.token.start, event.token.end), (1, 2));
+            assert_eq!(event.next_cursor.offset, 2);
+            assert_eq!(event.next_cursor.token_count, 10);
+            true
+        };
+        let mut error = |_event: NextError| false;
+        assert!(machine.process_event(EventScanNext::new(cursor, &mut done, &mut error)));
+        assert!(done_called);
+    }
+
+    #[test]
+    fn layout_only_input_emits_default_unknown_then_eof() {
+        let mut machine = GbnfRuleParserLexerStateMachine::default();
+        let input = " \t# comment";
+        let cursor = Cursor {
+            input,
+            offset: 0,
+            token_count: 0,
+        };
+        let mut result = None;
+        let mut done = |event: NextDone<'_>| {
+            result = Some((
+                event.has_token,
+                event.token.kind,
+                event.token.start,
+                event.token.end,
+                event.next_cursor.offset,
+                event.next_cursor.token_count,
+            ));
+            true
+        };
+        let mut error = |_event: NextError| false;
+        assert!(machine.process_event(EventScanNext::new(cursor, &mut done, &mut error)));
+        let (has_token, kind, start, end, next_offset, next_count) =
+            result.expect("layout completion");
+        assert!(has_token);
+        assert_eq!(kind, TokenKind::Unknown);
+        assert_eq!(start, 0);
+        assert_eq!(end, 0);
+        assert_eq!(next_offset as usize, input.len());
+        assert_eq!(next_count, 1);
     }
 }

@@ -26,6 +26,84 @@ use core::fmt;
 use sml::sml;
 
 use super::tensor_view::{TensorView, TensorViewMut};
+/// Executes Mimi's native depthwise stride-2 transposed-convolution leaf over
+/// canonical F32 weight bytes.
+///
+/// The caller owns latent, output, overlap state, and workspace; this helper
+/// performs no allocation and preserves the pinned channel-major overlap
+/// arithmetic.
+///
+/// The serialized weight layout is `[taps, 1, channels]`, with each channel's
+/// taps contiguous. One latent column emits two time-major samples and retains
+/// `taps - 2` samples per channel for the next call.
+#[allow(clippy::cast_possible_truncation)]
+pub fn native_depthwise_stride2_f32(
+    weights: &[u8],
+    dim: usize,
+    taps: usize,
+    state: &mut [f32],
+    latent: &[f32],
+    frame: &mut [f32],
+    workspace: &mut [f32],
+) -> bool {
+    const STRIDE: usize = 2;
+    let Some(tail_per_channel) = taps.checked_sub(STRIDE) else {
+        return false;
+    };
+    let Some(full_len) = dim.checked_mul(taps) else {
+        return false;
+    };
+    let Some(tail_len) = dim.checked_mul(tail_per_channel) else {
+        return false;
+    };
+    let Some(frame_len) = dim.checked_mul(STRIDE) else {
+        return false;
+    };
+    let Some(weight_count) = full_len.checked_mul(4) else {
+        return false;
+    };
+    if dim == 0
+        || taps < STRIDE
+        || weights.len() < weight_count
+        || latent.len() < dim
+        || frame.len() < frame_len
+        || state.len() < tail_len
+        || workspace.len() < dim.saturating_add(full_len)
+    {
+        return false;
+    }
+    let (input, full) = workspace.split_at_mut(dim);
+    input[..dim].copy_from_slice(&latent[..dim]);
+    full[..full_len].fill(0.0);
+    for (channel, input_value) in input.iter().copied().enumerate().take(dim) {
+        let base = channel * taps;
+        let tail_base = channel * tail_per_channel;
+        for tap in 0..taps {
+            let offset = (base + tap) * 4;
+            let weight = f32::from_le_bytes([
+                weights[offset],
+                weights[offset + 1],
+                weights[offset + 2],
+                weights[offset + 3],
+            ]);
+            full[base + tap] = input_value * weight;
+        }
+        for tap in 0..tail_per_channel {
+            full[base + tap] += state[tail_base + tap];
+        }
+    }
+    for channel in 0..dim {
+        let base = channel * taps;
+        let tail_base = channel * tail_per_channel;
+        for tap in 0..tail_per_channel {
+            state[tail_base + tap] = full[base + STRIDE + tap];
+        }
+        for time in 0..STRIDE {
+            frame[time * dim + channel] = full[base + time];
+        }
+    }
+    true
+}
 
 /// Parameters matching the pinned `op_params` integer slots `{s0, p0, d0}`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

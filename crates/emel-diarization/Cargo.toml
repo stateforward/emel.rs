@@ -11,4 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+opentelemetry = { workspace = true }
 sml = { workspace = true }
+emel-model = { workspace = true }
+emel-kernels = { workspace = true }

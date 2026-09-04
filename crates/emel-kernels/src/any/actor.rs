@@ -324,6 +324,7 @@ define_matmul_runtime!(MatmulQ4_0Runtime, OpMulMatQ4_0);
 define_matmul_runtime!(MatmulQ4_1Runtime, OpMulMatQ4_1);
 define_matmul_runtime!(MatmulQ5_0Runtime, OpMulMatQ5_0);
 define_matmul_runtime!(MatmulQ8_0Runtime, OpMulMatQ8_0);
+
 define_matmul_runtime!(MatmulQ2KRuntime, OpMulMatQ2K);
 define_matmul_runtime!(MatmulQ3KRuntime, OpMulMatQ3K);
 define_matmul_runtime!(MatmulQ4KRuntime, OpMulMatQ4K);
@@ -1199,6 +1200,7 @@ impl Kernel {
         MatmulQ5_0Runtime,
         MatmulQ5_0
     );
+
     root_matmul_method!(
         op_mul_mat_q8_0,
         OpMulMatQ8_0<'_>,
@@ -3647,6 +3649,7 @@ impl KernelMachineStateMachineContext for Context {
     root_matmul_effect!(effect_matmul_q4_1, MatmulQ4_1Runtime);
     root_matmul_effect!(effect_matmul_q5_0, MatmulQ5_0Runtime);
     root_matmul_effect!(effect_matmul_q8_0, MatmulQ8_0Runtime);
+
     root_matmul_effect!(effect_matmul_q2_k, MatmulQ2KRuntime);
     root_matmul_effect!(effect_matmul_q3_k, MatmulQ3KRuntime);
     root_matmul_effect!(effect_matmul_q4_k, MatmulQ4KRuntime);

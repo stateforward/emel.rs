@@ -277,7 +277,8 @@ impl WithSimd for GemvOperation<'_> {
             row_index += 4;
         }
         while row_index < m {
-            output[row_index] = execute_one_row(simd, &lhs[row_index * k..(row_index + 1) * k], rhs);
+            output[row_index] =
+                execute_one_row(simd, &lhs[row_index * k..(row_index + 1) * k], rhs);
             row_index += 1;
         }
     }
@@ -291,48 +292,41 @@ fn execute_four_rows<S: Simd>(
     row_index: usize,
     k: usize,
 ) {
-    let row0 = &lhs[row_index * k..(row_index + 1) * k];
-    let row1 = &lhs[(row_index + 1) * k..(row_index + 2) * k];
-    let row2 = &lhs[(row_index + 2) * k..(row_index + 3) * k];
-    let row3 = &lhs[(row_index + 3) * k..(row_index + 4) * k];
+    let rows = [
+        &lhs[row_index * k..(row_index + 1) * k],
+        &lhs[(row_index + 1) * k..(row_index + 2) * k],
+        &lhs[(row_index + 2) * k..(row_index + 3) * k],
+        &lhs[(row_index + 3) * k..(row_index + 4) * k],
+    ];
     let vector_count = (k / 16) * 16;
     let (rhs_prefix, rhs_tail) = rhs.split_at(vector_count);
     let (rhs_vectors, _) = S::as_simd_f32s(rhs_prefix);
     let (rhs_groups, _) = rhs_vectors.as_chunks::<4>();
-    let mut sums = [[simd.splat_f32s(0.0); 4]; 4];
+    let mut values = [0.0_f32; 4];
 
-    for (row, row_sums) in [row0, row1, row2, row3].into_iter().zip(&mut sums) {
+    for (row_index, row) in rows.into_iter().enumerate() {
         let (row_prefix, _) = row.split_at(vector_count);
         let (row_vectors, _) = S::as_simd_f32s(row_prefix);
         let (row_groups, _) = row_vectors.as_chunks::<4>();
         for (vectors, rhs_vectors) in row_groups.iter().zip(rhs_groups) {
+            let mut sums = [simd.splat_f32s(0.0); 4];
             for (sum, (lhs_vector, rhs_vector)) in
-                row_sums.iter_mut().zip(vectors.iter().zip(rhs_vectors))
+                sums.iter_mut().zip(vectors.iter().zip(rhs_vectors))
             {
                 *sum = simd.mul_add_f32s(*lhs_vector, *rhs_vector, *sum);
             }
+            let combined = simd.add_f32s(
+                simd.add_f32s(sums[0], sums[2]),
+                simd.add_f32s(sums[1], sums[3]),
+            );
+            values[row_index] += simd.reduce_sum_f32s(combined);
         }
-    }
-
-    for (row_offset, row_sums) in sums.into_iter().enumerate() {
-        let combined = simd.add_f32s(
-            simd.add_f32s(row_sums[0], row_sums[2]),
-            simd.add_f32s(row_sums[1], row_sums[3]),
-        );
-        let mut value = simd.reduce_sum_f32s(combined);
-        let row = match row_offset {
-            0 => row0,
-            1 => row1,
-            2 => row2,
-            _ => row3,
-        };
         for (lhs_value, rhs_value) in row[vector_count..].iter().zip(rhs_tail) {
-            value += lhs_value * rhs_value;
+            values[row_index] += lhs_value * rhs_value;
         }
-        output[row_index + row_offset] = value;
     }
+    output[row_index..row_index + 4].copy_from_slice(&values);
 }
-
 fn execute_one_row<S: Simd>(simd: S, row: &[f32], rhs: &[f32]) -> f32 {
     let vector_count = (row.len() / 16) * 16;
     let (row_prefix, row_tail) = row.split_at(vector_count);
@@ -343,9 +337,7 @@ fn execute_one_row<S: Simd>(simd: S, row: &[f32], rhs: &[f32]) -> f32 {
     let (row_groups, _) = row_vectors.as_chunks::<4>();
     let (rhs_groups, _) = rhs_vectors.as_chunks::<4>();
     for (vectors, rhs_vector) in row_groups.iter().zip(rhs_groups) {
-        for (sum, (lhs_vector, rhs_vector)) in
-            sums.iter_mut().zip(vectors.iter().zip(rhs_vector))
-        {
+        for (sum, (lhs_vector, rhs_vector)) in sums.iter_mut().zip(vectors.iter().zip(rhs_vector)) {
             *sum = simd.mul_add_f32s(*lhs_vector, *rhs_vector, *sum);
         }
     }
@@ -419,10 +411,12 @@ mod tests {
             return;
         };
         let k = 17;
-        let lhs = (0..(4 * k))
-            .map(|index| (index as f32) - 20.0)
+        let lhs = (0_u8..68_u8)
+            .map(|index| f32::from(index) - 20.0)
             .collect::<Vec<_>>();
-        let rhs = (0..k).map(|index| (index as f32) * 0.25 - 2.0).collect::<Vec<_>>();
+        let rhs = (0_u8..17_u8)
+            .map(|index| f32::from(index) / 4.0 - 2.0)
+            .collect::<Vec<_>>();
         let mut output = [f32::NAN; 4];
         assert_eq!(
             kernel.process_event(OpF32Gemv::new(&lhs, &rhs, 4, k), &mut output),

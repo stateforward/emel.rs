@@ -29,12 +29,14 @@ use sml::sml;
 const EMBEDDING_LENGTH: usize = 384;
 const EMBEDDING_LENGTH_I32: i32 = 384;
 const FEED_FORWARD_LENGTH: usize = 1536;
+const FEED_FORWARD_LENGTH_I32: i32 = 1_536;
 const DECODER_BLOCK_COUNT: usize = 4;
 const DECODER_BLOCK_COUNT_I32: i32 = 4;
 const VOCAB_SIZE: usize = 51_865;
 const VOCAB_SIZE_I32: i32 = 51_865;
 const MAX_ENCODER_FRAME_COUNT: i32 = 1500;
 const DECODER_SEQUENCE_TOKEN_COUNT: usize = 448;
+const DECODER_SEQUENCE_TOKEN_COUNT_I32: i32 = 448;
 const MAX_GENERATED_TOKEN_COUNT: usize = DECODER_SEQUENCE_TOKEN_COUNT - 4;
 const MAX_GENERATED_TOKEN_COUNT_I32: i32 = 444;
 
@@ -164,21 +166,45 @@ impl DecodePolicy {
     }
 }
 
-/// Binds the fixed decoder dimensions at the model variant boundary.
+/// Model-derived decoder dimensions bound at the speech/model boundary.
 ///
-/// The request retains the borrowed model separately, matching the Rust
-/// ownership boundary while preserving the pinned `bind_execution_contract`
-/// entry point.
+/// The model pointer remains caller-owned.  This value copies the validated
+/// Whisper geometry so the owner can reject a contract that was built for a
+/// different model before entering the decoder SML.  `bind` remains as the
+/// source-pinned value for callers that need a compile-time descriptor;
+/// [`bind_execution_contract`] is the runtime model-aware entry point.
 #[must_use]
-pub fn bind_execution_contract(_model: &Data) -> WhisperExecutionContract {
-    WhisperExecutionContract::bind()
+pub fn bind_execution_contract(model: &Data) -> WhisperExecutionContract {
+    let binding = model.whisper_binding_input();
+    let hparams = binding.hparams();
+    let model_present = emel_model::whisper::Any::bind(binding).is_ok();
+    WhisperExecutionContract {
+        model_present,
+        vocab_size: hparams.map_or(0, |h| i32::try_from(h.n_vocab()).unwrap_or(0)),
+        embedding_length: hparams.map_or(0, |h| i32::try_from(h.n_embd()).unwrap_or(0)),
+        feed_forward_length: hparams.map_or(0, |h| i32::try_from(h.n_ff()).unwrap_or(0)),
+        attention_head_count: hparams.map_or(0, |h| i32::try_from(h.n_head()).unwrap_or(0)),
+        encoder_context_length: i32::try_from(emel_model::whisper::ENCODER_CONTEXT_LENGTH)
+            .unwrap_or(0),
+        decoder_context_length: hparams.map_or(0, |h| i32::try_from(h.n_ctx()).unwrap_or(0)),
+        encoder_block_count: hparams
+            .map_or(0, |h| i32::try_from(h.encoder_block_count()).unwrap_or(0)),
+        decoder_block_count: hparams
+            .map_or(0, |h| i32::try_from(h.decoder_block_count()).unwrap_or(0)),
+    }
 }
 
 /// Variant-neutral model dimensions bound at the speech owner boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WhisperExecutionContract {
+    pub model_present: bool,
     pub vocab_size: i32,
     pub embedding_length: i32,
+    pub feed_forward_length: i32,
+    pub attention_head_count: i32,
+    pub encoder_context_length: i32,
+    pub decoder_context_length: i32,
+    pub encoder_block_count: i32,
     pub decoder_block_count: i32,
 }
 
@@ -186,10 +212,29 @@ impl WhisperExecutionContract {
     #[must_use]
     pub const fn bind() -> Self {
         Self {
+            model_present: true,
             vocab_size: VOCAB_SIZE_I32,
             embedding_length: EMBEDDING_LENGTH_I32,
+            feed_forward_length: FEED_FORWARD_LENGTH_I32,
+            attention_head_count: 6,
+            encoder_context_length: 1_500,
+            decoder_context_length: DECODER_SEQUENCE_TOKEN_COUNT_I32,
+            encoder_block_count: DECODER_BLOCK_COUNT_I32,
             decoder_block_count: DECODER_BLOCK_COUNT_I32,
         }
+    }
+
+    #[must_use]
+    pub const fn model_contract_valid(self) -> bool {
+        self.model_present
+            && self.vocab_size == VOCAB_SIZE_I32
+            && self.embedding_length == EMBEDDING_LENGTH_I32
+            && self.feed_forward_length == FEED_FORWARD_LENGTH_I32
+            && self.attention_head_count == 6
+            && self.encoder_context_length == 1_500
+            && self.decoder_context_length == DECODER_SEQUENCE_TOKEN_COUNT_I32
+            && self.encoder_block_count == DECODER_BLOCK_COUNT_I32
+            && self.decoder_block_count == DECODER_BLOCK_COUNT_I32
     }
 }
 
@@ -484,24 +529,14 @@ impl SpeechDecoderWhisperContext {
     pub const fn unexpected_count(&self) -> u64 {
         self.unexpected_count
     }
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "SML effect callbacks require Result<(), ()>"
-    )]
-    fn mark(&mut self, error: WhisperDecoderError) -> Result<(), ()> {
+    fn mark(&mut self, error: WhisperDecoderError) {
         self.error = error;
         self.phase = WhisperDecoderPhase::Error;
-        Ok(())
     }
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "SML unexpected-event callbacks require Result<(), ()>"
-    )]
-    fn unexpected(&mut self) -> Result<(), ()> {
+    fn unexpected(&mut self) {
         self.error = WhisperDecoderError::InternalError;
         self.phase = WhisperDecoderPhase::Unexpected;
         self.unexpected_count = self.unexpected_count.saturating_add(1);
-        Ok(())
     }
 }
 
@@ -636,10 +671,10 @@ fn has_decoder_block(
 fn model_valid(request: &EventDecodeRun<'_>) -> bool {
     let model = request.request.model;
     let contract = &request.request.contract;
-    model.architecture_name() == b"whisper"
-        && contract.vocab_size == VOCAB_SIZE_I32
-        && contract.embedding_length == EMBEDDING_LENGTH_I32
-        && contract.decoder_block_count == DECODER_BLOCK_COUNT_I32
+    let bound_contract = bind_execution_contract(model);
+    contract == &bound_contract
+        && contract.model_contract_valid()
+        && model.architecture_name() == emel_model::whisper::ARCHITECTURE_NAME
         && has_tensor(
             model,
             b"model.decoder.embed_tokens.weight",
@@ -709,7 +744,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::ModelInvalid)
+        self.mark(WhisperDecoderError::ModelInvalid);
+        Ok(())
     }
     fn effect_mark_encoder_state_invalid<'dispatch, 'event>(
         &mut self,
@@ -718,7 +754,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::EncoderState)
+        self.mark(WhisperDecoderError::EncoderState);
+        Ok(())
     }
     fn effect_mark_decode_policy_invalid<'dispatch, 'event>(
         &mut self,
@@ -727,7 +764,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::DecodePolicy)
+        self.mark(WhisperDecoderError::DecodePolicy);
+        Ok(())
     }
     fn effect_mark_generated_token_capacity_invalid<'dispatch, 'event>(
         &mut self,
@@ -736,7 +774,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::GeneratedTokenCapacity)
+        self.mark(WhisperDecoderError::GeneratedTokenCapacity);
+        Ok(())
     }
     fn effect_mark_logits_capacity_invalid<'dispatch, 'event>(
         &mut self,
@@ -745,7 +784,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::LogitsCapacity)
+        self.mark(WhisperDecoderError::LogitsCapacity);
+        Ok(())
     }
     fn effect_mark_workspace_capacity_invalid<'dispatch, 'event>(
         &mut self,
@@ -754,7 +794,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::WorkspaceCapacity)
+        self.mark(WhisperDecoderError::WorkspaceCapacity);
+        Ok(())
     }
     fn effect_mark_unsupported_variant<'dispatch, 'event>(
         &mut self,
@@ -763,7 +804,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::UnsupportedVariant)
+        self.mark(WhisperDecoderError::UnsupportedVariant);
+        Ok(())
     }
     fn effect_mark_internal_error<'dispatch, 'event>(
         &mut self,
@@ -772,7 +814,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.mark(WhisperDecoderError::InternalError)
+        self.mark(WhisperDecoderError::InternalError);
+        Ok(())
     }
     fn effect_run_decoder_q8_0_f32_aux<'dispatch, 'event>(
         &mut self,
@@ -781,7 +824,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.run(event, DecodeVariant::Q8_0F32Aux)
+        self.run(event, DecodeVariant::Q8_0F32Aux);
+        Ok(())
     }
 
     fn effect_run_decoder_q8_0<'dispatch, 'event>(
@@ -791,7 +835,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.run(event, DecodeVariant::Q8_0)
+        self.run(event, DecodeVariant::Q8_0);
+        Ok(())
     }
 
     fn effect_run_decoder_q4_0<'dispatch, 'event>(
@@ -801,7 +846,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.run(event, DecodeVariant::Q4_0)
+        self.run(event, DecodeVariant::Q4_0);
+        Ok(())
     }
 
     fn effect_run_decoder_q4_1<'dispatch, 'event>(
@@ -811,7 +857,8 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
     where
         'event: 'dispatch,
     {
-        self.run(event, DecodeVariant::Q4_1)
+        self.run(event, DecodeVariant::Q4_1);
+        Ok(())
     }
 
     fn effect_store_success_error<'dispatch, 'event>(
@@ -1145,60 +1192,78 @@ impl SpeechDecoderWhisperStateMachineContext for SpeechDecoderWhisperContext {
         Ok(event.request.on_error.is_none())
     }
     fn effect_on_unexpected_from_state_ready(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_model_contract_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_encoder_state_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_decode_policy_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_generated_token_capacity_decision(
         &mut self,
     ) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_logits_capacity_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_workspace_capacity_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_variant_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_running_q8_0(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_running_q8_0_f32_aux(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_running_q4_0(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_running_q4_1(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_success_error_out_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_success_callback_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_error_error_out_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_error_callback_decision(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_done(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
     fn effect_on_unexpected_from_state_errored(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
 }
 
@@ -1215,11 +1280,7 @@ impl Default for SpeechDecoderWhisperActor {
 }
 
 impl SpeechDecoderWhisperContext {
-    #[allow(
-        clippy::unnecessary_wraps,
-        reason = "SML decoder action callbacks require Result<(), ()>"
-    )]
-    fn run(&mut self, event: &EventDecodeRun<'_>, variant: DecodeVariant) -> Result<(), ()> {
+    fn run(&mut self, event: &EventDecodeRun<'_>, variant: DecodeVariant) {
         self.phase = match variant {
             DecodeVariant::Q8_0F32Aux => WhisperDecoderPhase::RunningQ8F32,
             DecodeVariant::Q8_0 => WhisperDecoderPhase::RunningQ8,
@@ -1266,7 +1327,9 @@ impl SpeechDecoderWhisperContext {
                 digest_out: &mut digest_out,
             };
             match variant {
-                DecodeVariant::Q8_0F32Aux => crate::decoder::whisper::detail::run_q8_f32_aux(request),
+                DecodeVariant::Q8_0F32Aux => {
+                    crate::decoder::whisper::detail::run_q8_f32_aux(request)
+                }
                 DecodeVariant::Q8_0 => crate::decoder::whisper::detail::run_q8(request),
                 DecodeVariant::Q4_0 => crate::decoder::whisper::detail::run_q4_0(request),
                 DecodeVariant::Q4_1 => crate::decoder::whisper::detail::run_q4_1(request),
@@ -1288,7 +1351,6 @@ impl SpeechDecoderWhisperContext {
         if variant == DecodeVariant::Q4_1 {
             self.q4_1_dispatch_count = self.q4_1_dispatch_count.saturating_add(1);
         }
-        Ok(())
     }
 }
 
@@ -1335,6 +1397,192 @@ pub type Decoder = SpeechDecoderWhisperActor;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use emel_model::bridge::{
+        Data, TensorInput, TensorMetadata, TensorMetadataInput, WhisperDataInput,
+        WhisperHParamsInput,
+    };
+    use emel_tensor::dtype::SerializedType;
+    type TensorSpec = (Vec<u8>, SerializedType, [u64; 4], u32);
+
+    fn add_spec(
+        specs: &mut Vec<TensorSpec>,
+        name: impl Into<Vec<u8>>,
+        kind: SerializedType,
+        dims: [u64; 4],
+        rank: u32,
+    ) {
+        specs.push((name.into(), kind, dims, rank));
+    }
+
+    fn add_base_specs(specs: &mut Vec<TensorSpec>) {
+        for (name, kind, dims, rank) in [
+            (
+                b"mel_filters".to_vec(),
+                SerializedType::F32,
+                [201, 80, 1, 1],
+                2,
+            ),
+            (
+                b"model.encoder.conv1.weight".to_vec(),
+                SerializedType::F16,
+                [3, 80, 384, 1],
+                3,
+            ),
+            (
+                b"model.encoder.conv1.bias".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1, 1, 1],
+                1,
+            ),
+            (
+                b"model.encoder.conv2.weight".to_vec(),
+                SerializedType::F16,
+                [3, 384, 384, 1],
+                3,
+            ),
+            (
+                b"model.encoder.conv2.bias".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1, 1, 1],
+                1,
+            ),
+            (
+                b"model.encoder.embed_positions.weight".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1500, 1, 1],
+                2,
+            ),
+            (
+                b"model.encoder.layer_norm.weight".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1, 1, 1],
+                1,
+            ),
+            (
+                b"model.encoder.layer_norm.bias".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1, 1, 1],
+                1,
+            ),
+            (
+                b"model.decoder.embed_tokens.weight".to_vec(),
+                SerializedType::Q8_0,
+                [384, 51865, 1, 1],
+                2,
+            ),
+            (
+                b"model.decoder.embed_positions.weight".to_vec(),
+                SerializedType::Q8_0,
+                [384, 448, 1, 1],
+                2,
+            ),
+            (
+                b"model.decoder.layer_norm.weight".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1, 1, 1],
+                1,
+            ),
+            (
+                b"model.decoder.layer_norm.bias".to_vec(),
+                SerializedType::Q8_0,
+                [384, 1, 1, 1],
+                1,
+            ),
+        ] {
+            add_spec(specs, name, kind, dims, rank);
+        }
+    }
+
+    fn add_block_specs(specs: &mut Vec<TensorSpec>) {
+        for block in 0..DECODER_BLOCK_COUNT {
+            for (name, kind, dims, rank) in [
+                (
+                    format!("model.encoder.layers.{block}.self_attn.q_proj.weight"),
+                    SerializedType::Q4_0,
+                    [384, 384, 1, 1],
+                    2,
+                ),
+                (
+                    format!("model.encoder.layers.{block}.self_attn.q_proj.bias"),
+                    SerializedType::Q8_0,
+                    [384, 1, 1, 1],
+                    1,
+                ),
+                (
+                    format!("model.decoder.layers.{block}.self_attn.q_proj.weight"),
+                    SerializedType::Q4_0,
+                    [384, 384, 1, 1],
+                    2,
+                ),
+                (
+                    format!("model.decoder.layers.{block}.self_attn.q_proj.bias"),
+                    SerializedType::Q8_0,
+                    [384, 1, 1, 1],
+                    1,
+                ),
+                (
+                    format!("model.decoder.layers.{block}.encoder_attn.q_proj.weight"),
+                    SerializedType::Q4_0,
+                    [384, 384, 1, 1],
+                    2,
+                ),
+                (
+                    format!("model.decoder.layers.{block}.encoder_attn.q_proj.bias"),
+                    SerializedType::Q8_0,
+                    [384, 1, 1, 1],
+                    1,
+                ),
+            ] {
+                add_spec(specs, name, kind, dims, rank);
+            }
+        }
+    }
+
+    fn model_from_specs(specs: &[TensorSpec]) -> Data {
+        let payloads: Vec<Vec<u8>> = specs
+            .iter()
+            .map(|(_, kind, dims, rank)| {
+                let size = kind
+                    .data_size(*dims, *rank)
+                    .expect("valid tensor fixture geometry");
+                vec![0; usize::try_from(size).expect("fixture payload fits address space")]
+            })
+            .collect();
+        let tensors: Vec<TensorInput<'_>> = specs
+            .iter()
+            .zip(&payloads)
+            .map(|((name, kind, dims, rank), bytes)| {
+                TensorInput::with_bytes(
+                    name,
+                    TensorMetadata::new(TensorMetadataInput {
+                        tensor_type: *kind,
+                        dimension_count: *rank,
+                        dimensions: *dims,
+                        data_offset: 0,
+                        file_offset: 0,
+                        data_size: u64::try_from(bytes.len())
+                            .expect("fixture payload length fits metadata"),
+                        file_index: 0,
+                        storage: None,
+                    }),
+                    bytes,
+                )
+            })
+            .collect();
+        Data::try_from_whisper(WhisperDataInput {
+            architecture: b"whisper",
+            hparams: WhisperHParamsInput::default(),
+            tensors: &tensors,
+        })
+        .expect("valid Whisper contract fixture")
+    }
+
+    fn valid_model() -> Data {
+        let mut specs = Vec::new();
+        add_base_specs(&mut specs);
+        add_block_specs(&mut specs);
+        model_from_specs(&specs)
+    }
 
     #[test]
     fn pinned_geometry_matches_decoder_workspace_formula() {
@@ -1345,11 +1593,27 @@ mod tests {
     }
 
     #[test]
-    fn model_binding_preserves_fixed_contract_dimensions() {
+    fn model_binding_derives_and_accepts_valid_model_geometry() {
+        let model = valid_model();
+        let contract = bind_execution_contract(&model);
+        assert!(contract.model_contract_valid());
+        assert_eq!(contract.vocab_size, 51_865);
+        assert_eq!(contract.embedding_length, 384);
+        assert_eq!(contract.feed_forward_length, 1_536);
+        assert_eq!(contract.attention_head_count, 6);
+        assert_eq!(contract.encoder_context_length, 1_500);
+        assert_eq!(contract.decoder_context_length, 448);
+        assert_eq!(contract.encoder_block_count, 4);
+        assert_eq!(contract.decoder_block_count, 4);
+    }
+
+    #[test]
+    fn model_binding_rejects_unpopulated_data() {
         let model = Data::try_new().expect("bounded model storage");
         let contract = bind_execution_contract(&model);
-        assert_eq!(contract.vocab_size, vocab_size());
-        assert_eq!(contract.embedding_length, 384);
-        assert_eq!(contract.decoder_block_count, 4);
+        assert!(!contract.model_present);
+        assert!(!contract.model_contract_valid());
+        assert_eq!(contract.vocab_size, 0);
+        assert_eq!(contract.embedding_length, 0);
     }
 }

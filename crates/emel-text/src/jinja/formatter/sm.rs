@@ -1,9 +1,8 @@
-//! Source-aligned, bounded Jinja text formatter actor.
+//! Source-aligned, bounded Jinja formatter actor.
 //!
-//! This is the Rust projection of the pinned formatter state machine.  The
-//! renderer itself is intentionally not exposed here: the formatter copies a
-//! caller-provided source buffer into a caller-owned destination and reports
-//! the same request/capacity/error outcomes as the source machine.
+//! The pinned formatter is a synchronous raw renderer: it writes the supplied
+//! source bytes to caller-owned output without allocation and reports the
+//! bounded result through the supplied callbacks.
 
 #![allow(
     clippy::derive_partial_eq_without_eq,
@@ -35,16 +34,17 @@ pub enum FormatterError {
 impl FormatterError {
     /// Returns the source-compatible numeric error code.
     #[must_use]
-    pub const fn code(self) -> i32 { self as i32 }
+    pub const fn code(self) -> i32 {
+        self as i32
+    }
 }
 
 /// Immediate completion notification for a successful render.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderingDone {
-    /// Number of source bytes copied to the output.
+    /// Number of source bytes written to the output.
     pub output_length: usize,
-    /// Whether the output was truncated.  The bounded formatter never
-    /// truncates successful copies, but retains this source field.
+    /// Whether output was truncated. Successful formatting never truncates.
     pub output_truncated: bool,
 }
 
@@ -53,35 +53,27 @@ pub struct RenderingDone {
 pub struct RenderingError {
     /// Source-compatible formatter error code.
     pub err: FormatterError,
-    /// Position associated with the error, zero for request/capacity errors.
+    /// Source position associated with the error. Request/capacity failures use zero.
     pub error_pos: usize,
 }
 
-/// Synchronous callback used by [`EventRenderRuntime`].
-///
-/// Function pointers are used instead of heap-backed closures so dispatch is
-/// bounded and allocation-free.  The callback's boolean return is ignored,
-/// matching the source callback contract.
+/// Synchronous successful completion callback.
 pub type DoneCallback = fn(RenderingDone) -> bool;
-/// Synchronous error callback used by [`EventRenderRuntime`].
+/// Synchronous failed completion callback.
 pub type ErrorCallback = fn(RenderingError) -> bool;
 
-/// Caller-owned request fields projected from `event::render`.
-///
-/// The source program and globals are deliberately absent: this target only
-/// implements the formatter's bounded source-copy orchestration contract.
+/// Caller-owned request fields projected from native `event::render`.
 #[derive(Clone, Copy, Debug)]
 pub struct RenderRequest<'event> {
-    /// Source bytes to copy.
+    /// Source bytes to format.
     pub source: &'event [u8],
-    /// Caller-owned output storage wrapped for synchronous state-machine
-    /// completion copies.
+    /// Caller-owned destination storage.
     pub output: &'event RefCell<&'event mut [u8]>,
-    /// Maximum number of bytes accepted for this request.
+    /// Declared maximum number of bytes accepted for this request.
     pub output_capacity: usize,
     /// Optional successful completion callback.
     pub dispatch_done: Option<DoneCallback>,
-    /// Optional error completion callback.
+    /// Optional failed completion callback.
     pub dispatch_error: Option<ErrorCallback>,
 }
 
@@ -113,22 +105,28 @@ impl<'event> RenderRequest<'event> {
         dispatch_done: Option<DoneCallback>,
         dispatch_error: Option<ErrorCallback>,
     ) -> Self {
-        Self { source, output, output_capacity, dispatch_done, dispatch_error }
+        Self {
+            source,
+            output,
+            output_capacity,
+            dispatch_done,
+            dispatch_error,
+        }
     }
 }
 
-/// Mutable result context corresponding to `event::render_ctx`.
+/// Mutable result context corresponding to native `event::render_ctx`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderContext {
     /// Internal formatter error.
     pub err: FormatterError,
-    /// Bytes successfully copied.
+    /// Number of bytes successfully written.
     pub output_length: usize,
     /// Whether output was truncated.
     pub output_truncated: bool,
-    /// Numeric error output corresponding to the source optional sink.
+    /// Numeric error sink corresponding to native `error_out`.
     pub error_out: i32,
-    /// Error position corresponding to the source optional sink.
+    /// Error position sink corresponding to native `error_pos_out`.
     pub error_pos_out: usize,
 }
 
@@ -138,7 +136,7 @@ impl Default for RenderContext {
             err: FormatterError::None,
             output_length: 0,
             output_truncated: false,
-            error_out: FormatterError::None.code(),
+            error_out: 0,
             error_pos_out: 0,
         }
     }
@@ -166,25 +164,27 @@ impl RenderContext {
     }
 }
 
-/// Runtime event shell corresponding to `event::render_runtime`.
+/// Runtime event corresponding to native `event::render_runtime`.
 #[derive(Clone, Copy, Debug)]
 pub struct EventRenderRuntime<'event> {
-    /// Copied bounded request fields.
+    /// Caller-owned render request.
     pub request: RenderRequest<'event>,
     /// Synchronous result context.
     pub context: &'event RefCell<RenderContext>,
 }
 
 impl<'event> EventRenderRuntime<'event> {
-    /// Constructs one bounded runtime event.
+    /// Constructs one runtime render event.
     #[must_use]
-    pub const fn new(request: RenderRequest<'event>, context: &'event RefCell<RenderContext>) -> Self {
+    pub const fn new(
+        request: RenderRequest<'event>,
+        context: &'event RefCell<RenderContext>,
+    ) -> Self {
         Self { request, context }
     }
 }
 
-// Source mapping: pinned
-// `src/emel/text/jinja/formatter/sm.hpp` (destination-first rows retained).
+// State mapping: `src/emel/text/jinja/formatter/sm.hpp`.
 sml! {
     TextJinjaFormatter<'event> {
         "request_decision"_s <= *"initialized"_s + event<EventRenderRuntime<'event>> [valid_render] / begin_render_from_initialized,
@@ -205,20 +205,27 @@ sml! {
         "result_decision"_s <= "copy_exec"_s + completion<EventRenderRuntime>(EventRenderRuntime<'event>),
         "done"_s <= "result_decision"_s + completion<EventRenderRuntime>(EventRenderRuntime<'event>) [request_ok] / dispatch_done,
         "errored"_s <= "result_decision"_s + completion<EventRenderRuntime>(EventRenderRuntime<'event>) [request_failed] / dispatch_error,
-        "unexpected"_s <= "initialized"_s + unexpected_event<_> / on_unexpected_from_initialized,
-        "unexpected"_s <= "request_decision"_s + unexpected_event<_> / on_unexpected_from_request_decision,
-        "unexpected"_s <= "copy_exec"_s + unexpected_event<_> / on_unexpected_from_copy_exec,
-        "unexpected"_s <= "result_decision"_s + unexpected_event<_> / on_unexpected_from_result_decision,
-        "unexpected"_s <= "done"_s + unexpected_event<_> / on_unexpected_from_done,
-        "unexpected"_s <= "errored"_s + unexpected_event<_> / on_unexpected_from_errored,
-        "unexpected"_s <= "unexpected"_s + unexpected_event<_> / on_unexpected_from_unexpected,
+        "unexpected"_s <= "initialized"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "request_decision"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "copy_exec"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "result_decision"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "done"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "errored"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "unexpected"_s + unexpected_event<EventRenderRuntime<'event>> / on_unexpected_runtime,
+        "unexpected"_s <= "initialized"_s + unexpected_event<_> / on_unexpected_wildcard_from_initialized,
+        "unexpected"_s <= "request_decision"_s + unexpected_event<_> / on_unexpected_wildcard_from_request_decision,
+        "unexpected"_s <= "copy_exec"_s + unexpected_event<_> / on_unexpected_wildcard_from_copy_exec,
+        "unexpected"_s <= "result_decision"_s + unexpected_event<_> / on_unexpected_wildcard_from_result_decision,
+        "unexpected"_s <= "done"_s + unexpected_event<_> / on_unexpected_wildcard_from_done,
+        "unexpected"_s <= "errored"_s + unexpected_event<_> / on_unexpected_wildcard_from_errored,
+        "unexpected"_s <= "unexpected"_s + unexpected_event<_> / on_unexpected_wildcard_from_unexpected,
     }
 }
 
 /// State-machine context retained by the generated machine.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TextJinjaFormatterContext {
-    /// Set when an event violates the current sequencing contract.
+    /// Set when an event violates the sequencing contract.
     pub unexpected: bool,
 }
 
@@ -255,8 +262,7 @@ impl TextJinjaFormatterStateMachineContext for TextJinjaFormatterContext {
         Ok(())
     }
     fn dispatch_done(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
-        let callback = event.request.dispatch_done;
-        if let Some(callback) = callback {
+        if let Some(callback) = event.request.dispatch_done {
             let context = *event.context.borrow();
             let _ = callback(RenderingDone {
                 output_length: context.output_length,
@@ -266,10 +272,12 @@ impl TextJinjaFormatterStateMachineContext for TextJinjaFormatterContext {
         Ok(())
     }
     fn dispatch_error(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
-        let callback = event.request.dispatch_error;
-        if let Some(callback) = callback {
+        if let Some(callback) = event.request.dispatch_error {
             let context = *event.context.borrow();
-            let _ = callback(RenderingError { err: context.err, error_pos: context.error_pos_out });
+            let _ = callback(RenderingError {
+                err: context.err,
+                error_pos: context.error_pos_out,
+            });
         }
         Ok(())
     }
@@ -281,32 +289,68 @@ impl TextJinjaFormatterStateMachineContext for TextJinjaFormatterContext {
         Ok(!callbacks_present(event))
     }
     fn mark_capacity_error(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
-        event.context.borrow_mut().mark_error(FormatterError::InvalidRequest, true, 0);
+        event
+            .context
+            .borrow_mut()
+            .mark_error(FormatterError::InvalidRequest, true, 0);
         Ok(())
     }
     fn mark_empty_output(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
         event.context.borrow_mut().mark_done(0, false);
         Ok(())
     }
+    fn on_unexpected_runtime(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
+        event
+            .context
+            .borrow_mut()
+            .mark_error(FormatterError::InvalidRequest, true, 0);
+        self.unexpected = true;
+        self.dispatch_error(event)
+    }
+    fn on_unexpected_wildcard_from_copy_exec(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_wildcard_from_done(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_wildcard_from_errored(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_wildcard_from_initialized(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_wildcard_from_request_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_wildcard_from_result_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_wildcard_from_unexpected(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
 
-    fn on_unexpected_from_copy_exec(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_done(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_initialized(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_request_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_result_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> { self.unexpected() }
-
-    fn reject_invalid_render_from_done(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
+    fn reject_invalid_render_from_done(
+        &mut self,
+        event: &EventRenderRuntime<'_>,
+    ) -> Result<(), ()> {
         reject_invalid(event)
     }
-    fn reject_invalid_render_from_errored(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
+    fn reject_invalid_render_from_errored(
+        &mut self,
+        event: &EventRenderRuntime<'_>,
+    ) -> Result<(), ()> {
         reject_invalid(event)
     }
-    fn reject_invalid_render_from_initialized(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
+    fn reject_invalid_render_from_initialized(
+        &mut self,
+        event: &EventRenderRuntime<'_>,
+    ) -> Result<(), ()> {
         reject_invalid(event)
     }
-    fn reject_invalid_render_from_unexpected(&mut self, event: &EventRenderRuntime<'_>) -> Result<(), ()> {
+    fn reject_invalid_render_from_unexpected(
+        &mut self,
+        event: &EventRenderRuntime<'_>,
+    ) -> Result<(), ()> {
         reject_invalid(event)
     }
 
@@ -328,42 +372,43 @@ impl TextJinjaFormatterStateMachineContext for TextJinjaFormatterContext {
 }
 
 fn valid_request(event: &EventRenderRuntime<'_>) -> bool {
-    // A Rust slice is always a valid source view; only nonzero capacity
-    // remains from the pinned request validation.
     event.request.output_capacity > 0
 }
-
 fn callbacks_present(event: &EventRenderRuntime<'_>) -> bool {
     event.request.dispatch_done.is_some() && event.request.dispatch_error.is_some()
 }
 fn source_fits(event: &EventRenderRuntime<'_>) -> bool {
-    let output_capacity = event.request.output.borrow().len();
+    let actual_capacity = event.request.output.borrow().len();
     event.request.source.len() <= event.request.output_capacity
-        && event.request.source.len() <= output_capacity
+        && event.request.source.len() <= actual_capacity
 }
-
 fn reject_invalid(event: &EventRenderRuntime<'_>) -> Result<(), ()> {
-    event.context.borrow_mut().mark_error(FormatterError::InvalidRequest, false, 0);
+    event
+        .context
+        .borrow_mut()
+        .mark_error(FormatterError::InvalidRequest, false, 0);
     Ok(())
 }
 
-/// Synchronous bounded actor around the generated formatter machine.
-pub struct TextJinjaFormatterActor<'event> {
-    machine: TextJinjaFormatterStateMachine<'event, TextJinjaFormatterContext>,
+/// Synchronous, allocation-free bounded actor around the generated machine.
+pub struct TextJinjaFormatterActor {
+    machine: TextJinjaFormatterStateMachine<TextJinjaFormatterContext>,
 }
-
-impl<'event> Default for TextJinjaFormatterActor<'event> {
-    fn default() -> Self { Self::new() }
+impl Default for TextJinjaFormatterActor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
-
-impl<'event> TextJinjaFormatterActor<'event> {
+impl TextJinjaFormatterActor {
     /// Creates an actor in the generated `initialized` state.
     #[must_use]
     pub fn new() -> Self {
-        Self { machine: TextJinjaFormatterStateMachine::new(TextJinjaFormatterContext::default()) }
+        Self {
+            machine: TextJinjaFormatterStateMachine::new(TextJinjaFormatterContext::default()),
+        }
     }
-
-    pub fn process_event(&mut self, event: EventRenderRuntime<'event>) -> bool {
+    /// Processes one synchronous render request.
+    pub fn process_event(&mut self, event: EventRenderRuntime<'_>) -> bool {
         let context = event.context;
         let accepted = self
             .machine
@@ -371,26 +416,156 @@ impl<'event> TextJinjaFormatterActor<'event> {
             .is_ok();
         accepted && context.borrow().err == FormatterError::None
     }
-
-    /// Dispatches an explicit unexpected event and records the violation.
+    /// Moves the actor to the explicit unexpected state.
     pub fn process_unexpected(&mut self) -> bool {
         let _ = self.machine.context_mut().unexpected();
         self.machine.set_state(TextJinjaFormatterStates::Unexpected);
         false
     }
-
     /// Returns generated state inspection data.
     #[must_use]
-    pub fn state(&self) -> &TextJinjaFormatterStates { self.machine.state() }
-
+    pub fn state(&self) -> &TextJinjaFormatterStates {
+        self.machine.state()
+    }
     /// Reports whether the generated machine is in `state`.
     #[must_use]
-    pub fn is(&self, state: &TextJinjaFormatterStates) -> bool { self.machine.is(state) }
-
+    pub fn is(&self, state: &TextJinjaFormatterStates) -> bool {
+        self.machine.is(state)
+    }
     /// Returns the generated machine context.
     #[must_use]
-    pub fn context(&self) -> &TextJinjaFormatterContext { self.machine.context() }
+    pub fn context(&self) -> &TextJinjaFormatterContext {
+        self.machine.context()
+    }
 }
 
 /// Short alias matching the pinned formatter's `Formatter` name.
-pub type Formatter<'event> = TextJinjaFormatterActor<'event>;
+pub type Formatter = TextJinjaFormatterActor;
+#[cfg(test)]
+#[allow(clippy::cast_sign_loss)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard};
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn lock_tests() -> MutexGuard<'static, ()> {
+        match TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    static ERROR_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LAST_ERROR: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static LAST_ERROR_POS: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    fn done(_: RenderingDone) -> bool {
+        true
+    }
+
+    fn error(event: RenderingError) -> bool {
+        ERROR_CALLS.fetch_add(1, Ordering::SeqCst);
+        LAST_ERROR.store(event.err.code() as usize, Ordering::SeqCst);
+        LAST_ERROR_POS.store(event.error_pos, Ordering::SeqCst);
+        true
+    }
+
+    fn reset_callbacks() {
+        ERROR_CALLS.store(0, Ordering::SeqCst);
+        LAST_ERROR.store(usize::MAX, Ordering::SeqCst);
+        LAST_ERROR_POS.store(usize::MAX, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn invalid_capacity_rejects_without_mutating_output_and_dispatches_error() {
+        let _lock = lock_tests();
+        reset_callbacks();
+        let source = b"ignored";
+        let mut bytes = [0xa5; 8];
+        let before = bytes;
+        let output = RefCell::new(&mut bytes[..]);
+        let context = RefCell::new(RenderContext::default());
+        let request = RenderRequest::new(source, &output, 0, done, error);
+        let event = EventRenderRuntime::new(request, &context);
+        let mut actor = TextJinjaFormatterActor::new();
+
+        assert!(!actor.process_event(event));
+        assert_eq!(*output.borrow(), before);
+        assert_eq!(context.borrow().err, FormatterError::InvalidRequest);
+        assert_eq!(context.borrow().output_length, 0);
+        assert!(!context.borrow().output_truncated);
+        assert_eq!(
+            context.borrow().error_out,
+            FormatterError::InvalidRequest.code()
+        );
+        assert_eq!(context.borrow().error_pos_out, 0);
+        assert_eq!(ERROR_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            LAST_ERROR.load(Ordering::SeqCst),
+            FormatterError::InvalidRequest.code() as usize
+        );
+        assert_eq!(LAST_ERROR_POS.load(Ordering::SeqCst), 0);
+        assert!(actor.is(&TextJinjaFormatterStates::Errored));
+    }
+
+    #[test]
+    fn source_overflow_marks_truncation_and_preserves_output() {
+        let _lock = lock_tests();
+        reset_callbacks();
+        let source = b"overflow";
+        let mut bytes = [0x5a; 4];
+        let before = bytes;
+        let output = RefCell::new(&mut bytes[..]);
+        let context = RefCell::new(RenderContext::default());
+        let request = RenderRequest::new(source, &output, 4, done, error);
+        let event = EventRenderRuntime::new(request, &context);
+        let mut actor = TextJinjaFormatterActor::new();
+
+        assert!(!actor.process_event(event));
+        assert_eq!(*output.borrow(), before);
+        assert_eq!(context.borrow().err, FormatterError::InvalidRequest);
+        assert_eq!(context.borrow().output_length, 0);
+        assert!(context.borrow().output_truncated);
+        assert_eq!(ERROR_CALLS.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn missing_callbacks_reject_without_dispatch_and_enter_errored() {
+        let _lock = lock_tests();
+        reset_callbacks();
+        let source = b"ignored";
+        let mut bytes = [0x3c; 8];
+        let before = bytes;
+        let output = RefCell::new(&mut bytes[..]);
+        let context = RefCell::new(RenderContext::default());
+        let request = RenderRequest::with_callbacks(source, &output, 8, None, None);
+        let event = EventRenderRuntime::new(request, &context);
+        let mut actor = TextJinjaFormatterActor::new();
+
+        assert!(!actor.process_event(event));
+        assert_eq!(*output.borrow(), before);
+        assert_eq!(ERROR_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(context.borrow().err, FormatterError::InvalidRequest);
+        assert_eq!(context.borrow().output_length, 0);
+        assert!(!context.borrow().output_truncated);
+        assert!(actor.is(&TextJinjaFormatterStates::Errored));
+    }
+
+    #[test]
+    fn process_unexpected_preserves_explicit_state_until_valid_request() {
+        let mut actor = TextJinjaFormatterActor::new();
+        assert!(!actor.process_unexpected());
+        assert!(actor.context().unexpected);
+        assert!(actor.is(&TextJinjaFormatterStates::Unexpected));
+
+        let source = b"ok";
+        let mut bytes = [0; 2];
+        let output = RefCell::new(&mut bytes[..]);
+        let context = RefCell::new(RenderContext::default());
+        let request = RenderRequest::new(source, &output, 2, done, error);
+        assert!(actor.process_event(EventRenderRuntime::new(request, &context)));
+        assert!(!actor.context().unexpected);
+        assert!(actor.is(&TextJinjaFormatterStates::Done));
+        assert_eq!(*output.borrow(), *source);
+    }
+}

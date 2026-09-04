@@ -124,11 +124,7 @@ impl Accessor {
     ///
     /// Returns a typed error when the key is missing, malformed, the wrong
     /// kind, or cannot be represented by `i32`.
-    pub fn require_i32(
-        gguf: &mut Loader,
-        key: &[u8],
-        field: &mut i32,
-    ) -> Result<(), Error> {
+    pub fn require_i32(gguf: &mut Loader, key: &[u8], field: &mut i32) -> Result<(), Error> {
         let value = gguf
             .process_event(emel_gguf::event::ReadUnsigned::new(key))
             .map_err(|error| Self::query_error(Operation::RequiredI32, error))?
@@ -257,7 +253,7 @@ impl Accessor {
         })
     }
 
-    fn query_error(operation: Operation, error: QueryError) -> Error {
+    const fn query_error(operation: Operation, error: QueryError) -> Error {
         Error {
             operation,
             kind: match error {
@@ -266,7 +262,6 @@ impl Accessor {
                 QueryError::Range => ErrorKind::Range,
                 QueryError::Malformed => ErrorKind::Malformed,
                 QueryError::NotParsed => ErrorKind::Query,
-                QueryError::Internal => ErrorKind::Internal,
                 _ => ErrorKind::Internal,
             },
         }

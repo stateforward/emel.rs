@@ -42,7 +42,9 @@ pub enum PhaseOutcome {
     Done = 1,
     Failed = 2,
 }
-
+/// Extract owns no tensor lifecycle operation. Failure cleanup is performed by
+/// the processor root while it still holds the actual lifecycle driver.
+///
 /// Extract callback corresponding to C++ `extract_outputs_fn`.
 pub type ExtractOutputsFn = fn(&ProcessorExecuteRequest, &mut i32, &mut i32) -> bool;
 
@@ -72,6 +74,8 @@ pub struct ProcessorExecuteRequest {
     pub seq_primary_ids: u64,
     pub seq_primary_ids_count: i32,
     pub extract_outputs: Option<ExtractOutputsFn>,
+    /// Root callback retained by the owning processor for the typed bridge.
+    pub root_extract_outputs: Option<crate::processor::sm::ExtractOutputsFn>,
 }
 
 /// Internal copied event corresponding to C++ `processor::event::execute_step`.
@@ -86,7 +90,10 @@ impl ProcessorEventExecuteStep {
     /// Creates an event from a copied execution request with no prior phase error.
     #[must_use]
     pub const fn new(request: ProcessorExecuteRequest) -> Self {
-        Self { request, err: ProcessorError::None }
+        Self {
+            request,
+            err: ProcessorError::None,
+        }
     }
 
     /// Creates an event with a previously retained processor error.
@@ -97,7 +104,10 @@ impl ProcessorEventExecuteStep {
 
     /// Creates an event with the extract callback selected explicitly.
     #[must_use]
-    pub const fn with_callback(mut request: ProcessorExecuteRequest, callback: ExtractOutputsFn) -> Self {
+    pub const fn with_callback(
+        mut request: ProcessorExecuteRequest,
+        callback: ExtractOutputsFn,
+    ) -> Self {
         request.extract_outputs = Some(callback);
         Self::new(request)
     }
@@ -149,17 +159,21 @@ impl GraphProcessorExtractStepContext {
         self.phase_callback_err = 0;
     }
 
-    /// Returns the retained phase outcome.
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.extract_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.extract_outcome
+    }
 
-    /// Returns the retained processor error.
     #[must_use]
-    pub const fn error(&self) -> ProcessorError { self.err }
+    pub const fn error(&self) -> ProcessorError {
+        self.err
+    }
 }
 
 impl GraphProcessorExtractStepStateMachineContext for GraphProcessorExtractStepContext {
-    fn callback_error(&self) -> Result<bool, ()> { Ok(self.phase_callback_err != 0) }
+    fn callback_error(&self) -> Result<bool, ()> {
+        Ok(self.phase_callback_err != 0)
+    }
     fn callback_failed_without_error(&self) -> Result<bool, ()> {
         Ok(!self.phase_callback_ok && self.phase_callback_err == 0)
     }
@@ -190,6 +204,7 @@ impl GraphProcessorExtractStepStateMachineContext for GraphProcessorExtractStepC
         self.err = ProcessorError::InvalidRequest;
         Ok(())
     }
+
     fn on_unexpected_from_callback_decision(&mut self) -> Result<(), ()> {
         self.extract_outcome = PhaseOutcome::Failed;
         self.err = ProcessorError::InternalError;
@@ -218,7 +233,9 @@ impl GraphProcessorExtractStepStateMachineContext for GraphProcessorExtractStepC
     fn phase_missing_callback(&self) -> Result<bool, ()> {
         Ok(self.err == ProcessorError::None && self.request.extract_outputs.is_none())
     }
-    fn phase_prefailed(&self) -> Result<bool, ()> { Ok(self.err != ProcessorError::None) }
+    fn phase_prefailed(&self) -> Result<bool, ()> {
+        Ok(self.err != ProcessorError::None)
+    }
     fn phase_request_callback(&self) -> Result<bool, ()> {
         Ok(self.err == ProcessorError::None && self.request.extract_outputs.is_some())
     }
@@ -237,51 +254,73 @@ impl GraphProcessorExtractStepStateMachineContext for GraphProcessorExtractStepC
 }
 
 /// Synchronous single-writer extract-phase actor.
-pub struct Processor {
+pub struct GraphProcessorExtractStepActor {
     machine: GraphProcessorExtractStepStateMachine<GraphProcessorExtractStepContext>,
 }
 
-impl Default for Processor {
-    fn default() -> Self { Self::new() }
+impl Default for GraphProcessorExtractStepActor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl Processor {
+impl GraphProcessorExtractStepActor {
     /// Creates an actor in generated `deciding` state.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: GraphProcessorExtractStepStateMachine::new(GraphProcessorExtractStepContext::default()),
+            machine: GraphProcessorExtractStepStateMachine::new(
+                GraphProcessorExtractStepContext::default(),
+            ),
         }
     }
 
     /// Copies and dispatches one execution event synchronously.
     pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
         self.machine.context_mut().set_request(event);
-        self.machine
-            .process_event(GraphProcessorExtractStepEvents::ProcessorEventExecuteStep(event))
-            .is_ok()
+        let origin = GraphProcessorExtractStepCompletionOrigin::ProcessorEventExecuteStep;
+        if self.machine.process_completion(&origin) != Ok(true) {
+            return false;
+        }
+        if self
+            .machine
+            .is(&GraphProcessorExtractStepStates::CallbackDecision)
+        {
+            self.machine.process_completion(&origin) == Ok(true)
+        } else {
+            true
+        }
     }
 
     /// Records an explicit unexpected event and transitions to the generated unexpected state.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().extract_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = ProcessorError::InternalError;
         self.machine
-            .process_event(GraphProcessorExtractStepEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphProcessorExtractStepStates::UnexpectedEvent);
+        false
     }
 
     /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> &GraphProcessorExtractStepStates { self.machine.state() }
+    pub fn state(&self) -> &GraphProcessorExtractStepStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GraphProcessorExtractStepStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &GraphProcessorExtractStepStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns retained bounded context for outcome/error inspection.
     #[must_use]
-    pub fn context(&self) -> &GraphProcessorExtractStepContext { self.machine.context() }
-
+    pub fn context(&self) -> &GraphProcessorExtractStepContext {
+        self.machine.context()
+    }
     /// Returns callback-reported output count.
     #[must_use]
-    pub fn outputs_produced(&self) -> i32 { self.machine.context().outputs_produced }
+    pub fn outputs_produced(&self) -> i32 {
+        self.machine.context().outputs_produced
+    }
 }

@@ -11,13 +11,15 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
-    clippy::missing_const_for_fn,
+    clippy::redundant_field_names,
+    clippy::inconsistent_struct_constructor,
+    clippy::needless_pass_by_value,
     dead_code,
     unused_imports,
     missing_docs
 )]
 
+use crate::allocator::sm as allocator;
 use sml::sml;
 
 /// Outcome retained by the assemble-allocation phase.
@@ -105,7 +107,7 @@ impl AssemblerEventAssembleGraph {
     /// Creates an event with copied prerequisite outcomes and assembled counts.
     #[must_use]
     pub const fn with_prerequisites(
-        request: AssemblerEventAssembleGraph,
+        request: Self,
         build_outcome: PhaseOutcome,
         err: AssemblerError,
         assembled_node_count: u32,
@@ -136,7 +138,7 @@ sml! {
 }
 
 /// Persistent bounded context for `GraphAssemblerAssembleAllocPass`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Default)]
 pub struct GraphAssemblerAssembleAllocPassContext {
     pub request: AssemblerEventAssembleGraph,
     pub validate_outcome: PhaseOutcome,
@@ -148,6 +150,7 @@ pub struct GraphAssemblerAssembleAllocPassContext {
     pub alloc_outcome: PhaseOutcome,
     pub alloc_plan: AllocationPlan,
     pub err: AssemblerError,
+    allocator: allocator::Allocator,
 }
 
 impl GraphAssemblerAssembleAllocPassContext {
@@ -166,22 +169,40 @@ impl GraphAssemblerAssembleAllocPassContext {
     }
 
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.alloc_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.alloc_outcome
+    }
 
     #[must_use]
-    pub const fn error(&self) -> AssemblerError { self.err }
+    pub const fn error(&self) -> AssemblerError {
+        self.err
+    }
 
     #[must_use]
-    pub const fn plan(&self) -> AllocationPlan { self.alloc_plan }
+    pub const fn plan(&self) -> AllocationPlan {
+        self.alloc_plan
+    }
 }
 
-fn product_overflows(lhs: u32, rhs: u64) -> bool {
-    lhs != 0 && rhs > u64::MAX / u64::from(lhs)
+const fn map_allocator_error(error: allocator::AllocationError) -> AssemblerError {
+    match error {
+        allocator::AllocationError::None => AssemblerError::None,
+        allocator::AllocationError::InvalidRequest => AssemblerError::InvalidRequest,
+        allocator::AllocationError::Capacity => AssemblerError::Capacity,
+        allocator::AllocationError::Internal => AssemblerError::InternalError,
+        allocator::AllocationError::Untracked => AssemblerError::Untracked,
+    }
 }
 
-impl GraphAssemblerAssembleAllocPassStateMachineContext
-    for GraphAssemblerAssembleAllocPassContext
-{
+const fn allocation_done(_: allocator::AllocationDone) -> bool {
+    true
+}
+
+const fn allocation_error(_: allocator::AllocationErrorEvent) -> bool {
+    true
+}
+
+impl GraphAssemblerAssembleAllocPassStateMachineContext for GraphAssemblerAssembleAllocPassContext {
     fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
         self.alloc_outcome = PhaseOutcome::Failed;
         self.err = AssemblerError::InvalidRequest;
@@ -222,20 +243,20 @@ impl GraphAssemblerAssembleAllocPassStateMachineContext
         Ok(self.err == AssemblerError::None
             && self.request.build_outcome == PhaseOutcome::Done
             && (self.request.step_plan == 0
+                || usize::try_from(self.request.step_plan).is_err()
                 || !self.request.output_out
                 || self.request.assembled_node_count == 0
                 || self.request.assembled_tensor_count == 0))
     }
 
     fn phase_prereq_failed(&self) -> Result<bool, ()> {
-        Ok(self.err == AssemblerError::None
-            && self.request.build_outcome != PhaseOutcome::Done)
+        Ok(self.err == AssemblerError::None && self.request.build_outcome != PhaseOutcome::Done)
     }
-
     fn phase_request_allocator(&self) -> Result<bool, ()> {
         Ok(self.err == AssemblerError::None
             && self.request.build_outcome == PhaseOutcome::Done
             && self.request.step_plan != 0
+            && usize::try_from(self.request.step_plan).is_ok()
             && self.request.output_out
             && self.request.assembled_node_count != 0
             && self.request.assembled_tensor_count != 0)
@@ -245,33 +266,38 @@ impl GraphAssemblerAssembleAllocPassStateMachineContext
         self.alloc_outcome = PhaseOutcome::Failed;
         self.alloc_plan = AllocationPlan::default();
         self.err = AssemblerError::InternalError;
-        if self.request.bytes_per_tensor == 0 || self.request.workspace_capacity_bytes == 0 {
+
+        let Ok(graph_topology) = usize::try_from(self.request.step_plan) else {
             self.err = AssemblerError::InvalidRequest;
             return Ok(());
-        }
-
-        if product_overflows(
-            self.request.assembled_tensor_count,
-            self.request.bytes_per_tensor,
-        ) {
-            self.err = AssemblerError::Capacity;
-            return Ok(());
-        }
-
-        let required_buffer_bytes = u64::from(self.request.assembled_tensor_count)
-            * self.request.bytes_per_tensor;
-        if required_buffer_bytes > self.request.workspace_capacity_bytes {
-            self.err = AssemblerError::Capacity;
-            return Ok(());
-        }
-
-        self.alloc_plan = AllocationPlan {
-            tensor_count: self.request.assembled_tensor_count,
-            interval_count: self.request.assembled_tensor_count,
-            required_buffer_bytes,
         };
-        self.alloc_outcome = PhaseOutcome::Done;
-        self.err = AssemblerError::None;
+
+        let request = allocator::EventAllocateGraphPlan {
+            request: allocator::AllocateGraph {
+                graph_topology,
+                plan_out: self.request.output_out,
+                node_count: self.assembled_node_count,
+                tensor_count: self.assembled_tensor_count,
+                tensor_capacity: self.assembled_tensor_count,
+                interval_capacity: self.assembled_tensor_count,
+                bytes_per_tensor: self.request.bytes_per_tensor,
+                workspace_capacity_bytes: self.request.workspace_capacity_bytes,
+                dispatch_done: Some(allocation_done),
+                dispatch_error: Some(allocation_error),
+            },
+        };
+        let accepted = self.allocator.process_event(request);
+        let error = map_allocator_error(self.allocator.error());
+        self.err = error;
+        if accepted && error == AssemblerError::None {
+            let plan = self.allocator.plan();
+            self.alloc_plan = AllocationPlan {
+                tensor_count: plan.tensor_count,
+                interval_count: plan.interval_count,
+                required_buffer_bytes: plan.required_buffer_bytes,
+            };
+            self.alloc_outcome = PhaseOutcome::Done;
+        }
         Ok(())
     }
 }
@@ -282,7 +308,9 @@ pub struct GraphAssemblerAssembleAllocPass {
 }
 
 impl Default for GraphAssemblerAssembleAllocPass {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphAssemblerAssembleAllocPass {
@@ -306,7 +334,9 @@ impl GraphAssemblerAssembleAllocPass {
 
     /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> &GraphAssemblerAssembleAllocPassStates { self.machine.state() }
+    pub fn state(&self) -> &GraphAssemblerAssembleAllocPassStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
@@ -316,8 +346,7 @@ impl GraphAssemblerAssembleAllocPass {
 
     /// Returns retained bounded context.
     #[must_use]
-    pub fn context(&self) -> &GraphAssemblerAssembleAllocPassContext { self.machine.context() }
+    pub fn context(&self) -> &GraphAssemblerAssembleAllocPassContext {
+        self.machine.context()
+    }
 }
-
-/// Short actor alias matching the phase name.
-pub type Actor = GraphAssemblerAssembleAllocPass;

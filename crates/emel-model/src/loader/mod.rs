@@ -3,13 +3,16 @@
 #![allow(clippy::redundant_pub_crate)]
 #![allow(clippy::enum_variant_names)]
 
-pub(crate) mod actor;
-pub(crate) mod event;
+pub mod actor;
+pub mod event;
 pub mod hparams;
-pub mod sm;
+pub(crate) mod sm;
 
-#[allow(unused_imports)]
-pub(crate) use actor::{ModelLoader, NoTensorLoader, TensorLoader};
+pub use actor::{ModelLoader, NoTensorLoader, OwnedTensorLoader, TensorLoader};
+pub use event::{
+    DoneCallback, Error, ErrorCallback, LoadError, LoadRequest, LoadStats, ModelCheck, ParseModel,
+    Source,
+};
 
 #[cfg(test)]
 pub mod test_gguf;

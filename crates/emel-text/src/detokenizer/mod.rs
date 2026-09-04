@@ -13,6 +13,7 @@ pub struct Bind<'a> {
     pub result: &'a mut BindResult,
 }
 /// Borrowed one-token decode request. All storage is supplied by the caller.
+#[derive(Debug)]
 pub struct Detokenize<'a> {
     pub token_id: i32,
     pub emit_special: bool,

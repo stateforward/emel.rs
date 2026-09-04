@@ -1,5 +1,11 @@
 //! Bounded graph allocator state machine.
 //!
+//! The allocator owns three terminal, synchronously joined phase actors. The
+//! pinned `stateforward-sml` composite DSL can compose adjacent tables, but it
+//! cannot embed already-generated actor values, so this parent keeps explicit
+//! phase ownership and ordering in a flat table. Phase results stay in their
+//! owning child contexts and are consumed immediately by the next typed phase
+//! event; they are not mirrored in the parent context.
 #![allow(
     clippy::derive_partial_eq_without_eq,
     clippy::module_name_repetitions,
@@ -14,9 +20,9 @@
     private_interfaces
 )]
 use super::{
-    liveness_pass::sm as liveness,
-    ordering_pass::sm as ordering,
-    placement_pass::sm as placement,
+    liveness_pass::sm::GraphAllocatorLivenessPassActor,
+    ordering_pass::sm::GraphAllocatorOrderingPassActor,
+    placement_pass::sm::GraphAllocatorPlacementPassActor,
 };
 use sml::sml;
 
@@ -123,9 +129,9 @@ pub struct GraphAllocatorContext {
     pub required_buffer_bytes: u64,
     pub plan: AllocationPlan,
     pub dispatch_generation: u32,
-    liveness: liveness::Actor,
-    ordering: ordering::Actor,
-    placement: placement::Actor,
+    liveness: GraphAllocatorLivenessPassActor,
+    ordering: GraphAllocatorOrderingPassActor,
+    placement: GraphAllocatorPlacementPassActor,
 }
 
 impl Default for GraphAllocatorContext {
@@ -140,100 +146,112 @@ impl Default for GraphAllocatorContext {
             required_buffer_bytes: 0,
             plan: AllocationPlan::default(),
             dispatch_generation: 0,
-            liveness: liveness::Actor::new(),
-            ordering: ordering::Actor::new(),
-            placement: placement::Actor::new(),
+            liveness: GraphAllocatorLivenessPassActor::new(),
+            ordering: GraphAllocatorOrderingPassActor::new(),
+            placement: GraphAllocatorPlacementPassActor::new(),
         }
     }
 }
 
-fn map_liveness_outcome(outcome: liveness::PhaseOutcome) -> PhaseOutcome {
+fn map_liveness_outcome(outcome: super::liveness_pass::sm::PhaseOutcome) -> PhaseOutcome {
     match outcome {
-        liveness::PhaseOutcome::Done => PhaseOutcome::Done,
-        liveness::PhaseOutcome::Failed => PhaseOutcome::Failed,
-        liveness::PhaseOutcome::Unknown => PhaseOutcome::Unknown,
+        super::liveness_pass::sm::PhaseOutcome::Done => PhaseOutcome::Done,
+        super::liveness_pass::sm::PhaseOutcome::Failed => PhaseOutcome::Failed,
+        super::liveness_pass::sm::PhaseOutcome::Unknown => PhaseOutcome::Unknown,
     }
 }
-fn map_liveness_error(error: liveness::AllocationError) -> AllocationError {
+fn map_liveness_error(error: super::liveness_pass::sm::AllocationError) -> AllocationError {
     match error {
-        liveness::AllocationError::None => AllocationError::None,
-        liveness::AllocationError::InvalidRequest => AllocationError::InvalidRequest,
-        liveness::AllocationError::Capacity => AllocationError::Capacity,
-        liveness::AllocationError::Internal => AllocationError::Internal,
-        liveness::AllocationError::Untracked => AllocationError::Untracked,
+        super::liveness_pass::sm::AllocationError::None => AllocationError::None,
+        super::liveness_pass::sm::AllocationError::InvalidRequest => {
+            AllocationError::InvalidRequest
+        }
+        super::liveness_pass::sm::AllocationError::Capacity => AllocationError::Capacity,
+        super::liveness_pass::sm::AllocationError::Internal => AllocationError::Internal,
+        super::liveness_pass::sm::AllocationError::Untracked => AllocationError::Untracked,
     }
 }
-fn map_error_to_liveness(error: AllocationError) -> liveness::AllocationError {
+fn map_error_to_liveness(error: AllocationError) -> super::liveness_pass::sm::AllocationError {
     match error {
-        AllocationError::None => liveness::AllocationError::None,
-        AllocationError::InvalidRequest => liveness::AllocationError::InvalidRequest,
-        AllocationError::Capacity => liveness::AllocationError::Capacity,
-        AllocationError::Internal => liveness::AllocationError::Internal,
-        AllocationError::Untracked => liveness::AllocationError::Untracked,
+        AllocationError::None => super::liveness_pass::sm::AllocationError::None,
+        AllocationError::InvalidRequest => {
+            super::liveness_pass::sm::AllocationError::InvalidRequest
+        }
+        AllocationError::Capacity => super::liveness_pass::sm::AllocationError::Capacity,
+        AllocationError::Internal => super::liveness_pass::sm::AllocationError::Internal,
+        AllocationError::Untracked => super::liveness_pass::sm::AllocationError::Untracked,
     }
 }
-fn map_phase_to_ordering(outcome: PhaseOutcome) -> ordering::PhaseOutcome {
+fn map_phase_to_ordering(outcome: PhaseOutcome) -> super::ordering_pass::sm::PhaseOutcome {
     match outcome {
-        PhaseOutcome::Done => ordering::PhaseOutcome::Done,
-        PhaseOutcome::Failed => ordering::PhaseOutcome::Failed,
-        PhaseOutcome::Unknown => ordering::PhaseOutcome::Unknown,
+        PhaseOutcome::Done => super::ordering_pass::sm::PhaseOutcome::Done,
+        PhaseOutcome::Failed => super::ordering_pass::sm::PhaseOutcome::Failed,
+        PhaseOutcome::Unknown => super::ordering_pass::sm::PhaseOutcome::Unknown,
     }
 }
-fn map_ordering_outcome(outcome: ordering::PhaseOutcome) -> PhaseOutcome {
+fn map_ordering_outcome(outcome: super::ordering_pass::sm::PhaseOutcome) -> PhaseOutcome {
     match outcome {
-        ordering::PhaseOutcome::Done => PhaseOutcome::Done,
-        ordering::PhaseOutcome::Failed => PhaseOutcome::Failed,
-        ordering::PhaseOutcome::Unknown => PhaseOutcome::Unknown,
+        super::ordering_pass::sm::PhaseOutcome::Done => PhaseOutcome::Done,
+        super::ordering_pass::sm::PhaseOutcome::Failed => PhaseOutcome::Failed,
+        super::ordering_pass::sm::PhaseOutcome::Unknown => PhaseOutcome::Unknown,
     }
 }
-fn map_ordering_error(error: ordering::AllocationError) -> AllocationError {
+fn map_ordering_error(error: super::ordering_pass::sm::AllocationError) -> AllocationError {
     match error {
-        ordering::AllocationError::None => AllocationError::None,
-        ordering::AllocationError::InvalidRequest => AllocationError::InvalidRequest,
-        ordering::AllocationError::Capacity => AllocationError::Capacity,
-        ordering::AllocationError::Internal => AllocationError::Internal,
-        ordering::AllocationError::Untracked => AllocationError::Untracked,
+        super::ordering_pass::sm::AllocationError::None => AllocationError::None,
+        super::ordering_pass::sm::AllocationError::InvalidRequest => {
+            AllocationError::InvalidRequest
+        }
+        super::ordering_pass::sm::AllocationError::Capacity => AllocationError::Capacity,
+        super::ordering_pass::sm::AllocationError::Internal => AllocationError::Internal,
+        super::ordering_pass::sm::AllocationError::Untracked => AllocationError::Untracked,
     }
 }
-fn map_error_to_ordering(error: AllocationError) -> ordering::AllocationError {
+fn map_error_to_ordering(error: AllocationError) -> super::ordering_pass::sm::AllocationError {
     match error {
-        AllocationError::None => ordering::AllocationError::None,
-        AllocationError::InvalidRequest => ordering::AllocationError::InvalidRequest,
-        AllocationError::Capacity => ordering::AllocationError::Capacity,
-        AllocationError::Internal => ordering::AllocationError::Internal,
-        AllocationError::Untracked => ordering::AllocationError::Untracked,
+        AllocationError::None => super::ordering_pass::sm::AllocationError::None,
+        AllocationError::InvalidRequest => {
+            super::ordering_pass::sm::AllocationError::InvalidRequest
+        }
+        AllocationError::Capacity => super::ordering_pass::sm::AllocationError::Capacity,
+        AllocationError::Internal => super::ordering_pass::sm::AllocationError::Internal,
+        AllocationError::Untracked => super::ordering_pass::sm::AllocationError::Untracked,
     }
 }
-fn map_phase_to_placement(outcome: PhaseOutcome) -> placement::PhaseOutcome {
+fn map_phase_to_placement(outcome: PhaseOutcome) -> super::placement_pass::sm::PhaseOutcome {
     match outcome {
-        PhaseOutcome::Done => placement::PhaseOutcome::Done,
-        PhaseOutcome::Failed => placement::PhaseOutcome::Failed,
-        PhaseOutcome::Unknown => placement::PhaseOutcome::Unknown,
+        PhaseOutcome::Done => super::placement_pass::sm::PhaseOutcome::Done,
+        PhaseOutcome::Failed => super::placement_pass::sm::PhaseOutcome::Failed,
+        PhaseOutcome::Unknown => super::placement_pass::sm::PhaseOutcome::Unknown,
     }
 }
-fn map_placement_outcome(outcome: placement::PhaseOutcome) -> PhaseOutcome {
+fn map_placement_outcome(outcome: super::placement_pass::sm::PhaseOutcome) -> PhaseOutcome {
     match outcome {
-        placement::PhaseOutcome::Done => PhaseOutcome::Done,
-        placement::PhaseOutcome::Failed => PhaseOutcome::Failed,
-        placement::PhaseOutcome::Unknown => PhaseOutcome::Unknown,
+        super::placement_pass::sm::PhaseOutcome::Done => PhaseOutcome::Done,
+        super::placement_pass::sm::PhaseOutcome::Failed => PhaseOutcome::Failed,
+        super::placement_pass::sm::PhaseOutcome::Unknown => PhaseOutcome::Unknown,
     }
 }
-fn map_placement_error(error: placement::AllocationError) -> AllocationError {
+fn map_placement_error(error: super::placement_pass::sm::AllocationError) -> AllocationError {
     match error {
-        placement::AllocationError::None => AllocationError::None,
-        placement::AllocationError::InvalidRequest => AllocationError::InvalidRequest,
-        placement::AllocationError::Capacity => AllocationError::Capacity,
-        placement::AllocationError::Internal => AllocationError::Internal,
-        placement::AllocationError::Untracked => AllocationError::Untracked,
+        super::placement_pass::sm::AllocationError::None => AllocationError::None,
+        super::placement_pass::sm::AllocationError::InvalidRequest => {
+            AllocationError::InvalidRequest
+        }
+        super::placement_pass::sm::AllocationError::Capacity => AllocationError::Capacity,
+        super::placement_pass::sm::AllocationError::Internal => AllocationError::Internal,
+        super::placement_pass::sm::AllocationError::Untracked => AllocationError::Untracked,
     }
 }
-fn map_error_to_placement(error: AllocationError) -> placement::AllocationError {
+fn map_error_to_placement(error: AllocationError) -> super::placement_pass::sm::AllocationError {
     match error {
-        AllocationError::None => placement::AllocationError::None,
-        AllocationError::InvalidRequest => placement::AllocationError::InvalidRequest,
-        AllocationError::Capacity => placement::AllocationError::Capacity,
-        AllocationError::Internal => placement::AllocationError::Internal,
-        AllocationError::Untracked => placement::AllocationError::Untracked,
+        AllocationError::None => super::placement_pass::sm::AllocationError::None,
+        AllocationError::InvalidRequest => {
+            super::placement_pass::sm::AllocationError::InvalidRequest
+        }
+        AllocationError::Capacity => super::placement_pass::sm::AllocationError::Capacity,
+        AllocationError::Internal => super::placement_pass::sm::AllocationError::Internal,
+        AllocationError::Untracked => super::placement_pass::sm::AllocationError::Untracked,
     }
 }
 impl GraphAllocatorStateMachineContext for GraphAllocatorContext {
@@ -271,6 +289,12 @@ impl GraphAllocatorStateMachineContext for GraphAllocatorContext {
         self.sorted_tensor_count = 0;
         self.required_buffer_bytes = 0;
         self.plan = AllocationPlan::default();
+        // The C++ allocator re-enters each nested phase model for every valid
+        // request. Recreate the terminal child actors at that boundary so a
+        // ready allocator remains reusable after a prior allocation.
+        self.liveness = GraphAllocatorLivenessPassActor::new();
+        self.ordering = GraphAllocatorOrderingPassActor::new();
+        self.placement = GraphAllocatorPlacementPassActor::new();
         self.dispatch_generation = self.dispatch_generation.wrapping_add(1);
         Ok(())
     }
@@ -387,16 +411,18 @@ impl GraphAllocatorStateMachineContext for GraphAllocatorContext {
         Ok(())
     }
     fn run_liveness(&mut self, event: &EventAllocateGraphPlan) -> Result<(), ()> {
-        let request = liveness::LivenessGraphRequest::new(
+        let request = super::liveness_pass::sm::LivenessGraphRequest::new(
             event.request.graph_topology != 0,
             event.request.node_count,
             event.request.tensor_count,
             event.request.tensor_capacity,
         );
-        let ok = self.liveness.process_event(liveness::LivenessEventAllocateGraphPlan::with_error(
-            request,
-            map_error_to_liveness(self.error),
-        ));
+        let ok = self.liveness.process_event(
+            super::liveness_pass::sm::LivenessEventAllocateGraphPlan::with_error(
+                request,
+                map_error_to_liveness(self.error),
+            ),
+        );
         self.liveness_outcome = map_liveness_outcome(self.liveness.context().outcome());
         self.required_intervals = self.liveness.context().required_intervals;
         self.error = map_liveness_error(self.liveness.context().error());
@@ -406,7 +432,7 @@ impl GraphAllocatorStateMachineContext for GraphAllocatorContext {
         Ok(())
     }
     fn run_ordering(&mut self, event: &EventAllocateGraphPlan) -> Result<(), ()> {
-        let pass_event = ordering::AllocatorEventAllocateGraphPlan::with_error(
+        let pass_event = super::ordering_pass::sm::AllocatorEventAllocateGraphPlan::with_error(
             map_phase_to_ordering(self.liveness_outcome),
             self.required_intervals,
             event.request.interval_capacity,
@@ -424,7 +450,7 @@ impl GraphAllocatorStateMachineContext for GraphAllocatorContext {
         Ok(())
     }
     fn run_placement(&mut self, event: &EventAllocateGraphPlan) -> Result<(), ()> {
-        let pass_event = placement::AllocatorEventAllocateGraphPlan::with_error(
+        let pass_event = super::placement_pass::sm::AllocatorEventAllocateGraphPlan::with_error(
             map_phase_to_placement(self.ordering_outcome),
             self.sorted_tensor_count,
             self.required_buffer_bytes,
@@ -454,6 +480,16 @@ impl GraphAllocatorStateMachineContext for GraphAllocatorContext {
     }
 }
 
+impl core::fmt::Debug for Allocator {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("Allocator")
+            .field("ready", &self.is_ready())
+            .field("error", &self.error())
+            .finish()
+    }
+}
+
 /// Single-writer allocator actor.
 pub struct Allocator {
     machine: GraphAllocatorStateMachine<GraphAllocatorContext>,
@@ -471,7 +507,8 @@ impl Allocator {
         }
     }
     pub fn process_event(&mut self, event: EventAllocateGraphPlan) -> bool {
-        self.machine.process_event(event).is_ok()
+        let accepted = self.machine.process_event(event).is_ok();
+        accepted && self.machine.context().error == AllocationError::None
     }
     #[must_use]
     pub fn is_ready(&self) -> bool {
@@ -481,8 +518,74 @@ impl Allocator {
     pub fn plan(&self) -> AllocationPlan {
         self.machine.context().plan
     }
+
     #[must_use]
     pub fn error(&self) -> AllocationError {
         self.machine.context().error
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::{
+        AllocateGraph, AllocationDone, AllocationErrorEvent, AllocationPlan, Allocator,
+        EventAllocateGraphPlan,
+    };
+
+    static DONE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+    static ERROR_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
+
+    fn dispatch_done(_: AllocationDone) -> bool {
+        DONE_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn dispatch_error(_: AllocationErrorEvent) -> bool {
+        ERROR_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn valid_request() -> EventAllocateGraphPlan {
+        EventAllocateGraphPlan {
+            request: AllocateGraph {
+                graph_topology: 1,
+                plan_out: true,
+                node_count: 2,
+                tensor_count: 3,
+                tensor_capacity: 4,
+                interval_capacity: 4,
+                bytes_per_tensor: 8,
+                workspace_capacity_bytes: 32,
+                dispatch_done: Some(dispatch_done),
+                dispatch_error: Some(dispatch_error),
+            },
+        }
+    }
+
+    #[test]
+    fn ready_allocator_reuses_child_phases_for_repeated_requests() {
+        DONE_CALLBACKS.store(0, Ordering::Relaxed);
+        ERROR_CALLBACKS.store(0, Ordering::Relaxed);
+        let mut allocator = Allocator::new();
+
+        assert!(allocator.process_event(valid_request()));
+        assert!(allocator.is_ready());
+        assert_eq!(allocator.error(), super::AllocationError::None);
+        assert_eq!(
+            allocator.plan(),
+            AllocationPlan {
+                tensor_count: 3,
+                interval_count: 3,
+                required_buffer_bytes: 24,
+            }
+        );
+
+        assert!(allocator.process_event(valid_request()));
+        assert!(allocator.is_ready());
+        assert_eq!(allocator.error(), super::AllocationError::None);
+        assert_eq!(DONE_CALLBACKS.load(Ordering::Relaxed), 2);
+        assert_eq!(ERROR_CALLBACKS.load(Ordering::Relaxed), 0);
     }
 }

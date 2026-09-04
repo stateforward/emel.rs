@@ -74,6 +74,8 @@ pub struct ProcessorExecuteRequest {
     pub seq_primary_ids: u64,
     pub seq_primary_ids_count: i32,
     pub validate: Option<ValidateFn>,
+    /// Root callback retained by the owning processor for the typed bridge.
+    pub root_validate: Option<crate::processor::sm::ValidateFn>,
 }
 
 /// Internal copied event corresponding to C++ `processor::event::execute_step`.
@@ -261,17 +263,17 @@ impl GraphProcessorValidateStepStateMachineContext for GraphProcessorValidateSte
 }
 
 /// Synchronous single-writer validation-phase actor.
-pub struct Processor {
+pub struct GraphProcessorValidateStepActor {
     machine: GraphProcessorValidateStepStateMachine<GraphProcessorValidateStepContext>,
 }
 
-impl Default for Processor {
+impl Default for GraphProcessorValidateStepActor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Processor {
+impl GraphProcessorValidateStepActor {
     /// Creates an actor in generated `deciding` state.
     #[must_use]
     pub fn new() -> Self {
@@ -285,16 +287,27 @@ impl Processor {
     /// Copies and dispatches one execution event synchronously.
     pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
         self.machine.context_mut().set_request(event);
-        self.machine
-            .process_event(GraphProcessorValidateStepEvents::ProcessorEventExecuteStep(event))
-            .is_ok()
+        let origin = GraphProcessorValidateStepCompletionOrigin::ProcessorEventExecuteStep;
+        if self.machine.process_completion(&origin) != Ok(true) {
+            return false;
+        }
+        if self
+            .machine
+            .is(&GraphProcessorValidateStepStates::CallbackDecision)
+        {
+            self.machine.process_completion(&origin) == Ok(true)
+        } else {
+            true
+        }
     }
 
     /// Records an explicit unexpected event and transitions to the generated unexpected state.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().validate_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = ProcessorError::InternalError;
         self.machine
-            .process_event(GraphProcessorValidateStepEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphProcessorValidateStepStates::UnexpectedEvent);
+        true
     }
 
     /// Returns generated state inspection.
@@ -305,8 +318,8 @@ impl Processor {
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GraphProcessorValidateStepStates) -> bool {
-        self.machine.is(&state)
+    pub fn is(&self, state: &GraphProcessorValidateStepStates) -> bool {
+        self.machine.is(state)
     }
 
     /// Returns retained bounded context for outcome/error inspection.
@@ -315,9 +328,6 @@ impl Processor {
         self.machine.context()
     }
 }
-
-/// Short actor alias for validation-phase callers.
-pub type ValidateProcessor = Processor;
 
 #[cfg(test)]
 mod tests {
@@ -344,26 +354,26 @@ mod tests {
             validate: Some(valid),
             ..ProcessorExecuteRequest::default()
         };
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorValidateStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
         assert_eq!(actor.context().outcome(), PhaseOutcome::Done);
         assert_eq!(actor.context().error(), ProcessorError::None);
-        assert!(actor.is(GraphProcessorValidateStepStates::Executed));
+        assert!(actor.is(&GraphProcessorValidateStepStates::Executed));
     }
 
     #[test]
     fn missing_and_failed_callbacks_are_typed() {
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorValidateStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::default()));
         assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
         assert_eq!(actor.context().error(), ProcessorError::InvalidRequest);
-        assert!(actor.is(GraphProcessorValidateStepStates::ExecuteFailed));
+        assert!(actor.is(&GraphProcessorValidateStepStates::ExecuteFailed));
 
         let request = ProcessorExecuteRequest {
             validate: Some(rejected),
             ..ProcessorExecuteRequest::default()
         };
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorValidateStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
         assert_eq!(actor.context().error(), ProcessorError::KernelFailed);
     }
@@ -374,14 +384,14 @@ mod tests {
             validate: Some(failed),
             ..ProcessorExecuteRequest::default()
         };
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorValidateStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
         assert_eq!(actor.context().error(), ProcessorError::Callback(17));
 
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorValidateStepActor::new();
         assert!(actor.process_unexpected_event());
         assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
         assert_eq!(actor.context().error(), ProcessorError::InternalError);
-        assert!(actor.is(GraphProcessorValidateStepStates::UnexpectedEvent));
+        assert!(actor.is(&GraphProcessorValidateStepStates::UnexpectedEvent));
     }
 }

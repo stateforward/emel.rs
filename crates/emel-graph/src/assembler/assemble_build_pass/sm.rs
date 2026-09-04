@@ -10,14 +10,14 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
+    clippy::needless_pass_by_value,
+    clippy::default_trait_access,
     clippy::missing_const_for_fn,
-    dead_code,
     unused_imports,
-    missing_docs,
-    private_interfaces
+    missing_docs
 )]
 
+use crate::assembler::reuse_decision_pass::sm::ReuseOutcome;
 use sml::sml;
 
 /// Outcome retained by an assembler phase.
@@ -62,7 +62,7 @@ pub struct AssemblerEventAssembleGraph {
     /// Validation phase outcome.
     pub validate_outcome: PhaseOutcome,
     /// Reuse decision outcome; `Rebuild` selects this phase.
-    pub reuse_outcome: PhaseOutcome,
+    pub reuse_outcome: ReuseOutcome,
     /// Build phase outcome carried by the internal context.
     pub build_outcome: PhaseOutcome,
     /// Allocation phase outcome.
@@ -109,7 +109,7 @@ pub struct GraphAssemblerAssembleBuildPassContext {
     pub bytes_per_tensor: u64,
     pub workspace_capacity_bytes: u64,
     pub validate_outcome: PhaseOutcome,
-    pub reuse_outcome: PhaseOutcome,
+    pub reuse_outcome: ReuseOutcome,
     pub build_outcome: PhaseOutcome,
     pub alloc_outcome: PhaseOutcome,
     pub assembled_node_count: u32,
@@ -145,19 +145,21 @@ impl GraphAssemblerAssembleBuildPassContext {
     }
 
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.build_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.build_outcome
+    }
 
     #[must_use]
-    pub const fn error(&self) -> AssemblerError { self.err }
+    pub const fn error(&self) -> AssemblerError {
+        self.err
+    }
 }
 
 fn product_overflows_u64(lhs: u64, rhs: u64) -> bool {
     lhs != 0 && rhs > u64::MAX / lhs
 }
 
-impl GraphAssemblerAssembleBuildPassStateMachineContext
-    for GraphAssemblerAssembleBuildPassContext
-{
+impl GraphAssemblerAssembleBuildPassStateMachineContext for GraphAssemblerAssembleBuildPassContext {
     fn mark_done(&mut self) -> Result<(), ()> {
         self.build_outcome = PhaseOutcome::Done;
         self.err = AssemblerError::None;
@@ -210,17 +212,16 @@ impl GraphAssemblerAssembleBuildPassStateMachineContext
         let tensor_count = u64::from(self.assembled_tensor_count);
         let overflow = product_overflows_u64(tensor_count, self.bytes_per_tensor);
         Ok(self.err == AssemblerError::None
-            && self.reuse_outcome == PhaseOutcome::Rebuild
+            && self.reuse_outcome == ReuseOutcome::Rebuild
             && self.assembled_tensor_count != 0
             && self.bytes_per_tensor != 0
-            && (overflow
-                || tensor_count * self.bytes_per_tensor > self.workspace_capacity_bytes))
+            && (overflow || tensor_count * self.bytes_per_tensor > self.workspace_capacity_bytes))
     }
 
     fn phase_done(&self) -> Result<bool, ()> {
         let tensor_count = u64::from(self.assembled_tensor_count);
         Ok(self.err == AssemblerError::None
-            && self.reuse_outcome == PhaseOutcome::Rebuild
+            && self.reuse_outcome == ReuseOutcome::Rebuild
             && self.assembled_node_count != 0
             && self.assembled_tensor_count != 0
             && self.bytes_per_tensor != 0
@@ -230,14 +231,14 @@ impl GraphAssemblerAssembleBuildPassStateMachineContext
 
     fn phase_invalid_request(&self) -> Result<bool, ()> {
         Ok(self.err == AssemblerError::None
-            && self.reuse_outcome == PhaseOutcome::Rebuild
+            && self.reuse_outcome == ReuseOutcome::Rebuild
             && (self.assembled_node_count == 0
                 || self.assembled_tensor_count == 0
                 || self.bytes_per_tensor == 0))
     }
 
     fn phase_prereq_failed(&self) -> Result<bool, ()> {
-        Ok(self.err == AssemblerError::None && self.reuse_outcome != PhaseOutcome::Rebuild)
+        Ok(self.err == AssemblerError::None && self.reuse_outcome != ReuseOutcome::Rebuild)
     }
 }
 
@@ -247,7 +248,9 @@ pub struct AssembleBuildPass {
 }
 
 impl Default for AssembleBuildPass {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AssembleBuildPass {
@@ -269,14 +272,18 @@ impl AssembleBuildPass {
 
     /// Dispatches an explicit unexpected event.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().build_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = AssemblerError::InternalError;
         self.machine
-            .process_event(GraphAssemblerAssembleBuildPassEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphAssemblerAssembleBuildPassStates::UnexpectedEvent);
+        false
     }
 
     /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> &GraphAssemblerAssembleBuildPassStates { self.machine.state() }
+    pub fn state(&self) -> &GraphAssemblerAssembleBuildPassStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
@@ -286,8 +293,7 @@ impl AssembleBuildPass {
 
     /// Returns the retained bounded context.
     #[must_use]
-    pub fn context(&self) -> &GraphAssemblerAssembleBuildPassContext { self.machine.context() }
+    pub fn context(&self) -> &GraphAssemblerAssembleBuildPassContext {
+        self.machine.context()
+    }
 }
-
-/// Short actor alias matching the phase name.
-pub type Actor = AssembleBuildPass;

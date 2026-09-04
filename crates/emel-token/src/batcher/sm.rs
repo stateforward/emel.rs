@@ -299,6 +299,7 @@ sml! {
         "seq_payload_decision"_s <= "vocab_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_payload_valid],
         "errored"_s <= "vocab_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_payload_invalid] / invalid,
 
+        "errored"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_primary_malformed] / invalid,
         "seq_masks"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_masks_mode] / normalize_masks,
         "seq_primary"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_primary_mode] / normalize_primary,
         "seq_default"_s <= "seq_payload_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [seq_default_mode] / normalize_default,
@@ -368,6 +369,7 @@ sml! {
         "errored"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_internal] / internal,
         "errored"_s <= "positions_count_publish"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [phase_unknown] / internal,
 
+        "errored"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_mask_malformed] / invalid,
         "output_all"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_all_mode] / set_output_all,
         "output_copy"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_copy_mode] / copy_output,
         "output_last"_s <= "output_decision"_s + completion<Batch>(&'dispatch BatchRuntime<'dispatch>) [output_last_mode] / set_output_last,
@@ -583,6 +585,12 @@ impl TokenBatcherStateMachineContext for Context {
     }
     fn seq_payload_valid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(seq_payload_valid(&event.request))
+    }
+    fn seq_primary_malformed(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(seq_primary_malformed(&event.request))
+    }
+    fn output_mask_malformed(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
+        Ok(output_mask_malformed(&event.request))
     }
     fn seq_payload_invalid(&self, event: &BatchRuntime<'_>) -> Result<bool, ()> {
         Ok(!seq_payload_valid(&event.request))
@@ -812,9 +820,10 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(!event.request.enforce_single_output_per_seq)
     }
     fn probe_single_output(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        event.context.probe_outcome.set(match single_output_ok(event) {
-            true => ProbeOutcome::Ok,
-            false => ProbeOutcome::InvalidRequest,
+        event.context.probe_outcome.set(if single_output_ok(event) {
+            ProbeOutcome::Ok
+        } else {
+            ProbeOutcome::InvalidRequest
         });
         Ok(())
     }
@@ -825,9 +834,10 @@ impl TokenBatcherStateMachineContext for Context {
         Ok(position_stride(&event.request) > 1)
     }
     fn probe_continuity(&mut self, event: &BatchRuntime<'_>) -> Result<(), ()> {
-        event.context.probe_outcome.set(match continuity_ok(event) {
-            true => ProbeOutcome::Ok,
-            false => ProbeOutcome::InvalidRequest,
+        event.context.probe_outcome.set(if continuity_ok(event) {
+            ProbeOutcome::Ok
+        } else {
+            ProbeOutcome::InvalidRequest
         });
         Ok(())
     }
@@ -906,13 +916,19 @@ fn has_masks(r: &RequestView<'_>) -> bool {
                 .is_some_and(|required| values.len() >= required)
     })
 }
-fn has_primary(r: &RequestView<'_>) -> bool {
+fn seq_primary_malformed(r: &RequestView<'_>) -> bool {
     r.seq_primary_ids
-        .is_some_and(|v| v.len() >= r.token_ids.len())
+        .is_some_and(|values| values.len() < r.token_ids.len())
+}
+fn output_mask_malformed(r: &RequestView<'_>) -> bool {
+    r.output_mask_input
+        .is_some_and(|values| values.len() < r.token_ids.len())
+}
+fn has_primary(r: &RequestView<'_>) -> bool {
+    r.seq_primary_ids.is_some()
 }
 fn output_mask_present(r: &RequestView<'_>) -> bool {
-    r.output_mask_input
-        .is_some_and(|v| v.len() >= r.token_ids.len())
+    r.output_mask_input.is_some()
 }
 fn effective_mask_words(r: &RequestView<'_>) -> usize {
     if has_masks(r) { r.seq_mask_words } else { 1 }

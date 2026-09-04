@@ -10,16 +10,15 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
+    clippy::needless_pass_by_value,
     clippy::missing_const_for_fn,
     dead_code,
     unused_imports,
     missing_docs
 )]
-
+use crate::allocator::sm as allocator;
+use crate::assembler::sm::AllocationPlan;
 use sml::sml;
-use crate::allocator::AllocationPlan;
-
 
 /// Outcome retained by the reserve-allocation phase.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -45,8 +44,6 @@ pub enum AllocationError {
 
 /// Short alias for callers using the phase's error type.
 pub type Error = AllocationError;
-
-
 
 /// Copied reserve request fields used by source guards and actions.
 ///
@@ -138,7 +135,7 @@ sml! {
 }
 
 /// Persistent bounded context for `GraphAssemblerReserveAllocPass`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Default)]
 pub struct GraphAssemblerReserveAllocPassContext {
     pub request: ReserveGraphRequest,
     pub alloc_outcome: PhaseOutcome,
@@ -147,6 +144,7 @@ pub struct GraphAssemblerReserveAllocPassContext {
     pub assembled_node_count: u32,
     pub assembled_tensor_count: u32,
     pub alloc_plan: AllocationPlan,
+    allocator: allocator::Allocator,
 }
 
 impl GraphAssemblerReserveAllocPassContext {
@@ -162,17 +160,37 @@ impl GraphAssemblerReserveAllocPassContext {
     }
 
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.alloc_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.alloc_outcome
+    }
 
     #[must_use]
-    pub const fn error(&self) -> AllocationError { self.err }
+    pub const fn error(&self) -> AllocationError {
+        self.err
+    }
 
     #[must_use]
-    pub const fn plan(&self) -> AllocationPlan { self.alloc_plan }
+    pub const fn plan(&self) -> AllocationPlan {
+        self.alloc_plan
+    }
 }
 
-fn product_overflows(lhs: u32, rhs: u64) -> bool {
-    lhs != 0 && rhs > u64::MAX / u64::from(lhs)
+const fn map_allocator_error(error: allocator::AllocationError) -> AllocationError {
+    match error {
+        allocator::AllocationError::None => AllocationError::None,
+        allocator::AllocationError::InvalidRequest => AllocationError::InvalidRequest,
+        allocator::AllocationError::Capacity => AllocationError::Capacity,
+        allocator::AllocationError::Internal => AllocationError::Internal,
+        allocator::AllocationError::Untracked => AllocationError::Untracked,
+    }
+}
+
+const fn allocation_done(_: allocator::AllocationDone) -> bool {
+    true
+}
+
+const fn allocation_error(_: allocator::AllocationErrorEvent) -> bool {
+    true
 }
 
 impl GraphAssemblerReserveAllocPassStateMachineContext for GraphAssemblerReserveAllocPassContext {
@@ -239,25 +257,32 @@ impl GraphAssemblerReserveAllocPassStateMachineContext for GraphAssemblerReserve
         self.alloc_plan = AllocationPlan::default();
         self.err = AllocationError::Internal;
 
-        if product_overflows(self.assembled_tensor_count, self.request.bytes_per_tensor) {
-            self.err = AllocationError::Capacity;
-            return Ok(());
-        }
-
-        let required_buffer_bytes =
-            u64::from(self.assembled_tensor_count) * self.request.bytes_per_tensor;
-        if required_buffer_bytes > self.request.workspace_capacity_bytes {
-            self.err = AllocationError::Capacity;
-            return Ok(());
-        }
-
-        self.alloc_plan = AllocationPlan {
-            tensor_count: self.assembled_tensor_count,
-            interval_count: self.assembled_tensor_count,
-            required_buffer_bytes,
+        let request = allocator::EventAllocateGraphPlan {
+            request: allocator::AllocateGraph {
+                graph_topology: 1,
+                plan_out: self.request.has_output_out,
+                node_count: self.assembled_node_count,
+                tensor_count: self.assembled_tensor_count,
+                tensor_capacity: self.assembled_tensor_count,
+                interval_capacity: self.assembled_tensor_count,
+                bytes_per_tensor: self.request.bytes_per_tensor,
+                workspace_capacity_bytes: self.request.workspace_capacity_bytes,
+                dispatch_done: Some(allocation_done),
+                dispatch_error: Some(allocation_error),
+            },
         };
-        self.alloc_outcome = PhaseOutcome::Done;
-        self.err = AllocationError::None;
+        let accepted = self.allocator.process_event(request);
+        let error = map_allocator_error(self.allocator.error());
+        self.err = error;
+        if accepted && error == AllocationError::None {
+            let plan = self.allocator.plan();
+            self.alloc_plan = AllocationPlan {
+                tensor_count: plan.tensor_count,
+                interval_count: plan.interval_count,
+                required_buffer_bytes: plan.required_buffer_bytes,
+            };
+            self.alloc_outcome = PhaseOutcome::Done;
+        }
         Ok(())
     }
 }
@@ -268,7 +293,9 @@ pub struct GraphAssemblerReserveAllocPass {
 }
 
 impl Default for GraphAssemblerReserveAllocPass {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphAssemblerReserveAllocPass {
@@ -284,33 +311,42 @@ impl GraphAssemblerReserveAllocPass {
 
     /// Copies and dispatches one reserve-allocation completion synchronously.
     pub fn process_event(&mut self, event: AssemblerEventReserveGraph) -> bool {
-        if !self.machine.is(&GraphAssemblerReserveAllocPassStates::Deciding) {
+        if !self
+            .machine
+            .is(&GraphAssemblerReserveAllocPassStates::Deciding)
+        {
             self.machine.context_mut().alloc_outcome = PhaseOutcome::Failed;
             self.machine.context_mut().err = AllocationError::Internal;
             return false;
         }
         self.machine.context_mut().set_request(event);
         self.machine
-            .process_event(GraphAssemblerReserveAllocPassEvents::AssemblerEventReserveGraph(event))
+            .process_event(GraphAssemblerReserveAllocPassEvents::AssemblerEventReserveGraph)
             .is_ok()
     }
 
-    /// Dispatches an explicit unexpected event through the generated topology.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().alloc_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = AllocationError::Internal;
         self.machine
-            .process_event(GraphAssemblerReserveAllocPassEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphAssemblerReserveAllocPassStates::UnexpectedEvent);
+        false
     }
 
-    /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> GraphAssemblerReserveAllocPassStates { *self.machine.state() }
+    pub fn state(&self) -> &GraphAssemblerReserveAllocPassStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GraphAssemblerReserveAllocPassStates) -> bool { self.machine.is(&state) }
+    pub fn is(&self, state: GraphAssemblerReserveAllocPassStates) -> bool {
+        self.machine.is(&state)
+    }
 
     /// Returns the retained bounded context.
     #[must_use]
-    pub fn context(&self) -> &GraphAssemblerReserveAllocPassContext { self.machine.context() }
+    pub fn context(&self) -> &GraphAssemblerReserveAllocPassContext {
+        self.machine.context()
+    }
 }

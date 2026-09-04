@@ -47,14 +47,14 @@ pub struct EventParseRules<'source, 'output> {
 }
 
 /// Successful root parser completion.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ParseDone<'a> {
     /// Caller-owned grammar populated by this dispatch.
     pub grammar: &'a grammar,
 }
 
 /// Failed root parser completion.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct ParseError<'a> {
     /// Caller-owned grammar, reset before this callback is invoked.
     pub grammar: &'a grammar,
@@ -95,10 +95,6 @@ impl<'source, 'output> EventParseRules<'source, 'output> {
         self
     }
 }
-
-/// Compatibility aliases matching the pinned event names.
-pub type ParsingDone<'a> = ParseDone<'a>;
-pub type ParsingError<'a> = ParseError<'a>;
 
 /// Bounded result of one root parser dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -333,7 +329,6 @@ impl GbnfRuleParserContext {
         self.last_sym_start = 0;
         ok
     }
-
 }
 /// Synchronous bounded root parser actor.
 #[derive(Debug)]
@@ -358,9 +353,9 @@ impl GbnfRuleParserActor {
         }
     }
     /// Parses one source in a single run-to-completion dispatch.
-    pub fn process_event(&mut self, event: EventParseRules<'_, '_>) -> ParseOutcome {
+    pub fn process_event(&mut self, mut event: EventParseRules<'_, '_>) -> ParseOutcome {
         if self.state != GbnfRuleParserStates::Ready {
-            return self.publish_error(event, ParseOutcome::InternalError);
+            return self.publish_error(&mut event, ParseOutcome::InternalError);
         }
         if event.on_done.is_none() || event.on_error.is_none() {
             event.grammar_out.reset();
@@ -373,7 +368,7 @@ impl GbnfRuleParserActor {
             return ParseOutcome::InvalidRequest;
         }
         if !self.context.reset(event.source) {
-            return self.publish_error(event, ParseOutcome::InvalidRequest);
+            return self.publish_error(&mut event, ParseOutcome::InvalidRequest);
         }
         event.grammar_out.reset();
         self.state = GbnfRuleParserStates::ExpectRuleName;
@@ -396,7 +391,11 @@ impl GbnfRuleParserActor {
         }
         outcome
     }
-    fn publish_error(&mut self, event: EventParseRules<'_, '_>, outcome: ParseOutcome) -> ParseOutcome {
+    fn publish_error(
+        &mut self,
+        event: &mut EventParseRules<'_, '_>,
+        outcome: ParseOutcome,
+    ) -> ParseOutcome {
         event.grammar_out.reset();
         if let Some(callback) = event.on_error {
             let _ = callback(ParseError {
@@ -420,11 +419,6 @@ impl GbnfRuleParserActor {
     #[must_use]
     pub fn is(&self, state: &GbnfRuleParserStates) -> bool {
         self.state == *state
-    }
-    /// Returns bounded context inspection.
-    #[must_use]
-    pub fn context(&self) -> &GbnfRuleParserContext {
-        &self.context
     }
     /// Reports an explicit unexpected event.
     pub fn process_unexpected_event(&mut self) -> ParseOutcome {
@@ -859,8 +853,7 @@ impl GbnfRuleParserActor {
                 {
                     return ParseOutcome::ParseFailed;
                 }
-                if self.state == GbnfRuleParserStates::ExpectRuleName && out.rule_count == 0
-                {
+                if self.state == GbnfRuleParserStates::ExpectRuleName && out.rule_count == 0 {
                     return ParseOutcome::ParseFailed;
                 }
                 if self.state != GbnfRuleParserStates::ExpectRuleName
@@ -1062,11 +1055,6 @@ impl GbnfRuleParserActor {
     }
 }
 
-/// Compatibility alias for root parser callers.
-pub type RuleParser = GbnfRuleParserActor;
-/// Compatibility alias naming the root actor.
-pub type GbnfRuleParser = GbnfRuleParserActor;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,59 +1068,173 @@ mod tests {
 
     #[test]
     fn parses_plain_rule_reference_in_need_term_position() {
-        assert_rule_elements("root ::= <[12]>\n", &[element { r#type: element_type::token, value: 12 }, element { r#type: element_type::end, value: 0 }]);
+        assert_rule_elements(
+            "root ::= <[12]>\n",
+            &[
+                element {
+                    r#type: element_type::token,
+                    value: 12,
+                },
+                element {
+                    r#type: element_type::end,
+                    value: 0,
+                },
+            ],
+        );
     }
 
     #[test]
     fn parses_negated_rule_reference_after_term() {
-        assert_rule_elements("root ::= \"a\" !<[34]>\n", &[element { r#type: element_type::character, value: b'a' as u32 }, element { r#type: element_type::token_not, value: 34 }, element { r#type: element_type::end, value: 0 }]);
+        assert_rule_elements(
+            "root ::= \"a\" !<[34]>\n",
+            &[
+                element {
+                    r#type: element_type::character,
+                    value: b'a' as u32,
+                },
+                element {
+                    r#type: element_type::token_not,
+                    value: 34,
+                },
+                element {
+                    r#type: element_type::end,
+                    value: 0,
+                },
+            ],
+        );
     }
 
     #[test]
     fn rejects_malformed_or_overflowing_rule_references() {
-        for source in ["root ::= <[]>\n", "root ::= <[12x]>\n", "root ::= <[4294967296]>\n", "root ::= !<[7>\n"] {
+        for source in [
+            "root ::= <[]>\n",
+            "root ::= <[12x]>\n",
+            "root ::= <[4294967296]>\n",
+            "root ::= !<[7>\n",
+        ] {
             let mut parser = GbnfRuleParserActor::new();
             let mut output = grammar::default();
-            assert_eq!(parser.parse(source, &mut output), ParseOutcome::ParseFailed, "{source:?}");
+            assert_eq!(
+                parser.parse(source, &mut output),
+                ParseOutcome::ParseFailed,
+                "{source:?}"
+            );
             assert_eq!(output.rule_count, 0);
         }
     }
 
     #[test]
     fn emits_character_class_lead_types_like_pinned_parser() {
-        assert_rule_elements("root ::= [a-z]\n", &[element { r#type: element_type::character, value: b'a' as u32 }, element { r#type: element_type::char_rng_upper, value: b'z' as u32 }, element { r#type: element_type::end, value: 0 }]);
-        assert_rule_elements("root ::= [^a-z]\n", &[element { r#type: element_type::char_not, value: b'a' as u32 }, element { r#type: element_type::char_rng_upper, value: b'z' as u32 }, element { r#type: element_type::end, value: 0 }]);
+        assert_rule_elements(
+            "root ::= [a-z]\n",
+            &[
+                element {
+                    r#type: element_type::character,
+                    value: b'a' as u32,
+                },
+                element {
+                    r#type: element_type::char_rng_upper,
+                    value: b'z' as u32,
+                },
+                element {
+                    r#type: element_type::end,
+                    value: 0,
+                },
+            ],
+        );
+        assert_rule_elements(
+            "root ::= [^a-z]\n",
+            &[
+                element {
+                    r#type: element_type::char_not,
+                    value: b'a' as u32,
+                },
+                element {
+                    r#type: element_type::char_rng_upper,
+                    value: b'z' as u32,
+                },
+                element {
+                    r#type: element_type::end,
+                    value: 0,
+                },
+            ],
+        );
     }
 
     #[test]
     fn callbacks_publish_caller_owned_grammar_in_order() {
-        fn done(event: ParseDone<'_>) -> bool { assert_eq!(event.grammar.rule(0).elements.unwrap()[0].value, b'a' as u32); true }
-        fn error(_: ParseError<'_>) -> bool { panic!("unexpected error callback") }
+        fn done(event: ParseDone<'_>) -> bool {
+            let ParseDone { grammar } = event;
+            assert_eq!(grammar.rule(0).elements.unwrap()[0].value, b'a' as u32);
+            true
+        }
+        fn error(_: ParseError<'_>) -> bool {
+            panic!("unexpected error callback")
+        }
         let mut parser = GbnfRuleParserActor::new();
         let mut output = grammar::default();
-        assert_eq!(parser.process_event(EventParseRules::new("root ::= \"a\"\n", &mut output).with_callbacks(done, error)), ParseOutcome::Parsed);
+        assert_eq!(
+            parser.process_event(
+                EventParseRules::new("root ::= \"a\"\n", &mut output).with_callbacks(done, error)
+            ),
+            ParseOutcome::Parsed
+        );
         assert_eq!(output.rule_count, 1);
     }
 
     #[test]
     fn malformed_source_resets_output_and_invokes_error_once() {
-        fn done(_: ParseDone<'_>) -> bool { panic!("unexpected done callback") }
-        fn error(event: ParseError<'_>) -> bool { assert_eq!(event.error, ParseOutcome::ParseFailed); assert_eq!(event.grammar.rule_count, 0); true }
+        fn done(_: ParseDone<'_>) -> bool {
+            panic!("unexpected done callback")
+        }
+        fn error(event: ParseError<'_>) -> bool {
+            let ParseError { grammar, error } = event;
+            assert_eq!(error, ParseOutcome::ParseFailed);
+            assert_eq!(grammar.rule_count, 0);
+            true
+        }
         let mut parser = GbnfRuleParserActor::new();
         let mut output = grammar::default();
-        assert_eq!(parser.parse("root ::= \"a\"\n", &mut output), ParseOutcome::Parsed);
-        assert_eq!(parser.process_event(EventParseRules::new("root ::= \"a\n", &mut output).with_callbacks(done, error)), ParseOutcome::ParseFailed);
+        assert_eq!(
+            parser.parse("root ::= \"a\"\n", &mut output),
+            ParseOutcome::Parsed
+        );
+        assert_eq!(
+            parser.process_event(
+                EventParseRules::new("root ::= \"a\n", &mut output).with_callbacks(done, error)
+            ),
+            ParseOutcome::ParseFailed
+        );
     }
 
     #[test]
     fn invalid_requests_reset_output_and_report_invalid_request() {
-        fn error(event: ParseError<'_>) -> bool { assert_eq!(event.error, ParseOutcome::InvalidRequest); assert_eq!(event.grammar.rule_count, 0); true }
+        fn error(event: ParseError<'_>) -> bool {
+            let ParseError { grammar, error } = event;
+            assert_eq!(error, ParseOutcome::InvalidRequest);
+            assert_eq!(grammar.rule_count, 0);
+            true
+        }
         let mut parser = GbnfRuleParserActor::new();
         let mut output = grammar::default();
-        assert_eq!(parser.parse("root ::= \"a\"\n", &mut output), ParseOutcome::Parsed);
-        assert_eq!(parser.process_event(EventParseRules::new("", &mut output).with_callbacks(ignore_parse_done, error)), ParseOutcome::InvalidRequest);
+        assert_eq!(
+            parser.parse("root ::= \"a\"\n", &mut output),
+            ParseOutcome::Parsed
+        );
+        assert_eq!(
+            parser.process_event(
+                EventParseRules::new("", &mut output).with_callbacks(ignore_parse_done, error)
+            ),
+            ParseOutcome::InvalidRequest
+        );
         let oversized = "x".repeat(MAX_RULE_SOURCE_BYTES + 1);
-        assert_eq!(parser.process_event(EventParseRules::new(&oversized, &mut output).with_callbacks(ignore_parse_done, error)), ParseOutcome::InvalidRequest);
+        assert_eq!(
+            parser.process_event(
+                EventParseRules::new(&oversized, &mut output)
+                    .with_callbacks(ignore_parse_done, error)
+            ),
+            ParseOutcome::InvalidRequest
+        );
     }
 
     #[test]
@@ -1140,20 +1242,42 @@ mod tests {
         let mut parser = GbnfRuleParserActor::new();
         assert_eq!(parser.process_unexpected_event(), ParseOutcome::Unexpected);
         let mut output = grammar::default();
-        assert_eq!(parser.parse("root ::= \"a\"\n", &mut output), ParseOutcome::Parsed);
+        assert_eq!(
+            parser.parse("root ::= \"a\"\n", &mut output),
+            ParseOutcome::Parsed
+        );
     }
 
     #[test]
     fn preserves_multiline_group_until_group_close() {
         let mut parser = GbnfRuleParserActor::new();
         let mut output = grammar::default();
-        assert_eq!(parser.parse("root ::= (\"a\"\n\"b\")\n", &mut output), ParseOutcome::Parsed);
+        assert_eq!(
+            parser.parse("root ::= (\"a\"\n\"b\")\n", &mut output),
+            ParseOutcome::Parsed
+        );
         assert_eq!(output.rule_count, 2);
         assert_eq!(output.element_count, 5);
     }
 
     #[test]
     fn preserves_trailing_hyphen_as_character_class_member() {
-        assert_rule_elements("root ::= [a-]\n", &[element { r#type: element_type::character, value: b'a' as u32 }, element { r#type: element_type::char_alt, value: b'-' as u32 }, element { r#type: element_type::end, value: 0 }]);
+        assert_rule_elements(
+            "root ::= [a-]\n",
+            &[
+                element {
+                    r#type: element_type::character,
+                    value: b'a' as u32,
+                },
+                element {
+                    r#type: element_type::char_alt,
+                    value: b'-' as u32,
+                },
+                element {
+                    r#type: element_type::end,
+                    value: 0,
+                },
+            ],
+        );
     }
 }

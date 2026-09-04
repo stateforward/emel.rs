@@ -1,7 +1,7 @@
 //! Typed model-loader request and outcome contracts.
-use emel_io::mmap::event::MmapSource;
 use super::super::data::Data;
 use emel_io::loader::event::StrategyKind;
+use emel_io::mmap::event::MmapSource;
 
 /// Model-loader error classes from the pinned C++ contract.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -239,7 +239,10 @@ impl<'a> LoadRequest<'a> {
     pub(crate) fn is_valid(&self) -> bool {
         self.parse_model.is_some()
             && ((!self.source.model_path.is_empty()
-                || self.source.file_image.is_some_and(|bytes| !bytes.is_empty()))
+                || self
+                    .source
+                    .file_image
+                    .is_some_and(|bytes| !bytes.is_empty()))
                 || self
                     .source
                     .mapped_files

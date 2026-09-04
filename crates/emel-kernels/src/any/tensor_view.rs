@@ -548,7 +548,7 @@ pub struct TensorView<'a> {
 /// This view exists for reference operations whose row conversion copies
 /// `ne[0] * sizeof(float)` bytes from a row base.  The row base may therefore
 /// be at an arbitrary byte offset even though each copied F32 value occupies
-/// four bytes.  Values are decoded with [`f32::from_ne_bytes`], so the view
+/// four bytes. Values are decoded with [`f32::from_le_bytes`], so the view
 /// needs no alignment assumption and never exposes a raw pointer.
 #[derive(Debug)]
 pub struct ByteTensorView<'a> {
@@ -678,7 +678,7 @@ impl<'a> ByteTensorView<'a> {
             .expect("guard-proven byte offset fits u64");
         let start = usize::try_from(byte_offset).expect("guard-proven byte offset fits usize");
         let bytes = &self.data[start..start + 4];
-        f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
 }
 

@@ -483,6 +483,16 @@ pub struct KvBinding {
     actor: Option<std::rc::Rc<RefCell<dyn HybridKvActor>>>,
     kind: KvBindingKind,
 }
+impl core::fmt::Debug for KvBinding {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("KvBinding")
+            .field("kind", &self.kind)
+            .field("actor_bound", &self.actor.is_some())
+            .finish()
+    }
+}
+
 impl Default for KvBinding {
     fn default() -> Self {
         Self::empty()
@@ -531,6 +541,18 @@ pub struct MemoryHybridContext {
     pub kv_snapshot: RefCell<Snapshot>,
     pub recurrent_snapshot: RefCell<recurrent::Snapshot>,
 }
+impl core::fmt::Debug for MemoryHybridContext {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("MemoryHybridContext")
+            .field("kv_route", &self.kv_route)
+            .field("kv_binding", &self.kv_binding)
+            .field("kv_snapshot", &self.kv_snapshot)
+            .field("recurrent_snapshot", &self.recurrent_snapshot)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for MemoryHybridContext {
     fn default() -> Self {
         let binding = KvBinding::empty();
@@ -619,8 +641,16 @@ fn backend_family(code: i32) -> bool {
 fn backend_or_none(code: i32) -> bool {
     matches!(code, 0 | 2)
 }
-fn merge(kv: &Snapshot, rec: &recurrent::Snapshot, route: KvCacheRoute, out: &mut Snapshot) {
-    *out = Snapshot::default();
+fn merge(kv: &Snapshot, rec: &recurrent::Snapshot, out: &mut Snapshot) {
+    out.max_sequences = 0;
+    out.block_tokens = kv::DEFAULT_BLOCK_TOKENS;
+    out.sequence_active.fill(0);
+    out.sequence_length_values.fill(0);
+    out.sequence_kv_block_count.fill(0);
+    for row in &mut out.sequence_kv_blocks {
+        row.fill(0);
+    }
+    out.sequence_recurrent_slot.fill(0);
     out.max_sequences = kv.max_sequences.min(rec.max_sequences);
     out.block_tokens = kv.block_tokens;
     let count = usize::try_from(out.max_sequences.max(0))
@@ -630,12 +660,7 @@ fn merge(kv: &Snapshot, rec: &recurrent::Snapshot, route: KvCacheRoute, out: &mu
         let active = kv.sequence_active[i] != 0 && rec.sequence_active[i] != 0;
         out.sequence_active[i] = u8::from(active);
         out.sequence_length_values[i] = if active {
-            match route {
-                KvCacheRoute::Bound => kv.sequence_length_values[i],
-                KvCacheRoute::Owned => {
-                    kv.sequence_length_values[i].min(rec.sequence_length_values[i])
-                }
-            }
+            kv.sequence_length_values[i].min(rec.sequence_length_values[i])
         } else {
             0
         };
@@ -998,7 +1023,6 @@ impl MemoryHybridStateMachineContext for MemoryHybridContext {
             merge(
                 &self.kv_snapshot.borrow(),
                 &self.recurrent_snapshot.borrow(),
-                self.kv_route,
                 &mut out.borrow_mut(),
             );
         }
@@ -1787,133 +1811,133 @@ impl MemoryHybridStateMachineContext for MemoryHybridContext {
         Ok(())
     }
     fn on_unexpected_from_allocate_sequence_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_sequence_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_sequence_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_sequence_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_sequence_recurrent_error_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_sequence_rollback_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_sequence_rollback_result_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_recurrent_error_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_rollback_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_allocate_slots_rollback_result_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_recurrent_error_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_rollback_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_branch_sequence_rollback_result_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_capture_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_capture_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_capture_merge(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_capture_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_capture_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_capture_request_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_free_sequence_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_free_sequence_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_free_sequence_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_free_sequence_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_out_of_memory(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_ready(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_reserve_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_reserve_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_reserve_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_reserve_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_rollback_slots_kv(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_rollback_slots_kv_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_rollback_slots_recurrent(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn on_unexpected_from_rollback_slots_recurrent_decision(&mut self) -> Result<(), ()> {
-        Ok(())
+        Err(())
     }
     fn guard_bound_kv_cache_event_allocate_slots_runtime(
         &self,
@@ -1955,7 +1979,8 @@ mod tests {
     #[derive(Default)]
     struct SpyKv {
         calls: [u32; 7],
-        active: [bool; 2],
+        active: [bool; 3],
+        capture_count: u32,
     }
 
     impl HybridKvActor for SpyKv {
@@ -2015,13 +2040,25 @@ mod tests {
             error_out: &RefCell<i32>,
         ) -> bool {
             self.calls[5] += 1;
+            self.capture_count += 1;
             let mut snapshot = snapshot_out.borrow_mut();
-            snapshot.max_sequences = 2;
+            let max_sequences = if self.capture_count == 1 { 3 } else { 1 };
+            snapshot.max_sequences = max_sequences;
             snapshot.block_tokens = 16;
-            snapshot.sequence_active[0] = u8::from(self.active[0]);
-            snapshot.sequence_length_values[0] = 4;
-            snapshot.sequence_kv_block_count[0] = 7;
-            snapshot.sequence_active[1] = u8::from(self.active[1]);
+            for index in 0..usize::try_from(max_sequences).unwrap_or(0) {
+                let active = self.active[index];
+                snapshot.sequence_active[index] = u8::from(active);
+                snapshot.sequence_length_values[index] = if active {
+                    4 + i32::try_from(index).unwrap_or(0)
+                } else {
+                    0
+                };
+                snapshot.sequence_kv_block_count[index] = if active { 7 } else { 0 };
+                if active {
+                    snapshot.sequence_kv_blocks[index][0] = u16::try_from(100 + index).unwrap_or(0);
+                    snapshot.sequence_kv_blocks[index][5] = u16::try_from(200 + index).unwrap_or(0);
+                }
+            }
             *error_out.borrow_mut() = 0;
             true
         }
@@ -2115,7 +2152,7 @@ mod tests {
         assert_eq!(capture_context.borrow().err, HybridError::None);
         assert_eq!(snapshot.borrow().sequence_active[1], 0);
         assert_eq!(snapshot.borrow().sequence_kv_block_count[0], 7);
-        assert_eq!(snapshot.borrow().sequence_length_values[0], 4);
+        assert_eq!(snapshot.borrow().sequence_length_values[0], 3);
         let free_context = RefCell::new(FreeSequenceContext::default());
         machine
             .process_event(EventFreeSequenceRuntime {
@@ -2125,5 +2162,364 @@ mod tests {
             })
             .unwrap();
         assert_eq!(actor.borrow().calls, [1, 1, 1, 2, 1, 1, 1]);
+    }
+    #[test]
+    fn bound_kv_merge_uses_recurrent_length_bound() {
+        let actor = Rc::new(RefCell::new(SpyKv::default()));
+        let mut machine = Hybrid::new(MemoryHybridContext::with_kv_binding(
+            KvBinding::from_shared(actor),
+        ));
+        let error = RefCell::new(-1);
+        let reserve_context = RefCell::new(ReserveContext::default());
+        machine
+            .process_event(EventReserveRuntime {
+                max_sequences: 1,
+                max_blocks: 2,
+                block_tokens: 16,
+                error_out: Some(&error),
+                context: &reserve_context,
+            })
+            .unwrap();
+        let sequence_context = RefCell::new(AllocateSequenceContext::default());
+        machine
+            .process_event(EventAllocateSequenceRuntime {
+                seq_id: 0,
+                error_out: Some(&error),
+                context: &sequence_context,
+            })
+            .unwrap();
+        let slots_context = RefCell::new(AllocateSlotsContext::default());
+        let block_count = RefCell::new(-1);
+        machine
+            .process_event(EventAllocateSlotsRuntime {
+                seq_id: 0,
+                token_count: 3,
+                block_count_out: Some(&block_count),
+                error_out: Some(&error),
+                copy_block: None,
+                context: &slots_context,
+            })
+            .unwrap();
+        let snapshot = RefCell::new(Snapshot::default());
+        let capture_context = RefCell::new(CaptureViewContext::default());
+        machine
+            .process_event(EventCaptureViewRuntime {
+                snapshot_out: Some(&snapshot),
+                error_out: Some(&error),
+                context: &capture_context,
+            })
+            .unwrap();
+
+        assert_eq!(snapshot.borrow().sequence_length(0), 3);
+    }
+
+    fn assert_snapshot_tail_is_cleared(snapshot: &Snapshot) {
+        assert!(
+            snapshot.sequence_active[1..]
+                .iter()
+                .all(|&value| value == 0)
+        );
+        assert!(
+            snapshot.sequence_length_values[1..]
+                .iter()
+                .all(|&value| value == 0)
+        );
+        assert!(
+            snapshot.sequence_kv_block_count[1..]
+                .iter()
+                .all(|&value| value == 0)
+        );
+        assert!(
+            snapshot.sequence_recurrent_slot[1..]
+                .iter()
+                .all(|&value| value == 0)
+        );
+        assert_eq!(
+            snapshot.sequence_kv_blocks[1],
+            [0; kv::MAX_BLOCKS_PER_SEQUENCE]
+        );
+        assert_eq!(
+            snapshot.sequence_kv_blocks[2],
+            [0; kv::MAX_BLOCKS_PER_SEQUENCE]
+        );
+    }
+
+    #[test]
+    fn repeated_capture_clears_tail_data_without_replacing_snapshot_storage() {
+        let actor = Rc::new(RefCell::new(SpyKv::default()));
+        let mut machine = Hybrid::new(MemoryHybridContext::with_kv_binding(
+            KvBinding::from_shared(actor),
+        ));
+        let error = RefCell::new(-1);
+        let reserve_context = RefCell::new(ReserveContext::default());
+        machine
+            .process_event(EventReserveRuntime {
+                max_sequences: 3,
+                max_blocks: 8,
+                block_tokens: 16,
+                error_out: Some(&error),
+                context: &reserve_context,
+            })
+            .unwrap();
+        for seq_id in 0..3 {
+            let context = RefCell::new(AllocateSequenceContext::default());
+            machine
+                .process_event(EventAllocateSequenceRuntime {
+                    seq_id,
+                    error_out: Some(&error),
+                    context: &context,
+                })
+                .unwrap();
+        }
+
+        for seq_id in 0..3 {
+            let context = RefCell::new(AllocateSlotsContext::default());
+            let block_count = RefCell::new(-1);
+            machine
+                .process_event(EventAllocateSlotsRuntime {
+                    seq_id,
+                    token_count: 8,
+                    block_count_out: Some(&block_count),
+                    error_out: Some(&error),
+                    copy_block: None,
+                    context: &context,
+                })
+                .unwrap();
+        }
+        let snapshot = RefCell::new(Snapshot::default());
+        let capture_context = RefCell::new(CaptureViewContext::default());
+        machine
+            .process_event(EventCaptureViewRuntime {
+                snapshot_out: Some(&snapshot),
+                error_out: Some(&error),
+                context: &capture_context,
+            })
+            .unwrap();
+        {
+            let snapshot = snapshot.borrow();
+            assert_eq!(snapshot.max_sequences, 3);
+            assert_eq!(snapshot.sequence_active[2], 1);
+            assert_eq!(snapshot.sequence_length_values[2], 6);
+            assert_eq!(snapshot.sequence_kv_block_count[2], 7);
+            assert_eq!(snapshot.sequence_kv_blocks[2][5], 202);
+            assert_eq!(snapshot.sequence_recurrent_slot[2], 2);
+        }
+        let active_ptr = snapshot.borrow().sequence_active.as_ptr();
+        let lengths_ptr = snapshot.borrow().sequence_length_values.as_ptr();
+        let counts_ptr = snapshot.borrow().sequence_kv_block_count.as_ptr();
+        let rows_ptr = snapshot.borrow().sequence_kv_blocks[2].as_ptr();
+        let recurrent_ptr = snapshot.borrow().sequence_recurrent_slot.as_ptr();
+
+        machine
+            .process_event(EventCaptureViewRuntime {
+                snapshot_out: Some(&snapshot),
+                error_out: Some(&error),
+                context: &capture_context,
+            })
+            .unwrap();
+        let snapshot = snapshot.borrow();
+        assert_eq!(snapshot.max_sequences, 1);
+        assert_snapshot_tail_is_cleared(&snapshot);
+        assert_eq!(snapshot.sequence_active.as_ptr(), active_ptr);
+        assert_eq!(snapshot.sequence_length_values.as_ptr(), lengths_ptr);
+        assert_eq!(snapshot.sequence_kv_block_count.as_ptr(), counts_ptr);
+        assert_eq!(snapshot.sequence_kv_blocks[2].as_ptr(), rows_ptr);
+        assert_eq!(snapshot.sequence_recurrent_slot.as_ptr(), recurrent_ptr);
+    }
+
+    fn assert_reserve(
+        machine: &mut Hybrid,
+        error: &RefCell<i32>,
+        context: &RefCell<ReserveContext>,
+    ) {
+        assert!(
+            machine
+                .process_event(EventReserveRuntime {
+                    max_sequences: 3,
+                    max_blocks: 4,
+                    block_tokens: 2,
+                    error_out: Some(error),
+                    context,
+                })
+                .is_ok()
+        );
+    }
+
+    fn assert_allocate_sequence(
+        machine: &mut Hybrid,
+        seq_id: i32,
+        error: &RefCell<i32>,
+        context: &RefCell<AllocateSequenceContext>,
+    ) {
+        assert!(
+            machine
+                .process_event(EventAllocateSequenceRuntime {
+                    seq_id,
+                    error_out: Some(error),
+                    context,
+                })
+                .is_ok()
+        );
+    }
+
+    fn assert_allocate_slots(
+        machine: &mut Hybrid,
+        seq_id: i32,
+        token_count: i32,
+        error: &RefCell<i32>,
+        context: &RefCell<AllocateSlotsContext>,
+        blocks: &RefCell<i32>,
+    ) {
+        assert!(
+            machine
+                .process_event(EventAllocateSlotsRuntime {
+                    seq_id,
+                    token_count,
+                    block_count_out: Some(blocks),
+                    error_out: Some(error),
+                    copy_block: None,
+                    context,
+                })
+                .is_ok()
+        );
+        assert_eq!(*error.borrow(), HybridError::None.code());
+        assert!(*blocks.borrow() >= 0);
+    }
+
+    fn assert_capture(
+        machine: &mut Hybrid,
+        error: &RefCell<i32>,
+        snapshot: &RefCell<Snapshot>,
+        context: &RefCell<CaptureViewContext>,
+    ) {
+        assert!(
+            machine
+                .process_event(EventCaptureViewRuntime {
+                    snapshot_out: Some(snapshot),
+                    error_out: Some(error),
+                    context,
+                })
+                .is_ok()
+        );
+    }
+
+    fn assert_free_sequence(
+        machine: &mut Hybrid,
+        seq_id: i32,
+        error: &RefCell<i32>,
+        context: &RefCell<FreeSequenceContext>,
+    ) {
+        assert!(
+            machine
+                .process_event(EventFreeSequenceRuntime {
+                    seq_id,
+                    error_out: Some(error),
+                    context,
+                })
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn owned_lifecycle_tracks_isolated_blocks_and_recycles_after_free() {
+        let mut machine = Hybrid::new(MemoryHybridContext::default());
+        let error = RefCell::new(-1);
+        let reserve_context = RefCell::new(ReserveContext::default());
+        assert_reserve(&mut machine, &error, &reserve_context);
+        for seq_id in [0, 1] {
+            let context = RefCell::new(AllocateSequenceContext::default());
+            assert_allocate_sequence(&mut machine, seq_id, &error, &context);
+        }
+        for (seq_id, token_count) in [(0, 3), (1, 2), (0, 1)] {
+            let context = RefCell::new(AllocateSlotsContext::default());
+            let blocks = RefCell::new(-1);
+            assert_allocate_slots(&mut machine, seq_id, token_count, &error, &context, &blocks);
+        }
+
+        let snapshot = RefCell::new(Snapshot::default());
+        let capture_context = RefCell::new(CaptureViewContext::default());
+        assert_capture(&mut machine, &error, &snapshot, &capture_context);
+        let snapshot_ref = snapshot.borrow();
+        assert!(snapshot_ref.is_sequence_active(0));
+        assert!(snapshot_ref.is_sequence_active(1));
+        assert_eq!(snapshot_ref.sequence_length(0), 4);
+        assert_eq!(snapshot_ref.sequence_length(1), 2);
+        let seq0_block = snapshot_ref.lookup_kv_block(0, 0);
+        let seq1_block = snapshot_ref.lookup_kv_block(1, 0);
+        assert!(seq0_block >= 0);
+        assert!(seq1_block >= 0);
+        assert_ne!(seq0_block, seq1_block);
+        assert_ne!(
+            snapshot_ref.lookup_recurrent_slot(0),
+            snapshot_ref.lookup_recurrent_slot(1)
+        );
+        drop(snapshot_ref);
+
+        let free_context = RefCell::new(FreeSequenceContext::default());
+        assert_free_sequence(&mut machine, 0, &error, &free_context);
+        assert_eq!(*error.borrow(), HybridError::None.code());
+        let sequence_context = RefCell::new(AllocateSequenceContext::default());
+        assert_allocate_sequence(&mut machine, 2, &error, &sequence_context);
+        let slots_context = RefCell::new(AllocateSlotsContext::default());
+        let blocks = RefCell::new(-1);
+        assert_allocate_slots(&mut machine, 2, 4, &error, &slots_context, &blocks);
+        assert_eq!(*blocks.borrow(), 2);
+        let snapshot = RefCell::new(Snapshot::default());
+        let capture_context = RefCell::new(CaptureViewContext::default());
+        assert_capture(&mut machine, &error, &snapshot, &capture_context);
+        let snapshot = snapshot.borrow();
+        assert!(!snapshot.is_sequence_active(0));
+        assert!(snapshot.is_sequence_active(1));
+        assert!(snapshot.is_sequence_active(2));
+        assert_eq!(snapshot.lookup_kv_block(2, 0), 0);
+        assert_eq!(snapshot.lookup_kv_block(2, 2), 1);
+    }
+
+    #[test]
+    fn invalid_requests_reset_caller_outputs_and_recover_to_ready() {
+        let mut machine = Hybrid::new(MemoryHybridContext::default());
+        let error = RefCell::new(-1);
+        let blocks = RefCell::new(91);
+        let slots_context = RefCell::new(AllocateSlotsContext::default());
+        assert!(
+            machine
+                .process_event(EventAllocateSlotsRuntime {
+                    seq_id: -1,
+                    token_count: 1,
+                    block_count_out: Some(&blocks),
+                    error_out: Some(&error),
+                    copy_block: None,
+                    context: &slots_context,
+                })
+                .is_ok()
+        );
+        assert_eq!(*blocks.borrow(), 0);
+        assert_eq!(*error.borrow(), HybridError::InvalidRequest.code());
+
+        let capture_context = RefCell::new(CaptureViewContext::default());
+        assert!(
+            machine
+                .process_event(EventCaptureViewRuntime {
+                    snapshot_out: None,
+                    error_out: Some(&error),
+                    context: &capture_context,
+                })
+                .is_ok()
+        );
+        assert_eq!(*error.borrow(), HybridError::InvalidRequest.code());
+
+        let reserve_context = RefCell::new(ReserveContext::default());
+        assert!(
+            machine
+                .process_event(EventReserveRuntime {
+                    max_sequences: 1,
+                    max_blocks: 1,
+                    block_tokens: 1,
+                    error_out: Some(&error),
+                    context: &reserve_context,
+                })
+                .is_ok()
+        );
+        assert_eq!(*error.borrow(), HybridError::None.code());
     }
 }

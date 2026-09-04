@@ -73,6 +73,8 @@ pub struct ProcessorExecuteRequest {
     pub seq_primary_ids: u64,
     pub seq_primary_ids_count: i32,
     pub alloc_graph: Option<AllocGraphFn>,
+    /// Root callback retained by the owning processor for the typed bridge.
+    pub root_alloc_graph: Option<crate::processor::sm::AllocGraphFn>,
 }
 
 /// Internal copied event corresponding to C++ `processor::event::execute_step`.
@@ -87,7 +89,10 @@ impl ProcessorEventExecuteStep {
     /// Creates an event from a copied execution request with no prior phase error.
     #[must_use]
     pub const fn new(request: ProcessorExecuteRequest) -> Self {
-        Self { request, err: ProcessorError::None }
+        Self {
+            request,
+            err: ProcessorError::None,
+        }
     }
 
     /// Creates an event with a previously retained processor error.
@@ -98,7 +103,10 @@ impl ProcessorEventExecuteStep {
 
     /// Creates an event with the allocation callback selected explicitly.
     #[must_use]
-    pub const fn with_callback(mut request: ProcessorExecuteRequest, callback: AllocGraphFn) -> Self {
+    pub const fn with_callback(
+        mut request: ProcessorExecuteRequest,
+        callback: AllocGraphFn,
+    ) -> Self {
         request.alloc_graph = Some(callback);
         Self::new(request)
     }
@@ -149,11 +157,15 @@ impl GraphProcessorAllocStepContext {
 
     /// Returns the retained phase outcome.
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.alloc_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.alloc_outcome
+    }
 
     /// Returns the retained processor error.
     #[must_use]
-    pub const fn error(&self) -> ProcessorError { self.err }
+    pub const fn error(&self) -> ProcessorError {
+        self.err
+    }
 }
 
 impl GraphProcessorAllocStepStateMachineContext for GraphProcessorAllocStepContext {
@@ -253,20 +265,24 @@ impl GraphProcessorAllocStepStateMachineContext for GraphProcessorAllocStepConte
 }
 
 /// Synchronous single-writer allocation-phase actor.
-pub struct Processor {
+pub struct GraphProcessorAllocStepActor {
     machine: GraphProcessorAllocStepStateMachine<GraphProcessorAllocStepContext>,
 }
 
-impl Default for Processor {
-    fn default() -> Self { Self::new() }
+impl Default for GraphProcessorAllocStepActor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl Processor {
+impl GraphProcessorAllocStepActor {
     /// Creates an actor in generated `deciding` state.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: GraphProcessorAllocStepStateMachine::new(GraphProcessorAllocStepContext::default()),
+            machine: GraphProcessorAllocStepStateMachine::new(
+                GraphProcessorAllocStepContext::default(),
+            ),
         }
     }
 
@@ -274,26 +290,34 @@ impl Processor {
     pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
         self.machine.context_mut().set_request(event);
         self.machine
-            .process_event(GraphProcessorAllocStepEvents::ProcessorEventExecuteStep(event))
+            .process_event(GraphProcessorAllocStepEvents::ProcessorEventExecuteStep)
             .is_ok()
     }
 
     /// Records an explicit unexpected event and transitions to the generated unexpected state.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().alloc_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = ProcessorError::InternalError;
         self.machine
-            .process_event(GraphProcessorAllocStepEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphProcessorAllocStepStates::UnexpectedEvent);
+        false
     }
 
     /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> &GraphProcessorAllocStepStates { self.machine.state() }
+    pub fn state(&self) -> &GraphProcessorAllocStepStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GraphProcessorAllocStepStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &GraphProcessorAllocStepStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns retained bounded context for outcome/error inspection.
     #[must_use]
-    pub fn context(&self) -> &GraphProcessorAllocStepContext { self.machine.context() }
+    pub fn context(&self) -> &GraphProcessorAllocStepContext {
+        self.machine.context()
+    }
 }

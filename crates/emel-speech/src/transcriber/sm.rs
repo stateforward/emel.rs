@@ -10,24 +10,24 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::empty_structs_with_braces,
+    clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
+    missing_debug_implementations,
     dead_code,
     missing_docs
 )]
 
 use crate::decoder::whisper::owner::{
     Decode as WhisperDecode, EventDecodeRun as WhisperDecodeEvent, SpeechWhisperOwnerActor,
-    WhisperOwnerError,
+    WhisperOwnerError, WhisperOwnerEvent,
 };
-use crate::decoder::whisper::sm::{bind_execution_contract, DecodePolicy, WhisperDecoderError};
+use crate::decoder::whisper::sm::{DecodePolicy, WhisperDecoderError, bind_execution_contract};
 use crate::encoder::whisper::sm::{
     Error as WhisperEncoderError, EventEncodeRun as WhisperEncodeEvent, ExecutionContract,
     SpeechEncoderWhisperActor,
 };
 use crate::tokenizer::whisper::sm::{
-    SpeechTokenizerWhisper, TokenizerError, Validate, TINY_TOKENIZER_SHA256,
-    tiny_asr_decode_policy,
+    SpeechTokenizerWhisper, TokenizerError, Validate, tiny_asr_decode_policy,
 };
 use emel_model::bridge::Data;
 use std::cell::{Cell, RefCell};
@@ -96,7 +96,7 @@ impl<'a> RuntimeStorage<'a> {
 
 /// Component identity and support metadata. Numeric execution belongs to the
 /// maintained child actors rather than to injected transcriber callbacks.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Dependencies {
     pub encoder_supported: bool,
     pub decoder_supported: bool,
@@ -108,25 +108,12 @@ pub struct Dependencies {
     pub tokenizer_sha256: &'static str,
 }
 
-impl Default for Dependencies {
-    fn default() -> Self {
-        Self {
-            encoder_supported: false,
-            decoder_supported: false,
-            tokenizer_supported: false,
-            model_id: 0,
-            encoder_model_id: 0,
-            decoder_model_id: 0,
-            embedding_length: 0,
-            tokenizer_sha256: "",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InitializeDone;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InitializeError { pub error: TranscriberError }
+pub struct InitializeError {
+    pub error: TranscriberError,
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecognitionDone {
     pub transcript_size: i32,
@@ -139,7 +126,9 @@ pub struct RecognitionDone {
     pub decoder_digest: u64,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RecognitionError { pub error: TranscriberError }
+pub struct RecognitionError {
+    pub error: TranscriberError,
+}
 pub type InitializeDoneFn = fn(InitializeDone) -> bool;
 pub type InitializeErrorFn = fn(InitializeError) -> bool;
 pub type RecognitionDoneFn = fn(RecognitionDone) -> bool;
@@ -237,12 +226,17 @@ impl SpeechTranscriberContext {
     fn tokenizer_ok(&mut self, assets: TokenizerAssets<'_>) -> bool {
         self.deps.tokenizer_supported
             && assets.sha256 == self.deps.tokenizer_sha256
-            && self.tokenizer.process_validate(Validate::new(assets.model_json, tiny_asr_decode_policy())).is_ok()
+            && self
+                .tokenizer
+                .process_validate(Validate::new(assets.model_json, tiny_asr_decode_policy()))
+                .is_ok()
     }
 }
 
 impl Default for SpeechTranscriberContext {
-    fn default() -> Self { Self::new(Dependencies::default()) }
+    fn default() -> Self {
+        Self::new(Dependencies::default())
+    }
 }
 
 /// Single-writer synchronous transcriber wrapper.
@@ -252,49 +246,83 @@ pub struct SpeechTranscriber {
 
 impl SpeechTranscriber {
     #[must_use]
-    pub fn new(deps: Dependencies) -> Self { Self { context: SpeechTranscriberContext::new(deps) } }
+    pub fn new(deps: Dependencies) -> Self {
+        Self {
+            context: SpeechTranscriberContext::new(deps),
+        }
+    }
     #[must_use]
-    pub fn context(&self) -> &SpeechTranscriberContext { &self.context }
+    pub fn context(&self) -> &SpeechTranscriberContext {
+        &self.context
+    }
     #[must_use]
-    pub fn state(&self) -> SpeechTranscriberStates { self.context.state }
+    pub fn state(&self) -> SpeechTranscriberStates {
+        self.context.state
+    }
     #[must_use]
-    pub fn is(&self, state: &SpeechTranscriberStates) -> bool { self.context.state == *state }
+    pub fn is(&self, state: SpeechTranscriberStates) -> bool {
+        self.context.state == state
+    }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub fn initialize(&mut self, event: EventInitializeRun<'_>) -> Result<(), TranscriberError> {
-        if event.tokenizer.model_json.is_empty() || self.context.state == SpeechTranscriberStates::StateErrored {
-            self.context.fail(TranscriberError::InvalidRequest).map(|_| ())
+        let _ = if event.tokenizer.model_json.is_empty()
+            || self.context.state == SpeechTranscriberStates::StateErrored
+        {
+            self.context.fail(TranscriberError::InvalidRequest)
         } else if !self.context.tokenizer_ok(event.tokenizer) {
-            self.context.fail(TranscriberError::TokenizerInvalid).map(|_| ())
+            self.context.fail(TranscriberError::TokenizerInvalid)
         } else if event.model != self.context.deps.model_id
             || event.model != self.context.deps.encoder_model_id
             || event.model != self.context.deps.decoder_model_id
             || !self.context.deps.encoder_supported
             || !self.context.deps.decoder_supported
-            || event.model_data.is_none_or(|model| !ExecutionContract::bind_model(model).model_contract_valid())
+            || event
+                .model_data
+                .is_none_or(|model| !ExecutionContract::bind_model(model).model_contract_valid())
         {
-            self.context.fail(TranscriberError::UnsupportedModel).map(|_| ())
+            self.context.fail(TranscriberError::UnsupportedModel)
         } else {
             self.context.err = TranscriberError::None;
             self.context.state = SpeechTranscriberStates::StateReady;
-            if let Some(out) = event.error_out { out.set(TranscriberError::None); }
-            if let Some(done) = event.on_done { let _ = done(InitializeDone); }
+            if let Some(out) = event.error_out {
+                out.set(TranscriberError::None);
+            }
+            if let Some(done) = event.on_done {
+                let _ = done(InitializeDone);
+            }
             Ok(())
         };
-        let result = if self.context.err == TranscriberError::None { Ok(()) } else { Err(self.context.err) };
+        let result = if self.context.err == TranscriberError::None {
+            Ok(())
+        } else {
+            Err(self.context.err)
+        };
         if let Err(error) = result {
-            if let Some(out) = event.error_out { out.set(error); }
-            if let Some(callback) = event.on_error { let _ = callback(InitializeError { error }); }
+            if let Some(out) = event.error_out {
+                out.set(error);
+            }
+            if let Some(callback) = event.on_error {
+                let _ = callback(InitializeError { error });
+            }
             Err(error)
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
+    #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
     pub fn recognize(&mut self, event: EventRecognizeRun<'_>) -> Result<(), TranscriberError> {
-        if self.context.state != SpeechTranscriberStates::StateReady { return self.context.fail(TranscriberError::Uninitialized); }
+        if self.context.state != SpeechTranscriberStates::StateReady {
+            return self.context.fail(TranscriberError::Uninitialized);
+        }
         self.context.err = TranscriberError::None;
         self.context.clear_outputs();
         event.transcript_size_out.set(0);
         event.generated_token_count_out.set(0);
-        let Some(model) = event.model_data else { return self.publish_error(&event, TranscriberError::UnsupportedDependency); };
+        let Some(model) = event.model_data else {
+            return self.publish_error(&event, TranscriberError::UnsupportedDependency);
+        };
         let contract = ExecutionContract::bind_model(model);
         let mut frames = 0;
         let mut width = 0;
@@ -302,15 +330,27 @@ impl SpeechTranscriber {
         let encoded = {
             let mut workspace = event.storage.encoder_workspace.borrow_mut();
             let mut state = event.storage.encoder_state.borrow_mut();
-            self.context.encoder.process_event(WhisperEncodeEvent::new(
-                &contract, event.pcm, event.sample_rate, event.channel_count,
-                &mut **workspace, &mut **state, &mut frames, &mut width, &mut encoder_digest,
-            ).with_model(model))
+            self.context.encoder.process_event(
+                WhisperEncodeEvent::new(
+                    &contract,
+                    event.pcm,
+                    event.sample_rate,
+                    event.channel_count,
+                    &mut workspace,
+                    &mut state,
+                    &mut frames,
+                    &mut width,
+                    &mut encoder_digest,
+                )
+                .with_model(model),
+            )
         };
         if !encoded {
             let error = match self.context.encoder.context().err {
                 WhisperEncoderError::ModelInvalid => TranscriberError::ModelInvalid,
-                WhisperEncoderError::OutputCapacity | WhisperEncoderError::WorkspaceCapacity => TranscriberError::OutputCapacity,
+                WhisperEncoderError::OutputCapacity | WhisperEncoderError::WorkspaceCapacity => {
+                    TranscriberError::OutputCapacity
+                }
                 WhisperEncoderError::UnsupportedVariant => TranscriberError::UnsupportedModel,
                 WhisperEncoderError::InternalError => TranscriberError::UnsupportedDependency,
                 _ => TranscriberError::Backend,
@@ -320,9 +360,18 @@ impl SpeechTranscriber {
         self.context.encoder_frame_count = frames;
         self.context.encoder_width = width;
         self.context.encoder_digest = encoder_digest;
-        let state_len = usize::try_from(frames).ok().and_then(|n| n.checked_mul(contract.embedding_length as usize)).ok_or(TranscriberError::OutputCapacity)?;
+        let state_len = usize::try_from(frames)
+            .ok()
+            .and_then(|n| {
+                usize::try_from(contract.embedding_length)
+                    .ok()
+                    .and_then(|length| n.checked_mul(length))
+            })
+            .ok_or(TranscriberError::OutputCapacity)?;
         let state = event.storage.encoder_state.borrow();
-        let state = state.get(..state_len).ok_or(TranscriberError::OutputCapacity)?;
+        let state = state
+            .get(..state_len)
+            .ok_or(TranscriberError::OutputCapacity)?;
         let mut generated_count = 0;
         let mut token = 0;
         let mut confidence = 0.0;
@@ -333,20 +382,45 @@ impl SpeechTranscriber {
             let mut workspace = event.storage.decoder_workspace.borrow_mut();
             let mut logits = event.storage.logits.borrow_mut();
             let mut transcript = event.transcript.borrow_mut();
-            self.context.whisper.process_event(WhisperDecodeEvent::new(WhisperDecode::new(
-                model, bind_execution_contract(model), state, frames, DecodePolicy::tiny_asr(),
-                &mut **generated, &mut generated_count, &mut **workspace, &mut **logits,
-                &mut token, &mut confidence, &mut decoder_digest, event.tokenizer.model_json,
-                &mut **transcript, &mut transcript_size,
-            )))
+            self.context
+                .whisper
+                .process_event(WhisperOwnerEvent::Decode(WhisperDecodeEvent::new(
+                    WhisperDecode::new(
+                        model,
+                        bind_execution_contract(model),
+                        state,
+                        frames,
+                        DecodePolicy::tiny_asr(),
+                        &mut generated,
+                        &mut generated_count,
+                        &mut workspace,
+                        &mut logits,
+                        &mut token,
+                        &mut confidence,
+                        &mut decoder_digest,
+                        event.tokenizer.model_json,
+                        &mut transcript,
+                        &mut transcript_size,
+                    ),
+                )))
         };
         if let Err(error) = decoded {
             let error = match error {
-                WhisperOwnerError::Tokenizer(TokenizerError::TranscriptCapacity) => TranscriberError::OutputCapacity,
+                WhisperOwnerError::Tokenizer(TokenizerError::TranscriptCapacity) => {
+                    TranscriberError::OutputCapacity
+                }
                 WhisperOwnerError::Tokenizer(_) => TranscriberError::TokenizerInvalid,
-                WhisperOwnerError::Decoder(WhisperDecoderError::ModelInvalid) => TranscriberError::ModelInvalid,
-                WhisperOwnerError::Decoder(WhisperDecoderError::GeneratedTokenCapacity | WhisperDecoderError::LogitsCapacity | WhisperDecoderError::WorkspaceCapacity) => TranscriberError::OutputCapacity,
-                WhisperOwnerError::Decoder(WhisperDecoderError::InternalError) => TranscriberError::UnsupportedDependency,
+                WhisperOwnerError::Decoder(WhisperDecoderError::ModelInvalid) => {
+                    TranscriberError::ModelInvalid
+                }
+                WhisperOwnerError::Decoder(
+                    WhisperDecoderError::GeneratedTokenCapacity
+                    | WhisperDecoderError::LogitsCapacity
+                    | WhisperDecoderError::WorkspaceCapacity,
+                ) => TranscriberError::OutputCapacity,
+                WhisperOwnerError::Decoder(WhisperDecoderError::InternalError) => {
+                    TranscriberError::UnsupportedDependency
+                }
                 _ => TranscriberError::Backend,
             };
             return self.publish_error(&event, error);
@@ -364,7 +438,18 @@ impl SpeechTranscriber {
         event.encoder_digest_out.set(encoder_digest);
         event.decoder_digest_out.set(decoder_digest);
         event.generated_token_count_out.set(generated_count);
-        if let Some(done) = event.on_done { let _ = done(RecognitionDone { transcript_size: transcript_size, selected_token: token, confidence, encoder_frame_count: frames, encoder_width: width, generated_token_count: generated_count, encoder_digest, decoder_digest }); }
+        if let Some(done) = event.on_done {
+            let _ = done(RecognitionDone {
+                transcript_size,
+                selected_token: token,
+                confidence,
+                encoder_frame_count: frames,
+                encoder_width: width,
+                generated_token_count: generated_count,
+                encoder_digest,
+                decoder_digest,
+            });
+        }
         Ok(())
     }
 
@@ -374,15 +459,25 @@ impl SpeechTranscriber {
         Err(TranscriberError::UnexpectedEvent)
     }
 
-    fn publish_error(&mut self, event: &EventRecognizeRun<'_>, error: TranscriberError) -> Result<(), TranscriberError> {
+    fn publish_error(
+        &mut self,
+        event: &EventRecognizeRun<'_>,
+        error: TranscriberError,
+    ) -> Result<(), TranscriberError> {
         self.context.err = error;
         self.context.state = SpeechTranscriberStates::StateErrored;
-        if let Some(out) = event.error_out { out.set(error); }
-        if let Some(callback) = event.on_error { let _ = callback(RecognitionError { error }); }
+        if let Some(out) = event.error_out {
+            out.set(error);
+        }
+        if let Some(callback) = event.on_error {
+            let _ = callback(RecognitionError { error });
+        }
         Err(error)
     }
 }
 
 impl Default for SpeechTranscriber {
-    fn default() -> Self { Self::new(Dependencies::default()) }
+    fn default() -> Self {
+        Self::new(Dependencies::default())
+    }
 }

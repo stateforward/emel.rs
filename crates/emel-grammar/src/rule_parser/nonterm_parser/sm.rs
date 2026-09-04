@@ -1,12 +1,17 @@
 //! Source-aligned bounded GBNF nonterminal parser child actor.
 
 #![allow(
+    clippy::cast_possible_truncation,
+    clippy::default_trait_access,
     clippy::derive_partial_eq_without_eq,
-    clippy::module_name_repetitions,
+    clippy::large_stack_arrays,
+    clippy::large_stack_frames,
     clippy::missing_errors_doc,
+    clippy::missing_const_for_fn,
+    clippy::module_name_repetitions,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::missing_const_for_fn,
+    clippy::unnecessary_wraps,
     dead_code,
     missing_docs
 )]
@@ -106,11 +111,15 @@ impl RuleParserEventParseRules {
 }
 
 impl Default for RuleParserEventParseRules {
-    fn default() -> Self { Self::absent() }
+    fn default() -> Self {
+        Self::absent()
+    }
 }
 
 impl From<TokenKind> for RuleParserEventParseRules {
-    fn from(token_kind: TokenKind) -> Self { Self::new(token_kind, ParseMode::None, "") }
+    fn from(token_kind: TokenKind) -> Self {
+        Self::new(token_kind, ParseMode::None, "")
+    }
 }
 
 // Source mapping: nonterm_parser/sm.hpp topology, including lookup execution,
@@ -152,7 +161,13 @@ struct SymbolEntry {
 
 impl Default for SymbolEntry {
     fn default() -> Self {
-        Self { name: [0; MAX_NONTERM_NAME_BYTES], len: 0, hash: 0, id: 0, occupied: false }
+        Self {
+            name: [0; MAX_NONTERM_NAME_BYTES],
+            len: 0,
+            hash: 0,
+            id: 0,
+            occupied: false,
+        }
     }
 }
 
@@ -163,7 +178,12 @@ struct SymbolTable {
 }
 
 impl Default for SymbolTable {
-    fn default() -> Self { Self { entries: [SymbolEntry::default(); k_gbnf_symbol_table_slots], count: 0 } }
+    fn default() -> Self {
+        Self {
+            entries: [SymbolEntry::default(); k_gbnf_symbol_table_slots],
+            count: 0,
+        }
+    }
 }
 
 impl SymbolTable {
@@ -181,8 +201,13 @@ impl SymbolTable {
         let mut slot = (hash as usize) & mask;
         for _ in 0..k_gbnf_symbol_table_slots {
             let entry = &self.entries[slot];
-            if !entry.occupied { return None; }
-            if entry.hash == hash && entry.len as usize == name.len() && entry.name[..name.len()] == name[..] {
+            if !entry.occupied {
+                return None;
+            }
+            if entry.hash == hash
+                && entry.len as usize == name.len()
+                && entry.name[..name.len()] == name[..]
+            {
                 return Some(entry.id);
             }
             slot = (slot + 1) & mask;
@@ -195,7 +220,11 @@ impl SymbolTable {
         let mut slot = (hash as usize) & mask;
         for _ in 0..k_gbnf_symbol_table_slots {
             let entry = &self.entries[slot];
-            if !entry.occupied || (entry.hash == hash && entry.len as usize == name.len() && entry.name[..name.len()] == name[..]) {
+            if !entry.occupied
+                || (entry.hash == hash
+                    && entry.len as usize == name.len()
+                    && entry.name[..name.len()] == name[..])
+            {
                 return true;
             }
             slot = (slot + 1) & mask;
@@ -217,7 +246,10 @@ impl SymbolTable {
                 self.count += 1;
                 return true;
             }
-            if entry.hash == hash && entry.len as usize == name.len() && entry.name[..name.len()] == name[..] {
+            if entry.hash == hash
+                && entry.len as usize == name.len()
+                && entry.name[..name.len()] == name[..]
+            {
                 entry.id = id;
                 return true;
             }
@@ -271,12 +303,17 @@ impl GbnfRuleParserNontermParserContext {
     }
 
     fn name(&self) -> Option<&[u8]> {
-        if !self.input.symbol_valid || self.input.symbol_len == 0 { return None; }
+        if !self.input.symbol_valid || self.input.symbol_len == 0 {
+            return None;
+        }
         Some(&self.input.symbol[..self.input.symbol_len as usize])
     }
 
     fn consume(&mut self, rule_id: u32) -> Result<(), ()> {
-        self.outcome = ParseOutcome::Parsed { rule_id, mode: self.input.nonterm_mode };
+        self.outcome = ParseOutcome::Parsed {
+            rule_id,
+            mode: self.input.nonterm_mode,
+        };
         self.error = None;
         Ok(())
     }
@@ -294,7 +331,10 @@ impl GbnfRuleParserNontermParserContext {
     }
 
     fn lookup_candidate(&mut self) {
-        let Some(name) = self.name() else { self.lookup_can_insert = false; return; };
+        let Some(name) = self.name() else {
+            self.lookup_can_insert = false;
+            return;
+        };
         let name_len = name.len();
         let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
         copied_name[..name_len].copy_from_slice(name);
@@ -311,11 +351,18 @@ impl GbnfRuleParserNontermParserContext {
     }
     fn consume_definition_new(&mut self) -> Result<(), ()> {
         let id = self.next_symbol_id;
-        let Some(name) = self.name() else { return self.fail(); };
+        let Some(name) = self.name() else {
+            return self.fail();
+        };
         let name_len = name.len();
         let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
         copied_name[..name_len].copy_from_slice(name);
-        if id as usize >= k_max_gbnf_rules || self.symbols.count as usize >= k_max_gbnf_symbols || !self.symbols.insert(&copied_name[..name_len], self.lookup_hash, id) {
+        if id as usize >= k_max_gbnf_rules
+            || self.symbols.count as usize >= k_max_gbnf_symbols
+            || !self
+                .symbols
+                .insert(&copied_name[..name_len], self.lookup_hash, id)
+        {
             return self.fail();
         }
         self.next_symbol_id += 1;
@@ -323,47 +370,28 @@ impl GbnfRuleParserNontermParserContext {
         self.consume(id)
     }
 
-    fn consume_reference_existing(&mut self) -> Result<(), ()> { self.consume(self.lookup_rule_id) }
+    fn consume_reference_existing(&mut self) -> Result<(), ()> {
+        self.consume(self.lookup_rule_id)
+    }
 
     fn consume_reference_new(&mut self) -> Result<(), ()> {
         let id = self.next_symbol_id;
-        let Some(name) = self.name() else { return self.fail(); };
+        let Some(name) = self.name() else {
+            return self.fail();
+        };
         let name_len = name.len();
         let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
         copied_name[..name_len].copy_from_slice(name);
-        if id as usize >= k_max_gbnf_rules || self.symbols.count as usize >= k_max_gbnf_symbols || !self.symbols.insert(&copied_name[..name_len], self.lookup_hash, id) {
+        if id as usize >= k_max_gbnf_rules
+            || self.symbols.count as usize >= k_max_gbnf_symbols
+            || !self
+                .symbols
+                .insert(&copied_name[..name_len], self.lookup_hash, id)
+        {
             return self.fail();
         }
         self.next_symbol_id += 1;
         self.consume(id)
-    }
-
-PUT 422.=425:
-pub struct GbnfRuleParserNontermParserActor {
-    machine: GbnfRuleParserNontermParserStateMachine<GbnfRuleParserNontermParserContext>,
-}
-
-PUT 460.=465:
-    pub fn process_unexpected_event(&mut self) -> ParseOutcome {
-        self.machine.context_mut().error = Some(NontermParserError::InternalError);
-        self.machine.context_mut().outcome = ParseOutcome::InternalError;
-        self.machine.set_state(GbnfRuleParserNontermParserStates::UnexpectedEvent);
-        self.machine.context().outcome
-    }
-
-
-PUT 374.=378:
-/// Synchronous bounded nonterminal parser child actor.
-pub struct GbnfRuleParserNontermParserActor {
-    machine: GbnfRuleParserNontermParserStateMachine<GbnfRuleParserNontermParserContext>,
-}
-
-PUT 413.=418:
-    pub fn process_unexpected_event(&mut self) -> ParseOutcome {
-        self.machine.context_mut().error = Some(NontermParserError::InternalError);
-        self.machine.context_mut().outcome = ParseOutcome::InternalError;
-        self.machine.set_state(GbnfRuleParserNontermParserStates::UnexpectedEvent);
-        self.machine.context().outcome
     }
 }
 
@@ -375,8 +403,18 @@ impl GbnfRuleParserNontermParserStateMachineContext for GbnfRuleParserNontermPar
 
     fn consume_definition_new(&mut self) -> Result<(), ()> {
         let id = self.next_symbol_id;
-        let Some(name) = self.name() else { return self.fail(); };
-        if id as usize >= k_max_gbnf_rules || self.symbols.count as usize >= k_max_gbnf_symbols || !self.symbols.insert(name, self.lookup_hash, id) {
+        let Some(name) = self.name() else {
+            return self.fail();
+        };
+        let name_len = name.len();
+        let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
+        copied_name[..name_len].copy_from_slice(name);
+        if id as usize >= k_max_gbnf_rules
+            || self.symbols.count as usize >= k_max_gbnf_symbols
+            || !self
+                .symbols
+                .insert(&copied_name[..name_len], self.lookup_hash, id)
+        {
             return self.fail();
         }
         self.next_symbol_id += 1;
@@ -384,12 +422,24 @@ impl GbnfRuleParserNontermParserStateMachineContext for GbnfRuleParserNontermPar
         self.consume(id)
     }
 
-    fn consume_reference_existing(&mut self) -> Result<(), ()> { self.consume(self.lookup_rule_id) }
+    fn consume_reference_existing(&mut self) -> Result<(), ()> {
+        self.consume(self.lookup_rule_id)
+    }
 
     fn consume_reference_new(&mut self) -> Result<(), ()> {
         let id = self.next_symbol_id;
-        let Some(name) = self.name() else { return self.fail(); };
-        if id as usize >= k_max_gbnf_rules || self.symbols.count as usize >= k_max_gbnf_symbols || !self.symbols.insert(name, self.lookup_hash, id) {
+        let Some(name) = self.name() else {
+            return self.fail();
+        };
+        let name_len = name.len();
+        let mut copied_name = [0u8; MAX_NONTERM_NAME_BYTES];
+        copied_name[..name_len].copy_from_slice(name);
+        if id as usize >= k_max_gbnf_rules
+            || self.symbols.count as usize >= k_max_gbnf_symbols
+            || !self
+                .symbols
+                .insert(&copied_name[..name_len], self.lookup_hash, id)
+        {
             return self.fail();
         }
         self.next_symbol_id += 1;
@@ -397,59 +447,132 @@ impl GbnfRuleParserNontermParserStateMachineContext for GbnfRuleParserNontermPar
     }
 
     fn definition_existing_valid(&self) -> Result<bool, ()> {
-        Ok(self.lookup_found && (self.lookup_rule_id as usize) < k_max_gbnf_rules && !self.rule_defined[self.lookup_rule_id as usize])
+        Ok(self.lookup_found
+            && (self.lookup_rule_id as usize) < k_max_gbnf_rules
+            && !self.rule_defined[self.lookup_rule_id as usize])
     }
 
-    fn definition_failed(&self) -> Result<bool, ()> { Ok(!self.definition_existing_valid()? && !self.definition_new_valid()?) }
-    fn definition_new_valid(&self) -> Result<bool, ()> { Ok(!self.lookup_found && self.lookup_can_insert) }
+    fn definition_failed(&self) -> Result<bool, ()> {
+        Ok(!self.definition_existing_valid()? && !self.definition_new_valid()?)
+    }
+    fn definition_new_valid(&self) -> Result<bool, ()> {
+        Ok(!self.lookup_found && self.lookup_can_insert)
+    }
 
-    fn dispatch_parse_failed_from_deciding(&mut self) -> Result<(), ()> { self.fail() }
-    fn dispatch_parse_failed_from_definition_lookup_decision(&mut self) -> Result<(), ()> { self.fail() }
-    fn dispatch_parse_failed_from_reference_lookup_decision(&mut self) -> Result<(), ()> { self.fail() }
-    fn lookup_definition_candidate(&mut self) -> Result<(), ()> { self.lookup_candidate(); Ok(()) }
-    fn lookup_reference_candidate(&mut self) -> Result<(), ()> { self.lookup_candidate(); Ok(()) }
+    fn dispatch_parse_failed_from_deciding(&mut self) -> Result<(), ()> {
+        self.fail()
+    }
+    fn dispatch_parse_failed_from_definition_lookup_decision(&mut self) -> Result<(), ()> {
+        self.fail()
+    }
+    fn dispatch_parse_failed_from_reference_lookup_decision(&mut self) -> Result<(), ()> {
+        self.fail()
+    }
+    fn lookup_definition_candidate(&mut self) -> Result<(), ()> {
+        self.lookup_candidate();
+        Ok(())
+    }
+    fn lookup_reference_candidate(&mut self) -> Result<(), ()> {
+        self.lookup_candidate();
+        Ok(())
+    }
 
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_definition_lookup_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_definition_lookup_exec(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_reference_lookup_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_reference_lookup_exec(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_definition_lookup_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_definition_lookup_exec(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_reference_lookup_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_reference_lookup_exec(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
 
-    fn reference_existing_valid(&self) -> Result<bool, ()> { Ok(self.lookup_found) }
-    fn reference_failed(&self) -> Result<bool, ()> { Ok(!self.reference_existing_valid()? && !self.reference_new_valid()?) }
-    fn reference_new_valid(&self) -> Result<bool, ()> { Ok(!self.lookup_found && self.lookup_can_insert) }
+    fn reference_existing_valid(&self) -> Result<bool, ()> {
+        Ok(self.lookup_found)
+    }
+    fn reference_failed(&self) -> Result<bool, ()> {
+        Ok(!self.reference_existing_valid()? && !self.reference_new_valid()?)
+    }
+    fn reference_new_valid(&self) -> Result<bool, ()> {
+        Ok(!self.lookup_found && self.lookup_can_insert)
+    }
 
     fn token_identifier_definition(&self) -> Result<bool, ()> {
-        Ok(self.input.has_token && self.input.token_kind == TokenKind::Identifier && self.name().is_some() && self.input.nonterm_mode == ParseMode::Definition && self.error.is_none())
+        Ok(self.input.has_token
+            && self.input.token_kind == TokenKind::Identifier
+            && self.name().is_some()
+            && self.input.nonterm_mode == ParseMode::Definition
+            && self.error.is_none())
     }
 
     fn token_identifier_reference(&self) -> Result<bool, ()> {
-        Ok(self.input.has_token && self.input.token_kind == TokenKind::Identifier && self.name().is_some() && self.input.nonterm_mode == ParseMode::Reference && self.error.is_none())
+        Ok(self.input.has_token
+            && self.input.token_kind == TokenKind::Identifier
+            && self.name().is_some()
+            && self.input.nonterm_mode == ParseMode::Reference
+            && self.error.is_none())
     }
 }
 
+/// Synchronous bounded nonterminal parser child actor.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
+pub struct GbnfRuleParserNontermParserActor {
+    machine: GbnfRuleParserNontermParserStateMachine<GbnfRuleParserNontermParserContext>,
+}
 
 impl Default for GbnfRuleParserNontermParserActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GbnfRuleParserNontermParserActor {
     /// Creates an actor in generated `deciding` state.
     #[must_use]
-    pub fn new() -> Self { Self { machine: GbnfRuleParserNontermParserStateMachine::new(Default::default()) } }
+    pub fn new() -> Self {
+        Self {
+            machine: GbnfRuleParserNontermParserStateMachine::new(
+                GbnfRuleParserNontermParserContext::default(),
+            ),
+        }
+    }
 
     /// Processes one copied request to completion.
     pub fn process_event(&mut self, event: RuleParserEventParseRules) -> ParseOutcome {
-        if !self.machine.is(&GbnfRuleParserNontermParserStates::Deciding) {
+        if !self
+            .machine
+            .is(&GbnfRuleParserNontermParserStates::Deciding)
+        {
             self.machine.context_mut().error = Some(NontermParserError::InternalError);
             self.machine.context_mut().outcome = ParseOutcome::InternalError;
+            self.machine
+                .set_state(GbnfRuleParserNontermParserStates::UnexpectedEvent);
             return ParseOutcome::InternalError;
         }
         self.machine.context_mut().set_input(event);
-        if self.machine.process_event(GbnfRuleParserNontermParserEvents::RuleParserEventParseRules).is_err() {
+        if self
+            .machine
+            .process_event(GbnfRuleParserNontermParserEvents::RuleParserEventParseRules)
+            .is_err()
+        {
             self.machine.context_mut().error = Some(NontermParserError::InternalError);
             self.machine.context_mut().outcome = ParseOutcome::InternalError;
         }
@@ -458,29 +581,46 @@ impl GbnfRuleParserNontermParserActor {
 
     /// Resolves or inserts a copied nonterminal name.
     pub fn classify(&mut self, mode: ParseMode, name: &str) -> ParseOutcome {
-        self.process_event(RuleParserEventParseRules::new(TokenKind::Identifier, mode, name))
+        self.process_event(RuleParserEventParseRules::new(
+            TokenKind::Identifier,
+            mode,
+            name,
+        ))
     }
 
     /// Processes an absent token.
-    pub fn process_absent(&mut self) -> ParseOutcome { self.process_event(RuleParserEventParseRules::absent()) }
+    pub fn process_absent(&mut self) -> ParseOutcome {
+        self.process_event(RuleParserEventParseRules::absent())
+    }
 
     /// Processes an explicit unexpected event.
+    pub fn process_unexpected_event(&mut self) -> ParseOutcome {
+        self.machine.context_mut().error = Some(NontermParserError::InternalError);
+        self.machine.context_mut().outcome = ParseOutcome::InternalError;
+        self.machine
+            .set_state(GbnfRuleParserNontermParserStates::UnexpectedEvent);
+        self.machine.context().outcome
     }
 
     /// Returns generated state inspection data.
     #[must_use]
-    pub fn state(&self) -> &GbnfRuleParserNontermParserStates { self.machine.state() }
+    pub fn state(&self) -> &GbnfRuleParserNontermParserStates {
+        self.machine.state()
+    }
 
     /// Reports whether the generated machine is in `state`.
     #[must_use]
-    pub fn is(&self, state: GbnfRuleParserNontermParserStates) -> bool { self.machine.is(&state) }
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Preserve the public state-inspection API while matching generated machine calls"
+    )]
+    pub fn is(&self, state: GbnfRuleParserNontermParserStates) -> bool {
+        self.machine.is(&state)
+    }
 
     /// Returns the generated machine context for bounded result inspection.
     #[must_use]
-    pub fn context(&self) -> &GbnfRuleParserNontermParserContext { self.machine.context() }
+    pub fn context(&self) -> &GbnfRuleParserNontermParserContext {
+        self.machine.context()
+    }
 }
-
-/// Short alias used by rule-parser callers.
-pub type NontermParser = GbnfRuleParserNontermParserActor;
-/// Compatibility alias for callers naming the child actor directly.
-pub type GbnfNontermParser = GbnfRuleParserNontermParserActor;

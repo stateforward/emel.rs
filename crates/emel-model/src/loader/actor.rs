@@ -58,10 +58,12 @@ type ResidencyStore =
 pub struct OwnedTensorLoader {
     store: ResidencyStore,
     storage: Option<StorageBatch>,
+    storage_bound: bool,
     effects: Option<EffectBuffer>,
     results: Box<[Option<Box<[u8]>>]>,
     bound_ids: Option<Box<[i32]>>,
     mapping_handles: Box<[Option<u32>]>,
+    mapping_attempt: Box<[bool]>,
 }
 
 impl OwnedTensorLoader {
@@ -127,10 +129,12 @@ impl OwnedTensorLoader {
         Ok(Self {
             store,
             storage: Some(StorageBatch::new(entries.into_boxed_slice())),
+            storage_bound: false,
             effects: Some(EffectBuffer::new(effect_slots.into_boxed_slice())),
             results: result_slots.into_boxed_slice(),
             bound_ids: Some(bound_ids.into_boxed_slice()),
             mapping_handles: vec![None; count].into_boxed_slice(),
+            mapping_attempt: vec![false; count].into_boxed_slice(),
         })
     }
     fn load_prebound(&mut self, model: &mut Data) -> Result<LoadStats, Error> {
@@ -259,24 +263,35 @@ impl OwnedTensorLoader {
     }
 
     /// Releases retained mapped residency through the owning mapper actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed loader error reported by the tensor actor, including
+    /// [`Error::MappedReleaseFailed`] when the mapper cannot release the mapping.
     pub fn release_mapped(&mut self, tensor_id: i32, mapping_handle: u32) -> Result<(), Error> {
-        match self.store.process_event(ReleaseMapped::new(tensor_id, mapping_handle)) {
+        match self
+            .store
+            .process_event(ReleaseMapped::new(tensor_id, mapping_handle))
+        {
             Ok(_) => {
-                if let Ok(index) = usize::try_from(tensor_id) {
-                    if self.mapping_handles.get(index).copied().flatten() == Some(mapping_handle) {
-                        self.mapping_handles[index] = None;
-                    }
+                if let Ok(index) = usize::try_from(tensor_id)
+                    && self.mapping_handles.get(index).copied().flatten() == Some(mapping_handle)
+                {
+                    self.mapping_handles[index] = None;
                 }
                 Ok(())
             }
-            Err(crate::tensor::event::Error::Mmap(error)) => {
-                Err(Error::MappedReleaseFailed(error))
-            }
+            Err(crate::tensor::event::Error::Mmap(error)) => Err(Error::MappedReleaseFailed(error)),
             Err(error) => Err(Self::tensor_error(error)),
         }
     }
 
     /// Captures one tensor's lifecycle for explicit mapped ownership management.
+    ///
+    /// # Errors
+    ///
+    /// Returns the typed loader error reported by the tensor actor while
+    /// capturing the requested tensor state.
     pub fn tensor_state(
         &mut self,
         tensor_id: i32,
@@ -285,25 +300,41 @@ impl OwnedTensorLoader {
             .process_event(CaptureTensorState::new(tensor_id))
             .map_err(Self::tensor_error)
     }
-}
 
-impl TensorLoader for OwnedTensorLoader {
-    fn load(
+    fn rollback_mapped_load(&mut self) {
+        for index in 0..self.mapping_attempt.len() {
+            if self.mapping_attempt[index] {
+                let tensor_id = i32::try_from(index).expect("loader tensor capacity fits i32");
+                let mapping_handle = self.mapping_handles[index]
+                    .expect("attempt marker accompanies a retained mapping handle");
+                if self.release_mapped(tensor_id, mapping_handle).is_err() {
+                    std::process::abort();
+                }
+                self.mapping_attempt[index] = false;
+            }
+        }
+    }
+    fn load_sequential(
         &mut self,
         model: &mut Data,
         source: super::event::Source<'_>,
+        tensor_strategy: TensorStrategy,
         strategy: emel_io::loader::event::StrategyKind,
     ) -> Result<LoadStats, Error> {
-        if strategy == emel_io::loader::event::StrategyKind::None {
-            return self.load_prebound(model);
-        }
-        let tensor_strategy = Self::strategy(strategy)?;
-        let storage = self.storage.take().ok_or(Error::InternalError)?;
-        let bind = self.store.process_event(BindStorage::new(storage));
-        if let Err(error) = bind {
-            let class = error.error();
-            self.storage = Some(error.into_storage());
-            return Err(Self::tensor_error(class));
+        // `Source::file_image` is a capability for the primary file only.  The
+        // direct reader and staged reader events cannot carry an indexed image,
+        // so reject split tensors before dispatch rather than silently reading
+        // primary-file bytes for a non-primary tensor.
+        if matches!(
+            tensor_strategy,
+            TensorStrategy::ReadCopy | TensorStrategy::StagedRead
+        ) && model
+            .tensors
+            .iter()
+            .take(self.results.len())
+            .any(|tensor| tensor.file_index != 0)
+        {
+            return Err(Error::InvalidRequest);
         }
 
         let mut total = 0_u64;
@@ -316,31 +347,34 @@ impl TensorLoader for OwnedTensorLoader {
                         .get(usize::from(tensor.file_index))
                         .ok_or(Error::InvalidRequest)?
                         .clone();
-                    self.mapping_handles[index] = Some(
-                        self.store
-                            .process_event(
-                                MappedLoad::new(
-                                    tensor_id,
-                                    mapped_source,
-                                    tensor.file_offset,
-                                    tensor.data_size,
-                                )
-                                .with_file_index(tensor.file_index),
+                    let handle = self
+                        .store
+                        .process_event(
+                            MappedLoad::new(
+                                tensor_id,
+                                mapped_source,
+                                tensor.file_offset,
+                                tensor.data_size,
                             )
-                            .map_err(Self::tensor_error)?
-                            .mapping_handle(),
-                    );
+                            .with_file_index(tensor.file_index),
+                        )
+                        .map_err(Self::tensor_error)?
+                        .mapping_handle();
+                    self.mapping_handles[index] = Some(handle);
+                    self.mapping_attempt[index] = true;
                 }
                 TensorStrategy::ReadCopy => {
                     self.store
-                        .process_event(ReadLoad::new(
-                            tensor_id,
-                            source.model_path,
-                            source.file_image,
-                            tensor.file_offset,
-                            tensor.data_size,
+                        .process_event(
+                            ReadLoad::new(
+                                tensor_id,
+                                source.model_path,
+                                source.file_image,
+                                tensor.file_offset,
+                                tensor.data_size,
+                            )
+                            .with_file_index(tensor.file_index),
                         )
-                        .with_file_index(tensor.file_index))
                         .map_err(Self::tensor_error)?;
                 }
                 TensorStrategy::StagedRead => {
@@ -396,6 +430,37 @@ impl TensorLoader for OwnedTensorLoader {
     }
 }
 
+impl TensorLoader for OwnedTensorLoader {
+    fn load(
+        &mut self,
+        model: &mut Data,
+        source: super::event::Source<'_>,
+        strategy: emel_io::loader::event::StrategyKind,
+    ) -> Result<LoadStats, Error> {
+        if strategy == emel_io::loader::event::StrategyKind::None {
+            return self.load_prebound(model);
+        }
+        let tensor_strategy = Self::strategy(strategy)?;
+        if !self.storage_bound {
+            let storage = self.storage.take().ok_or(Error::InternalError)?;
+            let bind = self.store.process_event(BindStorage::new(storage));
+            if let Err(error) = bind {
+                let class = error.error();
+                self.storage = Some(error.into_storage());
+                return Err(Self::tensor_error(class));
+            }
+            self.storage_bound = true;
+        }
+        self.mapping_attempt.fill(false);
+        let result = self.load_sequential(model, source, tensor_strategy, strategy);
+        if let Err(error) = result {
+            self.rollback_mapped_load();
+            return Err(error);
+        }
+        result
+    }
+}
+
 /// Single-writer, run-to-completion model loader.
 pub struct ModelLoader<T = NoTensorLoader>
 where
@@ -413,6 +478,11 @@ impl ModelLoader<NoTensorLoader> {
 }
 impl OwnedTensorLoader {
     /// Releases all mapped tensor residency, preserving the first typed failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first typed loader error reported while releasing mapped
+    /// tensor residency; later mappings are not attempted after that failure.
     pub fn release_all_mapped(&mut self) -> Result<(), Error> {
         for tensor_id in 0..self.mapping_handles.len() {
             if let Some(mapping_handle) = self.mapping_handles[tensor_id] {
@@ -500,6 +570,7 @@ mod tests {
     fn owned_loader_reads_source_bytes_and_installs_them() {
         let mut model = model_with_one_tensor();
         let mut loader = OwnedTensorLoader::try_new(&model).expect("loader allocation");
+
         let stats = loader
             .load(
                 &mut model,
@@ -509,7 +580,31 @@ mod tests {
             .expect("read-copy load");
         assert_eq!(stats.bytes_total, 4);
         assert_eq!(stats.bytes_done, 4);
-        assert_eq!(model.tensor(0).expect("tensor view").bytes(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(
+            model.tensor(0).expect("tensor view").bytes(),
+            Some(&[1, 2, 3, 4][..])
+        );
+    }
+    #[test]
+    fn owned_loader_rejects_non_primary_split_for_read_copy_and_staged_read() {
+        for strategy in [
+            emel_io::loader::event::StrategyKind::ReadCopy,
+            emel_io::loader::event::StrategyKind::StagedRead,
+        ] {
+            let mut model = model_with_one_tensor();
+            model.tensors[0].file_index = 1;
+            let mut loader = OwnedTensorLoader::try_new(&model).expect("loader allocation");
+
+            // This primary image contains valid bytes at the tensor range, but
+            // must never be used for a tensor declared in split file 1.
+            let result = loader.load(
+                &mut model,
+                Source::new("primary.gguf", Some(&[9, 8, 1, 2, 3, 4, 7])),
+                strategy,
+            );
+            assert_eq!(result, Err(Error::InvalidRequest), "strategy: {strategy:?}");
+            assert_eq!(model.tensor(0).expect("tensor view").bytes(), None);
+        }
     }
 
     #[test]
@@ -533,11 +628,18 @@ mod tests {
         model.tensors[0].bytes = Some(Box::new([4, 3, 2, 1]));
         let mut loader = OwnedTensorLoader::try_new(&model).expect("loader allocation");
         let stats = loader
-            .load(&mut model, Source::new("", None), emel_io::loader::event::StrategyKind::None)
+            .load(
+                &mut model,
+                Source::new("", None),
+                emel_io::loader::event::StrategyKind::None,
+            )
             .expect("prebound load");
         assert_eq!(stats.bytes_total, 4);
         assert_eq!(stats.bytes_done, 4);
         assert!(!stats.used_mmap);
-        assert_eq!(model.tensor(0).expect("tensor view").bytes(), Some(&[4, 3, 2, 1][..]));
+        assert_eq!(
+            model.tensor(0).expect("tensor view").bytes(),
+            Some(&[4, 3, 2, 1][..])
+        );
     }
 }

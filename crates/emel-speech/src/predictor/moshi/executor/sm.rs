@@ -1,8 +1,8 @@
-//! Run-to-completion Moshi executor actor.
+//! Run-to-completion `Moshi` executor actor.
 //!
-//! The executor owns the control-plane state for one Moshi predictor.  Each
-//! request is consumed by one SML dispatch; no operation reads another actor's
-//! state and no dispatch allocates.  Graph and memory work is represented by
+//! The executor owns the control-plane state for one `Moshi` predictor. Each
+//! request is consumed by one `SML` dispatch; no operation reads another actor's
+//! state and no dispatch allocates. Graph and memory work is represented by
 //! explicit completion decisions so a backend can be attached without changing
 //! the lifecycle contract.
 
@@ -21,10 +21,14 @@
 
 use core::fmt;
 
+use super::super::binding::MoshiTextEmbeddingRow;
+use emel_kernels::any::Kernel;
+use emel_kernels::any::get_rows::{GetRowsError, GetRowsOutcome, OpGetRowsF32Bytes};
 use sml::sml;
 
 /// Errors published by the executor control plane.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum ExecutorError {
     /// No error has been recorded.
     #[default]
@@ -43,24 +47,277 @@ pub enum ExecutorError {
     UnexpectedEvent,
     /// Reset of a bound resource failed.
     ResetFailed,
+    /// The native `Moshi` text-embedding row kernel rejected its operation.
+    NativeRow(GetRowsError),
 }
 
 impl fmt::Display for ExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = match self {
-            Self::None => "no error",
-            Self::NotInitialized => "executor is not initialized",
-            Self::BindFailed => "model binding failed",
-            Self::RequestShape => "request shape is invalid",
-            Self::ModelMismatch => "step model does not match the initialized model",
-            Self::GraphExecutionUnsupported => "graph execution is unsupported",
-            Self::UnexpectedEvent => "unexpected executor event",
-            Self::ResetFailed => "reset failed",
-        };
-        formatter.write_str(text)
+        match self {
+            Self::None => formatter.write_str("no error"),
+            Self::NotInitialized => formatter.write_str("executor is not initialized"),
+            Self::BindFailed => formatter.write_str("model binding failed"),
+            Self::RequestShape => formatter.write_str("request shape is invalid"),
+            Self::ModelMismatch => {
+                formatter.write_str("step model does not match the initialized model")
+            }
+            Self::GraphExecutionUnsupported => {
+                formatter.write_str("graph execution is unsupported")
+            }
+            Self::UnexpectedEvent => formatter.write_str("unexpected executor event"),
+            Self::ResetFailed => formatter.write_str("reset failed"),
+            Self::NativeRow(error) => {
+                write!(formatter, "native Moshi row execution failed: {error}")
+            }
+        }
     }
 }
 
+impl std::error::Error for ExecutorError {}
+
+/// A preconstructed native `Moshi` text-embedding row operation.
+///
+/// The operation borrows immutable model bytes and the caller-owned mutable
+/// destination. Construction must happen before executor dispatch.
+#[derive(Debug)]
+pub struct NativeRowRun<'event> {
+    operation: core::cell::RefCell<Option<OpGetRowsF32Bytes<'event>>>,
+    kernel: core::cell::RefCell<Option<&'event mut Kernel>>,
+    outcome: core::cell::Cell<GetRowsOutcome>,
+}
+
+impl<'event> NativeRowRun<'event> {
+    /// Wraps a preconstructed row operation and caller-owned kernel.
+    #[must_use]
+    pub fn new(operation: OpGetRowsF32Bytes<'event>, kernel: &'event mut Kernel) -> Self {
+        Self {
+            operation: core::cell::RefCell::new(Some(operation)),
+            kernel: core::cell::RefCell::new(Some(kernel)),
+            outcome: core::cell::Cell::new(Err(GetRowsError::UnexpectedEvent)),
+        }
+    }
+
+    /// Wraps a validated `Moshi` text-embedding row and caller-owned kernel.
+    #[must_use]
+    pub fn from_text_embedding_row(
+        row: MoshiTextEmbeddingRow<'event>,
+        kernel: &'event mut Kernel,
+    ) -> Self {
+        Self::new(row.into_kernel_operation(), kernel)
+    }
+
+    /// Returns the native row outcome after dispatch.
+    pub fn outcome(&self) -> GetRowsOutcome {
+        self.outcome.get()
+    }
+
+    fn mark_error(&self, error: GetRowsError) {
+        self.outcome.set(Err(error));
+    }
+}
+
+sml! {
+    MoshiNativeRowExecutor<'dispatch, 'event>
+    where
+        'event: 'dispatch,
+    {
+        "state_executing"_s <= *"state_ready"_s + event<NativeRowRun>(&'dispatch NativeRowRun<'event>) [guard_operation_present] / effect_execute,
+        "state_error"_s <= "state_ready"_s + event<NativeRowRun>(&'dispatch NativeRowRun<'event>) [guard_operation_missing] / effect_publish_missing,
+        "state_native_result_decision"_s <= "state_executing"_s + completion<NativeRowRun>(&'dispatch NativeRowRun<'event>),
+        "state_ready"_s <= "state_native_result_decision"_s + completion<NativeRowRun>(&'dispatch NativeRowRun<'event>) [guard_execution_succeeded] / effect_publish_success,
+        "state_error"_s <= "state_native_result_decision"_s + completion<NativeRowRun>(&'dispatch NativeRowRun<'event>) [guard_execution_failed] / effect_publish_error,
+        "state_error"_s <= "state_error"_s + event<NativeRowRun>(&'dispatch NativeRowRun<'event>) / effect_publish_missing,
+        "state_ready"_s <= "state_ready"_s + unexpected_event<_> / effect_unexpected,
+        "state_error"_s <= "state_error"_s + unexpected_event<_> / effect_unexpected,
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SpeechPredictorMoshiNativeRowExecutorContext {
+    last_error: ExecutorError,
+}
+
+impl SpeechPredictorMoshiNativeRowExecutorContext {
+    fn clear_error(&mut self) {
+        self.last_error = ExecutorError::None;
+    }
+
+    fn mark_error(&mut self, error: ExecutorError) {
+        self.last_error = error;
+    }
+
+    /// Returns the most recently published typed row error.
+    #[must_use]
+    pub const fn last_error(&self) -> ExecutorError {
+        self.last_error
+    }
+}
+
+impl MoshiNativeRowExecutorStateMachineContext for SpeechPredictorMoshiNativeRowExecutorContext {
+    fn guard_operation_present<'dispatch, 'event>(
+        &self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.operation.borrow().is_some() && event.kernel.borrow().is_some())
+    }
+
+    fn guard_operation_missing<'dispatch, 'event>(
+        &self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.operation.borrow().is_none() || event.kernel.borrow().is_none())
+    }
+
+    fn effect_execute<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        let operation = event.operation.borrow_mut().take().ok_or(())?;
+        let kernel = event.kernel.borrow_mut().take().ok_or(())?;
+        event.outcome.set(kernel.process_event(operation));
+        *event.kernel.borrow_mut() = Some(kernel);
+        Ok(())
+    }
+
+    fn guard_execution_succeeded<'dispatch, 'event>(
+        &self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.outcome.get().is_ok())
+    }
+
+    fn guard_execution_failed<'dispatch, 'event>(
+        &self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.outcome.get().is_err())
+    }
+
+    fn effect_publish_success<'dispatch, 'event>(
+        &mut self,
+        _event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.clear_error();
+        Ok(())
+    }
+
+    fn effect_publish_error<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        let error = match event.outcome() {
+            Ok(()) => GetRowsError::Internal,
+            Err(error) => error,
+        };
+        self.mark_error(ExecutorError::NativeRow(error));
+        Ok(())
+    }
+
+    fn effect_publish_missing<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch NativeRowRun<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        event.mark_error(GetRowsError::UnexpectedEvent);
+        self.mark_error(ExecutorError::NativeRow(GetRowsError::UnexpectedEvent));
+        Ok(())
+    }
+
+    fn effect_unexpected(&mut self) -> Result<(), ()> {
+        self.mark_error(ExecutorError::UnexpectedEvent);
+        Ok(())
+    }
+}
+
+/// Dispatches one preconstructed native row through an `SML` run-to-completion boundary.
+pub fn process_native_row<'event>(run: &'event NativeRowRun<'event>) -> Result<(), ExecutorError> {
+    let mut executor = SpeechPredictorMoshiNativeRowExecutor::new();
+    executor.process_row(run)
+}
+
+/// Public single-writer stage for one synchronous native `Moshi` row gather.
+pub struct SpeechPredictorMoshiNativeRowExecutor {
+    machine: MoshiNativeRowExecutorStateMachine<SpeechPredictorMoshiNativeRowExecutorContext>,
+}
+
+impl Default for SpeechPredictorMoshiNativeRowExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SpeechPredictorMoshiNativeRowExecutor {
+    /// Constructs a ready row executor without allocating.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            machine: MoshiNativeRowExecutorStateMachine::new(
+                SpeechPredictorMoshiNativeRowExecutorContext::default(),
+            ),
+        }
+    }
+
+    /// Dispatches one preconstructed operation synchronously through the row `SML` boundary.
+    pub fn process_row<'event>(
+        &mut self,
+        run: &'event NativeRowRun<'event>,
+    ) -> Result<(), ExecutorError> {
+        if self.machine.process_event(run).is_err() {
+            return Err(ExecutorError::UnexpectedEvent);
+        }
+        let error = self.machine.context().last_error();
+        if error == ExecutorError::None {
+            Ok(())
+        } else {
+            Err(error)
+        }
+    }
+
+    /// Returns the generated SML state for stage inspection.
+    #[must_use]
+    pub fn state(&self) -> &MoshiNativeRowExecutorStates {
+        self.machine.state()
+    }
+
+    /// Builds and dispatches one validated text-embedding row synchronously.
+    pub fn process_text_embedding_row<'event>(
+        &mut self,
+        row: MoshiTextEmbeddingRow<'event>,
+        kernel: &'event mut Kernel,
+    ) -> Result<(), ExecutorError> {
+        let run = NativeRowRun::from_text_embedding_row(row, kernel);
+        self.process_row(&run)
+    }
+
+    /// Returns the stage context containing its published typed error.
+    #[must_use]
+    pub fn context(&self) -> &SpeechPredictorMoshiNativeRowExecutorContext {
+        self.machine.context()
+    }
+}
 /// Initialization request.  The booleans are the results of the independent
 /// model-contract checks performed by the parent actor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -380,7 +637,7 @@ impl SpeechPredictorMoshiExecutorStateMachineContext for SpeechPredictorMoshiExe
     }
 }
 
-/// Public single-writer Moshi executor actor.
+/// Public single-writer `Moshi` executor actor.
 pub struct SpeechPredictorMoshiExecutor {
     machine: SpeechPredictorMoshiExecutorStateMachine<SpeechPredictorMoshiExecutorContext>,
 }

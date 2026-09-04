@@ -56,6 +56,8 @@ pub fn speaker_logits(
 }
 
 /// Applies the pinned Sortformer layer normalization equation to one 192-wide row.
+// Preserve the pinned unfused scalar normalization order; fusion changes result bits.
+#[allow(clippy::suboptimal_flops)]
 pub fn layer_norm_192(input: &[f32], scale: &[f32], bias: &[f32], output: &mut [f32]) -> bool {
     if input.len() != 192 || scale.len() != 192 || bias.len() != 192 || output.len() != 192 {
         return false;
@@ -71,7 +73,9 @@ pub fn layer_norm_192(input: &[f32], scale: &[f32], bias: &[f32], output: &mut [
         / 192.0;
     let inverse_std = (variance + 1.0e-5).sqrt().recip();
     for index in 0..192 {
-        output[index] = ((input[index] - mean) * inverse_std).mul_add(scale[index], bias[index]);
+        let normalized = (input[index] - mean) * inverse_std;
+        let scaled = normalized * scale[index];
+        output[index] = scaled + bias[index];
     }
     true
 }
@@ -526,6 +530,8 @@ pub fn transpose_dense_input(
 }
 
 /// Computes one dense row and adds a bias vector.
+// Preserve the pinned scalar weighted-sum order; fusion changes result bits.
+#[allow(clippy::suboptimal_flops)]
 pub fn dense(input: &[f32], weights: &[f32], bias: &[f32], output: &mut [f32]) -> bool {
     if input.is_empty() || output.is_empty() || bias.len() != output.len() {
         return false;
@@ -538,12 +544,11 @@ pub fn dense(input: &[f32], weights: &[f32], bias: &[f32], output: &mut [f32]) -
     }
     for (output_index, destination) in output.iter_mut().enumerate() {
         let row = &weights[output_index * input.len()..(output_index + 1) * input.len()];
-        *destination = row
-            .iter()
-            .zip(input)
-            .map(|(weight, value)| weight * value)
-            .sum::<f32>()
-            + bias[output_index];
+        let mut acc = bias[output_index];
+        for (weight, value) in row.iter().zip(input) {
+            acc += *weight * *value;
+        }
+        *destination = acc;
     }
     true
 }
@@ -585,6 +590,8 @@ pub struct DenseBatch<'a> {
 }
 
 /// Computes a batch of dense rows using caller-owned transposition scratch.
+// Preserve the pinned scalar weighted-sum order; fusion changes result bits.
+#[allow(clippy::suboptimal_flops)]
 pub fn dense_batch(mut batch: DenseBatch<'_>) -> bool {
     let input_rows = batch.input_rows;
     let row_count = batch.row_count;
@@ -629,19 +636,17 @@ pub fn dense_batch(mut batch: DenseBatch<'_>) -> bool {
     for output_index in 0..output_dim {
         let row = &weights[output_index * input_dim..(output_index + 1) * input_dim];
         for batch_row in 0..row_count {
-            transposed_output[output_index * row_count + batch_row] = row
-                .iter()
-                .enumerate()
-                .map(|(input_index, weight)| {
-                    weight * transposed_input[input_index * row_count + batch_row]
-                })
-                .sum::<f32>();
+            let mut acc = bias[output_index];
+            for input_index in 0..input_dim {
+                acc += row[input_index] * transposed_input[input_index * row_count + batch_row];
+            }
+            transposed_output[output_index * row_count + batch_row] = acc;
         }
     }
     for row in 0..row_count {
         for output_index in 0..output_dim {
             output_rows[row * output_dim + output_index] =
-                transposed_output[output_index * row_count + row] + bias[output_index];
+                transposed_output[output_index * row_count + row];
         }
     }
     true
@@ -1115,6 +1120,43 @@ mod tests {
                 .all(|value| (*value - 4.0).abs() < f32::EPSILON)
         );
         assert!(!layer_norm_192(&input[..191], &scale, &bias, &mut output));
+    }
+
+    #[test]
+    fn layer_norm_matches_unfused_reference() {
+        let mut input = [0.0_f32; 192];
+        for (index, value) in input.iter_mut().enumerate() {
+            *value = if index % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        let scale = [1_234_567.0_f32; 192];
+        let bias = [0.1_f32; 192];
+        let mut output = [0.0_f32; 192];
+        let mut expected = [0.0_f32; 192];
+
+        assert!(layer_norm_192(&input, &scale, &bias, &mut output));
+
+        let mean = input.iter().copied().sum::<f32>() / 192.0;
+        let variance = input
+            .iter()
+            .map(|value| {
+                let centered = *value - mean;
+                centered * centered
+            })
+            .sum::<f32>()
+            / 192.0;
+        let inverse_std = (variance + 1.0e-5).sqrt().recip();
+        for index in 0..192 {
+            let normalized = (input[index] - mean) * inverse_std;
+            expected[index] = normalized * scale[index] + bias[index];
+        }
+
+        for (index, (actual, reference)) in output.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                reference.to_bits(),
+                "layer norm output mismatch at index {index}"
+            );
+        }
     }
 
     #[test]

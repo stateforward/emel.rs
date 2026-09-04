@@ -13,4 +13,4 @@ pub struct SpeakerSegment {
     /// Model-assigned speaker index.
     pub speaker: u32,
 }
-pub(crate) mod sortformer;
+pub mod sortformer;

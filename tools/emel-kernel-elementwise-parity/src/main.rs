@@ -20,8 +20,10 @@ const fn status(result: Result<(), Error>) -> &'static str {
     match result {
         Ok(()) => "ok",
         Err(Error::InvalidShape) => "invalid_shape",
-        Err(Error::UnsupportedOperation(_)) => "unsupported",
-        Err(Error::UnexpectedEvent | Error::Internal) => "internal_error",
+        Err(Error::UnsupportedOperation(_) | Error::UnsupportedKernelKind(_)) => "unsupported",
+        Err(Error::UnexpectedEvent | Error::Internal | Error::KernelUnavailable(_)) => {
+            "internal_error"
+        }
     }
 }
 

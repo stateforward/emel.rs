@@ -77,13 +77,13 @@ impl AllocatorEventAllocateGraphPlan {
 
 sml! {
     GraphAllocatorOrderingPass {
-        "allocate_failed"_s <= *"deciding"_s + completion<AllocatorEventAllocateGraphPlan> [phase_prefailed] / mark_failed_prefailed,
-        "allocated"_s <= "deciding"_s + completion<AllocatorEventAllocateGraphPlan> [phase_done] / mark_done,
-        "allocate_failed"_s <= "deciding"_s + completion<AllocatorEventAllocateGraphPlan> [phase_prereq_failed] / mark_failed_prereq,
-        "allocate_failed"_s <= "deciding"_s + completion<AllocatorEventAllocateGraphPlan> [phase_capacity_exceeded] / mark_failed_capacity,
-        "allocate_failed"_s <= "deciding"_s + completion<AllocatorEventAllocateGraphPlan> [phase_overflow] / mark_failed_overflow,
-        "allocate_failed"_s <= "deciding"_s + completion<AllocatorEventAllocateGraphPlan> [phase_invalid_request] / mark_failed_invalid_request,
-        "allocate_failed"_s <= "deciding"_s + completion<AllocatorEventAllocateGraphPlan> / mark_failed_internal,
+        "allocate_failed"_s <= *"deciding"_s + event<AllocatorEventAllocateGraphPlan> [phase_prefailed] / mark_failed_prefailed,
+        "allocated"_s <= "deciding"_s + event<AllocatorEventAllocateGraphPlan> [phase_done] / mark_done,
+        "allocate_failed"_s <= "deciding"_s + event<AllocatorEventAllocateGraphPlan> [phase_prereq_failed] / mark_failed_prereq,
+        "allocate_failed"_s <= "deciding"_s + event<AllocatorEventAllocateGraphPlan> [phase_capacity_exceeded] / mark_failed_capacity,
+        "allocate_failed"_s <= "deciding"_s + event<AllocatorEventAllocateGraphPlan> [phase_overflow] / mark_failed_overflow,
+        "allocate_failed"_s <= "deciding"_s + event<AllocatorEventAllocateGraphPlan> [phase_invalid_request] / mark_failed_invalid_request,
+        "allocate_failed"_s <= "deciding"_s + event<AllocatorEventAllocateGraphPlan> / mark_failed_internal,
         "unexpected_event"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
         "unexpected_event"_s <= "allocated"_s + unexpected_event<_> / on_unexpected_from_allocated,
         "unexpected_event"_s <= "allocate_failed"_s + unexpected_event<_> / on_unexpected_from_allocate_failed,
@@ -134,48 +134,55 @@ impl GraphAllocatorOrderingPassContext {
 
 impl GraphAllocatorOrderingPassContext {
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.outcome
+    }
 
     #[must_use]
-    pub const fn error(&self) -> AllocationError { self.error }
+    pub const fn error(&self) -> AllocationError {
+        self.error
+    }
 }
 
 fn overflow(lhs: u32, rhs: u64) -> bool {
     lhs != 0 && rhs > u64::MAX / u64::from(lhs)
 }
 impl GraphAllocatorOrderingPassStateMachineContext for GraphAllocatorOrderingPassContext {
-    fn mark_done(&mut self) -> Result<(), ()> {
+    fn mark_done(&mut self, _: &AllocatorEventAllocateGraphPlan) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Done;
         self.sorted_tensor_count = self.required_intervals;
         self.required_buffer_bytes = u64::from(self.required_intervals) * self.bytes_per_tensor;
         self.error = AllocationError::None;
         Ok(())
     }
-    fn mark_failed_capacity(&mut self) -> Result<(), ()> {
+    fn mark_failed_capacity(&mut self, _: &AllocatorEventAllocateGraphPlan) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Failed;
         self.error = AllocationError::Capacity;
         Ok(())
     }
-    fn mark_failed_internal(&mut self) -> Result<(), ()> {
+    fn mark_failed_internal(&mut self, _: &AllocatorEventAllocateGraphPlan) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Failed;
         self.error = AllocationError::Internal;
         Ok(())
     }
-    fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
+    fn mark_failed_invalid_request(
+        &mut self,
+        _: &AllocatorEventAllocateGraphPlan,
+    ) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Failed;
         self.error = AllocationError::InvalidRequest;
         Ok(())
     }
-    fn mark_failed_overflow(&mut self) -> Result<(), ()> {
+    fn mark_failed_overflow(&mut self, _: &AllocatorEventAllocateGraphPlan) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Failed;
         self.error = AllocationError::Capacity;
         Ok(())
     }
-    fn mark_failed_prefailed(&mut self) -> Result<(), ()> {
+    fn mark_failed_prefailed(&mut self, _: &AllocatorEventAllocateGraphPlan) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Failed;
         Ok(())
     }
-    fn mark_failed_prereq(&mut self) -> Result<(), ()> {
+    fn mark_failed_prereq(&mut self, _: &AllocatorEventAllocateGraphPlan) -> Result<(), ()> {
         self.outcome = PhaseOutcome::Failed;
         self.error = AllocationError::Internal;
         Ok(())
@@ -200,12 +207,12 @@ impl GraphAllocatorOrderingPassStateMachineContext for GraphAllocatorOrderingPas
         self.error = AllocationError::Internal;
         Ok(())
     }
-    fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
+    fn phase_capacity_exceeded(&self, _: &AllocatorEventAllocateGraphPlan) -> Result<bool, ()> {
         Ok(self.error == AllocationError::None
             && self.liveness_outcome == PhaseOutcome::Done
             && self.required_intervals > self.interval_capacity)
     }
-    fn phase_done(&self) -> Result<bool, ()> {
+    fn phase_done(&self, _: &AllocatorEventAllocateGraphPlan) -> Result<bool, ()> {
         Ok(self.error == AllocationError::None
             && self.liveness_outcome == PhaseOutcome::Done
             && self.required_intervals != 0
@@ -213,12 +220,12 @@ impl GraphAllocatorOrderingPassStateMachineContext for GraphAllocatorOrderingPas
             && self.bytes_per_tensor != 0
             && !overflow(self.required_intervals, self.bytes_per_tensor))
     }
-    fn phase_invalid_request(&self) -> Result<bool, ()> {
+    fn phase_invalid_request(&self, _: &AllocatorEventAllocateGraphPlan) -> Result<bool, ()> {
         Ok(self.error == AllocationError::None
             && self.liveness_outcome == PhaseOutcome::Done
             && (self.required_intervals == 0 || self.bytes_per_tensor == 0))
     }
-    fn phase_overflow(&self) -> Result<bool, ()> {
+    fn phase_overflow(&self, _: &AllocatorEventAllocateGraphPlan) -> Result<bool, ()> {
         Ok(self.error == AllocationError::None
             && self.liveness_outcome == PhaseOutcome::Done
             && self.required_intervals != 0
@@ -226,10 +233,10 @@ impl GraphAllocatorOrderingPassStateMachineContext for GraphAllocatorOrderingPas
             && self.bytes_per_tensor != 0
             && overflow(self.required_intervals, self.bytes_per_tensor))
     }
-    fn phase_prefailed(&self) -> Result<bool, ()> {
+    fn phase_prefailed(&self, _: &AllocatorEventAllocateGraphPlan) -> Result<bool, ()> {
         Ok(self.error != AllocationError::None)
     }
-    fn phase_prereq_failed(&self) -> Result<bool, ()> {
+    fn phase_prereq_failed(&self, _: &AllocatorEventAllocateGraphPlan) -> Result<bool, ()> {
         Ok(self.error == AllocationError::None && self.liveness_outcome != PhaseOutcome::Done)
     }
 }
@@ -239,7 +246,9 @@ pub struct GraphAllocatorOrderingPassActor {
 }
 
 impl Default for GraphAllocatorOrderingPassActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphAllocatorOrderingPassActor {
@@ -260,12 +269,12 @@ impl GraphAllocatorOrderingPassActor {
         }
         self.machine.context_mut().set_event(event);
         self.machine
-            .process_event(GraphAllocatorOrderingPassEvents::AllocatorEventAllocateGraphPlan)
+            .process_event(GraphAllocatorOrderingPassEvents::AllocatorEventAllocateGraphPlan(event))
             .is_ok()
     }
 
     #[must_use]
-    pub fn context(&self) -> &GraphAllocatorOrderingPassContext { self.machine.context() }
+    pub fn context(&self) -> &GraphAllocatorOrderingPassContext {
+        self.machine.context()
+    }
 }
-
-pub type Actor = GraphAllocatorOrderingPassActor;

@@ -12,12 +12,17 @@
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
+    clippy::too_many_lines,
+    clippy::similar_names,
+    clippy::unused_self,
+    clippy::needless_lifetimes,
     dead_code,
     unused_imports,
     missing_docs,
     private_interfaces
 )]
 
+use core::cell::RefCell;
 use sml::sml;
 
 /// Maximum number of output fragments accepted by the pinned contract.
@@ -117,10 +122,10 @@ pub struct EventPreprocessRuntime<'a> {
     pub vocab: &'a Vocabulary<'a>,
     pub text: &'a str,
     pub parse_special: bool,
-    pub fragments_out: &'a mut [Fragment<'a>],
-    pub fragment_count_out: &'a mut usize,
-    pub preprocessed_out: Option<&'a mut bool>,
-    pub error_out: &'a mut PreprocessorError,
+    pub fragments_out: &'a RefCell<&'a mut [Fragment<'a>]>,
+    pub fragment_count_out: &'a RefCell<usize>,
+    pub preprocessed_out: Option<&'a RefCell<bool>>,
+    pub error_out: &'a RefCell<PreprocessorError>,
     pub on_done: Option<fn(&PreprocessDone)>,
     pub on_error: Option<fn(&PreprocessError)>,
 }
@@ -131,10 +136,10 @@ impl<'a> EventPreprocessRuntime<'a> {
         vocab: &'a Vocabulary<'a>,
         text: &'a str,
         parse_special: bool,
-        fragments_out: &'a mut [Fragment<'a>],
-        fragment_count_out: &'a mut usize,
-        preprocessed_out: Option<&'a mut bool>,
-        error_out: &'a mut PreprocessorError,
+        fragments_out: &'a RefCell<&'a mut [Fragment<'a>]>,
+        fragment_count_out: &'a RefCell<usize>,
+        preprocessed_out: Option<&'a RefCell<bool>>,
+        error_out: &'a RefCell<PreprocessorError>,
     ) -> Self {
         Self {
             vocab,
@@ -151,47 +156,50 @@ impl<'a> EventPreprocessRuntime<'a> {
 }
 
 sml! {
-    TextTokenizerPreprocessorSpm {
-        "request_buffer_decision"_s <= *"idle"_s + event<EventPreprocessRuntime<'dispatch>>,
-        "request_buffer_decision"_s <= "done"_s + event<EventPreprocessRuntime<'dispatch>>,
-        "request_buffer_decision"_s <= "errored"_s + event<EventPreprocessRuntime<'dispatch>>,
-        "request_buffer_decision"_s <= "unexpected"_s + event<EventPreprocessRuntime<'dispatch>>,
-        "request_capacity_nonzero_decision"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [fragments_buffer_present],
-        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [fragments_buffer_missing] / reject_invalid_from_request_buffer_decision,
-        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / reject_invalid_from_request_buffer_decision,
-        "request_capacity_limit_decision"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [fragments_capacity_nonzero],
-        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [fragments_capacity_zero] / reject_invalid_from_request_capacity_nonzero_decision,
-        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / reject_invalid_from_request_capacity_nonzero_decision,
-        "preparing"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [fragments_capacity_within_limit] / begin_preprocess,
-        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [fragments_capacity_exceeds_limit] / reject_invalid_from_request_capacity_limit_decision,
-        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / reject_invalid_from_request_capacity_limit_decision,
-        "build_specials_decision"_s <= "preparing"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / build_specials,
-        "partition_specials_decision"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [build_specials_ok],
-        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [build_specials_invalid_request_error] / ensure_last_error_from_build_specials_decision,
-        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [build_specials_backend_error] / ensure_last_error_from_build_specials_decision,
-        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [build_specials_unknown_error] / ensure_last_error_from_build_specials_decision,
-        "partitioning_no_specials_input_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [no_specials],
-        "partition_parse_special_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [has_specials],
-        "errored"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / ensure_last_error_from_partition_specials_decision,
-        "partitioning_non_bpe_parse_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [parse_special_enabled],
-        "partitioning_non_bpe_skip_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [parse_special_disabled],
-        "errored"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / ensure_last_error_from_partition_parse_special_decision,
-        "partition_decision"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [request_text_empty] / set_empty_partition_result_from_partitioning_no_specials_input_decision,
-        "partitioning_no_specials"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [request_text_nonempty],
-        "errored"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / ensure_last_error_from_partitioning_no_specials_input_decision,
-        "partition_decision"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision,
-        "partitioning_non_bpe_parse_special"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [request_text_nonempty],
-        "errored"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / ensure_last_error_from_partitioning_non_bpe_parse_input_decision,
-        "partition_decision"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision,
-        "partitioning_non_bpe_skip_special"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [request_text_nonempty],
-        "errored"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / ensure_last_error_from_partitioning_non_bpe_skip_input_decision,
-        "partition_decision"_s <= "partitioning_no_specials"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / partition_no_specials,
-        "partition_decision"_s <= "partitioning_non_bpe_parse_special"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / partition_non_bpe_parse_special,
-        "partition_decision"_s <= "partitioning_non_bpe_skip_special"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) / partition_non_bpe_skip_special,
-        "done"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [partition_ok] / mark_done,
-        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [partition_invalid_request_error] / ensure_last_error_from_partition_decision,
-        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [partition_backend_error] / ensure_last_error_from_partition_decision,
-        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(EventPreprocessRuntime<'dispatch>) [partition_unknown_error] / ensure_last_error_from_partition_decision,
+    TextTokenizerPreprocessorSpm<'dispatch, 'event>
+    where
+        'event: 'dispatch,
+    {
+        "request_buffer_decision"_s <= *"idle"_s + event<&'dispatch EventPreprocessRuntime<'event>>,
+        "request_buffer_decision"_s <= "done"_s + event<&'dispatch EventPreprocessRuntime<'event>>,
+        "request_buffer_decision"_s <= "errored"_s + event<&'dispatch EventPreprocessRuntime<'event>>,
+        "request_buffer_decision"_s <= "unexpected"_s + event<&'dispatch EventPreprocessRuntime<'event>>,
+        "request_capacity_nonzero_decision"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [fragments_buffer_present],
+        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [fragments_buffer_missing] / reject_invalid_from_request_buffer_decision,
+        "errored"_s <= "request_buffer_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / reject_invalid_from_request_buffer_decision,
+        "request_capacity_limit_decision"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [fragments_capacity_nonzero],
+        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [fragments_capacity_zero] / reject_invalid_from_request_capacity_nonzero_decision,
+        "errored"_s <= "request_capacity_nonzero_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / reject_invalid_from_request_capacity_nonzero_decision,
+        "preparing"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [fragments_capacity_within_limit] / begin_preprocess,
+        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [fragments_capacity_exceeds_limit] / reject_invalid_from_request_capacity_limit_decision,
+        "errored"_s <= "request_capacity_limit_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / reject_invalid_from_request_capacity_limit_decision,
+        "build_specials_decision"_s <= "preparing"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / build_specials,
+        "partition_specials_decision"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [build_specials_ok],
+        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [build_specials_invalid_request_error] / ensure_last_error_from_build_specials_decision,
+        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [build_specials_backend_error] / ensure_last_error_from_build_specials_decision,
+        "errored"_s <= "build_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [build_specials_unknown_error] / ensure_last_error_from_build_specials_decision,
+        "partitioning_no_specials_input_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [no_specials],
+        "partition_parse_special_decision"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [has_specials],
+        "errored"_s <= "partition_specials_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / ensure_last_error_from_partition_specials_decision,
+        "partitioning_non_bpe_parse_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [parse_special_enabled],
+        "partitioning_non_bpe_skip_input_decision"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [parse_special_disabled],
+        "errored"_s <= "partition_parse_special_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / ensure_last_error_from_partition_parse_special_decision,
+        "partition_decision"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [request_text_empty] / set_empty_partition_result_from_partitioning_no_specials_input_decision,
+        "partitioning_no_specials"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [request_text_nonempty],
+        "errored"_s <= "partitioning_no_specials_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / ensure_last_error_from_partitioning_no_specials_input_decision,
+        "partition_decision"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision,
+        "partitioning_non_bpe_parse_special"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [request_text_nonempty],
+        "errored"_s <= "partitioning_non_bpe_parse_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / ensure_last_error_from_partitioning_non_bpe_parse_input_decision,
+        "partition_decision"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [request_text_empty] / set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision,
+        "partitioning_non_bpe_skip_special"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [request_text_nonempty],
+        "errored"_s <= "partitioning_non_bpe_skip_input_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / ensure_last_error_from_partitioning_non_bpe_skip_input_decision,
+        "partition_decision"_s <= "partitioning_no_specials"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / partition_no_specials,
+        "partition_decision"_s <= "partitioning_non_bpe_parse_special"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / partition_non_bpe_parse_special,
+        "partition_decision"_s <= "partitioning_non_bpe_skip_special"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) / partition_non_bpe_skip_special,
+        "done"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [partition_ok] / mark_done,
+        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [partition_invalid_request_error] / ensure_last_error_from_partition_decision,
+        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [partition_backend_error] / ensure_last_error_from_partition_decision,
+        "errored"_s <= "partition_decision"_s + completion<EventPreprocessRuntime>(&'dispatch EventPreprocessRuntime<'event>) [partition_unknown_error] / ensure_last_error_from_partition_decision,
         "unexpected"_s <= "idle"_s + unexpected_event<_> / on_unexpected_from_idle,
         "unexpected"_s <= "request_buffer_decision"_s + unexpected_event<_> / on_unexpected_from_request_buffer_decision,
         "unexpected"_s <= "request_capacity_nonzero_decision"_s + unexpected_event<_> / on_unexpected_from_request_capacity_nonzero_decision,
@@ -258,11 +266,11 @@ impl Default for TextTokenizerPreprocessorSpmContext {
 
 impl TextTokenizerPreprocessorSpmContext {
     fn clear(&mut self, event: &EventPreprocessRuntime<'_>) {
-        *event.fragment_count_out = 0;
-        if let Some(preprocessed) = event.preprocessed_out.as_deref_mut() {
-            *preprocessed = false;
+        *event.fragment_count_out.borrow_mut() = 0;
+        if let Some(preprocessed) = event.preprocessed_out {
+            *preprocessed.borrow_mut() = false;
         }
-        *event.error_out = PreprocessorError::None;
+        *event.error_out.borrow_mut() = PreprocessorError::None;
         self.fragment_count = 0;
         self.preprocessed = false;
         self.phase_error = PreprocessorError::None;
@@ -274,7 +282,11 @@ impl TextTokenizerPreprocessorSpmContext {
     fn set_phase_result(&mut self, ok: bool, count: usize, preprocessed: bool) {
         self.fragment_count = if ok { count } else { 0 };
         self.preprocessed = ok && preprocessed;
-        self.phase_error = if ok { PreprocessorError::None } else { PreprocessorError::InvalidRequest };
+        self.phase_error = if ok {
+            PreprocessorError::None
+        } else {
+            PreprocessorError::InvalidRequest
+        };
         self.err = self.phase_error;
         self.result = false;
     }
@@ -296,7 +308,11 @@ impl TextTokenizerPreprocessorSpmContext {
         self.result = false;
     }
 
-    fn token(&self, event: &EventPreprocessRuntime<'_>, id: usize) -> Option<VocabularyToken<'_>> {
+    fn token<'a>(
+        &self,
+        event: &EventPreprocessRuntime<'a>,
+        id: usize,
+    ) -> Option<VocabularyToken<'a>> {
         event.vocab.tokens.get(id).copied()
     }
 
@@ -314,26 +330,72 @@ impl TextTokenizerPreprocessorSpmContext {
         true
     }
 
+    fn materialize<'a>(
+        source: &'a str,
+        scratch: &[ScratchFragment; MAX_FRAGMENTS],
+        count: usize,
+        output: &mut [Fragment<'a>],
+    ) -> bool {
+        if count > output.len() || count > MAX_FRAGMENTS {
+            return false;
+        }
+        for index in 0..count {
+            let fragment = scratch[index];
+            if fragment.kind == FragmentKind::Token {
+                if fragment.token < 0 {
+                    return false;
+                }
+                output[index] = Fragment {
+                    kind: FragmentKind::Token,
+                    text: "",
+                    token: fragment.token,
+                };
+            } else {
+                let Some(text) = source.get(fragment.start..fragment.end) else {
+                    return false;
+                };
+                output[index] = Fragment {
+                    kind: FragmentKind::RawText,
+                    text,
+                    token: -1,
+                };
+            }
+        }
+        true
+    }
+
     fn partition(&mut self, event: &EventPreprocessRuntime<'_>, allow_skipped: bool) -> bool {
-        let capacity = event.fragments_out.len();
+        let mut output = event.fragments_out.borrow_mut();
+        let capacity = output.len();
         let mut current_count = 0usize;
         if !Self::push_scratch(
             &mut self.scratch_a,
             &mut current_count,
-            ScratchFragment { kind: FragmentKind::RawText, start: 0, end: event.text.len(), token: -1 },
+            ScratchFragment {
+                kind: FragmentKind::RawText,
+                start: 0,
+                end: event.text.len(),
+                token: -1,
+            },
             capacity,
         ) {
             self.set_phase_result(false, 0, false);
             return false;
         }
-
         for special_index in 0..self.special_count {
             let id = self.specials[special_index].id;
             let Some(token) = self.token(event, id) else {
                 self.set_phase_result(false, 0, false);
                 return false;
             };
-            if token.text.is_empty() || (!allow_skipped && matches!(token.token_type, TokenType::Control | TokenType::Unknown)) {
+            let token_text = token.text;
+            let token_id = token.token;
+            let token_lstrip = token.lstrip;
+            let token_rstrip = token.rstrip;
+            if token_text.is_empty()
+                || (!allow_skipped
+                    && matches!(token.token_type, TokenType::Control | TokenType::Unknown))
+            {
                 continue;
             }
             let mut next_count = 0usize;
@@ -341,48 +403,74 @@ impl TextTokenizerPreprocessorSpmContext {
             for fragment_index in 0..current_count {
                 let fragment = self.scratch_a[fragment_index];
                 if fragment.kind == FragmentKind::Token {
-                    ok = ok && Self::push_scratch(
-                        &mut self.scratch_b,
-                        &mut next_count,
-                        fragment,
-                        capacity,
-                    );
+                    ok = ok
+                        && Self::push_scratch(
+                            &mut self.scratch_b,
+                            &mut next_count,
+                            fragment,
+                            capacity,
+                        );
                     continue;
                 }
                 let raw = &event.text[fragment.start..fragment.end];
                 let mut base = 0usize;
                 while base < raw.len() {
-                    let Some(relative) = raw[base..].find(token.text) else {
-                        ok = ok && Self::push_scratch(
-                            &mut self.scratch_b,
-                            &mut next_count,
-                            ScratchFragment { kind: FragmentKind::RawText, start: fragment.start + base, end: fragment.end, token: -1 },
-                            capacity,
-                        );
+                    let Some(relative) = raw[base..].find(token_text) else {
+                        ok = ok
+                            && Self::push_scratch(
+                                &mut self.scratch_b,
+                                &mut next_count,
+                                ScratchFragment {
+                                    kind: FragmentKind::RawText,
+                                    start: fragment.start + base,
+                                    end: fragment.end,
+                                    token: -1,
+                                },
+                                capacity,
+                            );
                         base = raw.len();
                         continue;
                     };
                     let match_at = base + relative;
                     let mut left_len = match_at - base;
-                    if token.lstrip {
-                        while left_len > 0 && raw.as_bytes()[base + left_len - 1].is_ascii_whitespace() {
+                    if token_lstrip {
+                        while left_len > 0
+                            && raw.as_bytes()[base + left_len - 1].is_ascii_whitespace()
+                        {
                             left_len -= 1;
                         }
                     }
-                    ok = ok && Self::push_scratch(
-                        &mut self.scratch_b,
-                        &mut next_count,
-                        ScratchFragment { kind: FragmentKind::RawText, start: fragment.start + base, end: fragment.start + base + left_len, token: -1 },
-                        capacity,
-                    );
-                    ok = ok && Self::push_scratch(
-                        &mut self.scratch_b,
-                        &mut next_count,
-                        ScratchFragment { kind: FragmentKind::Token, start: 0, end: 0, token: token.token },
-                        capacity,
-                    );
-                    base = match_at + token.text.len();
-                    if token.rstrip {
+                    if left_len != 0 {
+                        ok = ok
+                            && Self::push_scratch(
+                                &mut self.scratch_b,
+                                &mut next_count,
+                                ScratchFragment {
+                                    kind: FragmentKind::RawText,
+                                    start: fragment.start + base,
+                                    end: fragment.start + base + left_len,
+                                    token: -1,
+                                },
+                                capacity,
+                            );
+                    }
+                    if token_id < 0
+                        || !Self::push_scratch(
+                            &mut self.scratch_b,
+                            &mut next_count,
+                            ScratchFragment {
+                                kind: FragmentKind::Token,
+                                start: 0,
+                                end: 0,
+                                token: token_id,
+                            },
+                            capacity,
+                        )
+                    {
+                        ok = false;
+                    }
+                    base = match_at + token_text.len();
+                    if token_rstrip {
                         while base < raw.len() && raw.as_bytes()[base].is_ascii_whitespace() {
                             base += 1;
                         }
@@ -402,21 +490,9 @@ impl TextTokenizerPreprocessorSpmContext {
             core::mem::swap(&mut self.scratch_a, &mut self.scratch_b);
             current_count = next_count;
         }
-
-        if current_count > capacity {
+        if !Self::materialize(event.text, &self.scratch_a, current_count, &mut output) {
             self.set_phase_result(false, 0, false);
             return false;
-        }
-        for index in 0..current_count {
-            let fragment = self.scratch_a[index];
-            let output = &mut event.fragments_out[index];
-            output.kind = fragment.kind;
-            output.token = fragment.token;
-            output.text = if fragment.kind == FragmentKind::RawText {
-                &event.text[fragment.start..fragment.end]
-            } else {
-                ""
-            };
         }
         self.set_phase_result(true, current_count, true);
         true
@@ -424,34 +500,45 @@ impl TextTokenizerPreprocessorSpmContext {
 }
 
 impl TextTokenizerPreprocessorSpmStateMachineContext for TextTokenizerPreprocessorSpmContext {
-    fn begin_preprocess(&mut self, event: &EventPreprocessRuntime<'_>) -> Result<(), ()> {
+    fn begin_preprocess<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
         self.clear(event);
         Ok(())
     }
-
-    fn build_specials(&mut self, event: &EventPreprocessRuntime<'_>) -> Result<(), ()> {
+    fn build_specials<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
         self.special_count = 0;
         for (id, token) in event.vocab.tokens.iter().enumerate() {
-            let special = !token.text.is_empty()
-                && matches!(token.token_type, TokenType::Unknown | TokenType::Control | TokenType::UserDefined);
-            if !special {
-                continue;
+            if !token.text.is_empty()
+                && matches!(
+                    token.token_type,
+                    TokenType::Unknown | TokenType::Control | TokenType::UserDefined
+                )
+            {
+                if self.special_count >= MAX_SPECIAL_TOKENS {
+                    self.set_phase_result(false, 0, false);
+                    return Ok(());
+                }
+                self.specials[self.special_count] = CachedSpecial { id };
+                self.special_count += 1;
             }
-            if self.special_count >= MAX_SPECIAL_TOKENS {
-                self.set_phase_result(false, 0, false);
-                return Ok(());
-            }
-            self.specials[self.special_count] = CachedSpecial { id };
-            self.special_count += 1;
         }
         for index in 1..self.special_count {
             let mut position = index;
             while position > 0 {
                 let left = self.specials[position - 1].id;
                 let right = self.specials[position].id;
-                let left_len = event.vocab.tokens[left].text.len();
-                let right_len = event.vocab.tokens[right].text.len();
-                if left_len >= right_len {
+                if event.vocab.tokens[left].text.len() >= event.vocab.tokens[right].text.len() {
                     break;
                 }
                 self.specials.swap(position - 1, position);
@@ -461,135 +548,528 @@ impl TextTokenizerPreprocessorSpmStateMachineContext for TextTokenizerPreprocess
         self.set_phase_result(true, 0, false);
         Ok(())
     }
-
-    fn build_specials_backend_error(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.phase_error == PreprocessorError::BackendError) }
-    fn build_specials_invalid_request_error(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.phase_error == PreprocessorError::InvalidRequest) }
-    fn build_specials_ok(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.phase_error == PreprocessorError::None) }
-    fn build_specials_unknown_error(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(false) }
-
-    fn ensure_last_error_from_build_specials_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-    fn ensure_last_error_from_partition_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-    fn ensure_last_error_from_partition_parse_special_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-    fn ensure_last_error_from_partition_specials_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-    fn ensure_last_error_from_partitioning_no_specials_input_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-    fn ensure_last_error_from_partitioning_non_bpe_parse_input_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-    fn ensure_last_error_from_partitioning_non_bpe_skip_input_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.ensure_error(); Ok(()) }
-
-    fn fragments_buffer_missing(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(event.fragments_out.is_empty()) }
-    fn fragments_buffer_present(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(!event.fragments_out.is_empty()) }
-    fn fragments_capacity_exceeds_limit(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(event.fragments_out.len() > MAX_FRAGMENTS) }
-    fn fragments_capacity_nonzero(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(!event.fragments_out.is_empty()) }
-    fn fragments_capacity_within_limit(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(event.fragments_out.len() <= MAX_FRAGMENTS) }
-    fn fragments_capacity_zero(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(event.fragments_out.is_empty()) }
-    fn has_specials(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.special_count != 0) }
-
-    fn mark_done(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> {
+    fn build_specials_backend_error<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.phase_error == PreprocessorError::BackendError)
+    }
+    fn build_specials_invalid_request_error<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.phase_error == PreprocessorError::InvalidRequest)
+    }
+    fn build_specials_ok<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.phase_error == PreprocessorError::None)
+    }
+    fn build_specials_unknown_error<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(false)
+    }
+    fn ensure_last_error_from_build_specials_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn ensure_last_error_from_partition_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn ensure_last_error_from_partition_parse_special_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn ensure_last_error_from_partition_specials_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn ensure_last_error_from_partitioning_no_specials_input_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn ensure_last_error_from_partitioning_non_bpe_parse_input_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn ensure_last_error_from_partitioning_non_bpe_skip_input_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.ensure_error();
+        Ok(())
+    }
+    fn fragments_buffer_missing<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.fragments_out.borrow().is_empty())
+    }
+    fn fragments_buffer_present<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!event.fragments_out.borrow().is_empty())
+    }
+    fn fragments_capacity_exceeds_limit<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.fragments_out.borrow().len() > MAX_FRAGMENTS)
+    }
+    fn fragments_capacity_nonzero<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!event.fragments_out.borrow().is_empty())
+    }
+    fn fragments_capacity_within_limit<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.fragments_out.borrow().len() <= MAX_FRAGMENTS)
+    }
+    fn fragments_capacity_zero<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.fragments_out.borrow().is_empty())
+    }
+    fn has_specials<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.special_count != 0)
+    }
+    fn no_specials<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.special_count == 0)
+    }
+    fn partition_invalid_request_error<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.phase_error == PreprocessorError::InvalidRequest)
+    }
+    fn partition_ok<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.phase_error == PreprocessorError::None)
+    }
+    fn partition_unknown_error<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(false)
+    }
+    fn parse_special_disabled<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!event.parse_special)
+    }
+    fn parse_special_enabled<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.parse_special)
+    }
+    fn reject_invalid_from_request_buffer_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.phase_error = PreprocessorError::InvalidRequest;
+        self.ensure_error();
+        Ok(())
+    }
+    fn on_unexpected_from_build_specials_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn mark_done<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
         self.phase_error = PreprocessorError::None;
         self.err = PreprocessorError::None;
         self.result = true;
         Ok(())
     }
-
-    fn no_specials(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.special_count == 0) }
-
-    fn on_unexpected_from_build_specials_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_done(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_idle(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partition_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partition_parse_special_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partition_specials_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partitioning_no_specials(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partitioning_no_specials_input_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partitioning_non_bpe_parse_input_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partitioning_non_bpe_parse_special(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partitioning_non_bpe_skip_input_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_partitioning_non_bpe_skip_special(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_preparing(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_request_buffer_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_request_capacity_limit_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_request_capacity_nonzero_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-
-    fn parse_special_disabled(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(!event.parse_special) }
-    fn parse_special_enabled(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(event.parse_special) }
-    fn partition_backend_error(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.phase_error == PreprocessorError::BackendError) }
-    fn partition_invalid_request_error(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.phase_error == PreprocessorError::InvalidRequest) }
-    fn partition_no_specials(&mut self, event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.partition(event, true); Ok(()) }
-    fn partition_non_bpe_parse_special(&mut self, event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.partition(event, true); Ok(()) }
-    fn partition_non_bpe_skip_special(&mut self, event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.partition(event, false); Ok(()) }
-    fn partition_ok(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(self.phase_error == PreprocessorError::None) }
-    fn partition_unknown_error(&self, _event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(false) }
-
-    fn reject_invalid_from_request_buffer_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.phase_error = PreprocessorError::InvalidRequest; self.ensure_error(); Ok(()) }
-    fn reject_invalid_from_request_capacity_limit_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.phase_error = PreprocessorError::InvalidRequest; self.ensure_error(); Ok(()) }
-    fn reject_invalid_from_request_capacity_nonzero_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.phase_error = PreprocessorError::InvalidRequest; self.ensure_error(); Ok(()) }
-
-    fn request_text_empty(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(event.text.is_empty()) }
-    fn request_text_nonempty(&self, event: &EventPreprocessRuntime<'_>) -> Result<bool, ()> { Ok(!event.text.is_empty()) }
-
-    fn set_empty_partition_result_from_partitioning_no_specials_input_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.set_phase_result(true, 0, true); Ok(()) }
-    fn set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.set_phase_result(true, 0, true); Ok(()) }
-    fn set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision(&mut self, _event: &EventPreprocessRuntime<'_>) -> Result<(), ()> { self.set_phase_result(true, 0, true); Ok(()) }
+    fn partition_backend_error<'dispatch, 'event>(
+        &self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(self.phase_error == PreprocessorError::BackendError)
+    }
+    fn on_unexpected_from_done(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_errored(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_idle(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partition_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partition_parse_special_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partition_specials_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partitioning_no_specials(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partitioning_no_specials_input_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partitioning_non_bpe_parse_input_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partitioning_non_bpe_parse_special(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partitioning_non_bpe_skip_input_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_partitioning_non_bpe_skip_special(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_preparing(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_request_buffer_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_request_capacity_limit_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_request_capacity_nonzero_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_unexpected(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn partition_no_specials<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.partition(event, true);
+        Ok(())
+    }
+    fn partition_non_bpe_parse_special<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.partition(event, true);
+        Ok(())
+    }
+    fn partition_non_bpe_skip_special<'dispatch, 'event>(
+        &mut self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.partition(event, false);
+        Ok(())
+    }
+    fn reject_invalid_from_request_capacity_limit_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.phase_error = PreprocessorError::InvalidRequest;
+        self.ensure_error();
+        Ok(())
+    }
+    fn reject_invalid_from_request_capacity_nonzero_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.phase_error = PreprocessorError::InvalidRequest;
+        self.ensure_error();
+        Ok(())
+    }
+    fn request_text_empty<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(event.text.is_empty())
+    }
+    fn request_text_nonempty<'dispatch, 'event>(
+        &self,
+        event: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<bool, ()>
+    where
+        'event: 'dispatch,
+    {
+        Ok(!event.text.is_empty())
+    }
+    fn set_empty_partition_result_from_partitioning_no_specials_input_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.set_phase_result(true, 0, true);
+        Ok(())
+    }
+    fn set_empty_partition_result_from_partitioning_non_bpe_parse_input_decision<
+        'dispatch,
+        'event,
+    >(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.set_phase_result(true, 0, true);
+        Ok(())
+    }
+    fn set_empty_partition_result_from_partitioning_non_bpe_skip_input_decision<'dispatch, 'event>(
+        &mut self,
+        _: &'dispatch EventPreprocessRuntime<'event>,
+    ) -> Result<(), ()>
+    where
+        'event: 'dispatch,
+    {
+        self.set_phase_result(true, 0, true);
+        Ok(())
+    }
 }
 
 /// Single-writer, synchronous SPM preprocessor actor.
-pub struct TextTokenizerPreprocessorSpm<'event> {
-    machine: TextTokenizerPreprocessorSpmStateMachine<'event, TextTokenizerPreprocessorSpmContext>,
+pub struct TextTokenizerPreprocessorSpm {
+    machine: TextTokenizerPreprocessorSpmStateMachine<TextTokenizerPreprocessorSpmContext>,
     last_error: PreprocessorError,
     fragment_count: usize,
 }
 
-impl<'event> Default for TextTokenizerPreprocessorSpm<'event> {
-    fn default() -> Self { Self::new() }
+impl Default for TextTokenizerPreprocessorSpm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl<'event> TextTokenizerPreprocessorSpm<'event> {
+impl TextTokenizerPreprocessorSpm {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: TextTokenizerPreprocessorSpmStateMachine::new(TextTokenizerPreprocessorSpmContext::default()),
+            machine: TextTokenizerPreprocessorSpmStateMachine::new(
+                TextTokenizerPreprocessorSpmContext::default(),
+            ),
             last_error: PreprocessorError::None,
             fragment_count: 0,
         }
     }
 
-    /// Dispatches one borrowed request through the complete preprocessing flow.
-    pub fn process_event(&mut self, mut event: EventPreprocessRuntime<'event>) -> Result<PreprocessDone, PreprocessorError> {
-        let accepted = self.machine.process_event(TextTokenizerPreprocessorSpmEvents::EventPreprocessRuntime(&event)).is_ok();
+    pub fn process_event(
+        &mut self,
+        event: EventPreprocessRuntime<'_>,
+    ) -> Result<PreprocessDone, PreprocessorError> {
+        let accepted = self
+            .machine
+            .process_event(TextTokenizerPreprocessorSpmEvents::EventPreprocessRuntime(
+                &event,
+            ))
+            .is_ok();
+        let done = self.machine.is(&TextTokenizerPreprocessorSpmStates::Done);
         let context = self.machine.context_mut();
-        let ok = accepted && context.result;
-        let error = if ok { PreprocessorError::None } else if context.err == PreprocessorError::None { PreprocessorError::BackendError } else { context.err };
+        let ok = accepted && done && context.result;
+        let error = if ok {
+            PreprocessorError::None
+        } else if context.err == PreprocessorError::None {
+            PreprocessorError::BackendError
+        } else {
+            context.err
+        };
         context.err = error;
         self.last_error = error;
         self.fragment_count = if ok { context.fragment_count } else { 0 };
-        *event.fragment_count_out = self.fragment_count;
-        if let Some(preprocessed) = event.preprocessed_out.as_deref_mut() {
-            *preprocessed = ok && context.preprocessed;
+        *event.fragment_count_out.borrow_mut() = self.fragment_count;
+        if let Some(preprocessed) = event.preprocessed_out {
+            *preprocessed.borrow_mut() = ok && context.preprocessed;
         }
-        *event.error_out = error;
+        *event.error_out.borrow_mut() = error;
         if ok {
-            let done = PreprocessDone { fragment_count: self.fragment_count };
-            if let Some(callback) = event.on_done { callback(&done); }
+            let done = PreprocessDone {
+                fragment_count: self.fragment_count,
+            };
+            if let Some(callback) = event.on_done {
+                callback(&done);
+            }
             Ok(done)
         } else {
             let failure = PreprocessError { error };
-            if let Some(callback) = event.on_error { callback(&failure); }
+            if let Some(callback) = event.on_error {
+                callback(&failure);
+            }
             Err(error)
         }
     }
 
     #[must_use]
-    pub fn last_error(&self) -> PreprocessorError { self.last_error }
+    pub fn last_error(&self) -> PreprocessorError {
+        self.last_error
+    }
     #[must_use]
-    pub fn fragment_count(&self) -> usize { self.fragment_count }
+    pub fn fragment_count(&self) -> usize {
+        self.fragment_count
+    }
     #[must_use]
-    pub fn state(&self) -> &TextTokenizerPreprocessorSpmStates { self.machine.state() }
+    pub fn state(&self) -> &TextTokenizerPreprocessorSpmStates {
+        self.machine.state()
+    }
     #[must_use]
-    pub fn is(&self, state: &TextTokenizerPreprocessorSpmStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &TextTokenizerPreprocessorSpmStates) -> bool {
+        self.machine.is(state)
+    }
     #[must_use]
-    pub fn context(&self) -> &TextTokenizerPreprocessorSpmContext { self.machine.context() }
+    pub fn context(&self) -> &TextTokenizerPreprocessorSpmContext {
+        self.machine.context()
+    }
 }
 
-/// Concise actor alias matching the pinned machine name.
-pub type SpmPreprocessor<'event> = TextTokenizerPreprocessorSpm<'event>;
+pub type SpmPreprocessor = TextTokenizerPreprocessorSpm;

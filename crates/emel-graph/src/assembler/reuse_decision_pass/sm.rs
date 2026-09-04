@@ -11,12 +11,11 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
+    clippy::too_many_arguments,
     clippy::missing_const_for_fn,
     dead_code,
     unused_imports,
-    missing_docs,
-    private_interfaces
+    missing_docs
 )]
 
 use sml::sml;
@@ -219,15 +218,17 @@ impl GraphAssemblerReuseDecisionPassContext {
     }
 
     #[must_use]
-    pub const fn outcome(&self) -> ReuseOutcome { self.reuse_outcome }
+    pub const fn outcome(&self) -> ReuseOutcome {
+        self.reuse_outcome
+    }
 
     #[must_use]
-    pub const fn error(&self) -> AssemblerError { self.err }
+    pub const fn error(&self) -> AssemblerError {
+        self.err
+    }
 }
 
-impl GraphAssemblerReuseDecisionPassStateMachineContext
-    for GraphAssemblerReuseDecisionPassContext
-{
+impl GraphAssemblerReuseDecisionPassStateMachineContext for GraphAssemblerReuseDecisionPassContext {
     fn mark_failed_invalid_request(&mut self) -> Result<(), ()> {
         self.reuse_outcome = ReuseOutcome::Failed;
         self.err = AssemblerError::InvalidRequest;
@@ -346,7 +347,9 @@ pub struct ReuseDecisionPass {
 }
 
 impl Default for ReuseDecisionPass {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReuseDecisionPass {
@@ -362,13 +365,16 @@ impl ReuseDecisionPass {
 
     /// Copies and dispatches one completion event synchronously.
     pub fn process_event(&mut self, event: AssemblerEventAssembleGraph) -> ReuseOutcome {
-        if !self.machine.is(&GraphAssemblerReuseDecisionPassStates::Deciding) {
+        if !self
+            .machine
+            .is(&GraphAssemblerReuseDecisionPassStates::Deciding)
+        {
             return self.process_unexpected_event();
         }
         self.machine.context_mut().set_event(event);
-        let _ = self.machine.process_event(
-            GraphAssemblerReuseDecisionPassEvents::AssemblerEventAssembleGraph(event),
-        );
+        let _ = self
+            .machine
+            .process_event(GraphAssemblerReuseDecisionPassEvents::AssemblerEventAssembleGraph);
         self.machine.context().reuse_outcome
     }
 
@@ -402,11 +408,15 @@ impl ReuseDecisionPass {
 
     /// Returns the selected outcome.
     #[must_use]
-    pub fn outcome(&self) -> ReuseOutcome { self.machine.context().reuse_outcome }
+    pub fn outcome(&self) -> ReuseOutcome {
+        self.machine.context().reuse_outcome
+    }
 
     /// Returns the effective phase error.
     #[must_use]
-    pub fn error(&self) -> AssemblerError { self.machine.context().err }
+    pub fn error(&self) -> AssemblerError {
+        self.machine.context().err
+    }
 }
 
 /// Short actor alias matching the phase name.

@@ -230,11 +230,14 @@ impl GraphAssemblerAssembleValidatePassStateMachineContext
 
 /// Synchronous, single-writer actor around the generated validation machine.
 pub struct GraphAssemblerAssembleValidatePassActor {
-    machine: GraphAssemblerAssembleValidatePassStateMachine<GraphAssemblerAssembleValidatePassContext>,
+    machine:
+        GraphAssemblerAssembleValidatePassStateMachine<GraphAssemblerAssembleValidatePassContext>,
 }
 
 impl Default for GraphAssemblerAssembleValidatePassActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphAssemblerAssembleValidatePassActor {
@@ -250,13 +253,16 @@ impl GraphAssemblerAssembleValidatePassActor {
 
     /// Processes one copied completion event synchronously.
     pub fn process_event(&mut self, event: AssemblerEventAssembleGraph) -> PassOutcome {
-        if !self.machine.is(&GraphAssemblerAssembleValidatePassStates::Deciding) {
+        if !self
+            .machine
+            .is(&GraphAssemblerAssembleValidatePassStates::Deciding)
+        {
             return self.process_unexpected();
         }
         self.machine.context_mut().load(event);
-        let _ = self.machine.process_event(
-            GraphAssemblerAssembleValidatePassEvents::AssemblerEventAssembleGraph(event),
-        );
+        let _ = self
+            .machine
+            .process_event(GraphAssemblerAssembleValidatePassEvents::AssemblerEventAssembleGraph);
         self.machine.context().outcome
     }
 
@@ -287,6 +293,3 @@ impl GraphAssemblerAssembleValidatePassActor {
         self.machine.context()
     }
 }
-
-/// Concise actor alias used by pass callers.
-pub type AssembleValidatePass = GraphAssemblerAssembleValidatePassActor;

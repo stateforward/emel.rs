@@ -30,11 +30,11 @@ pub enum GenerationPhase {
 
 #[cfg(test)]
 mod conditioner_contract_tests {
-    use core::sync::atomic::{AtomicU8, Ordering};
     use super::{
         BindingDone, ChatMessage, Conditioner, ConditionerError, ConditionerObserver,
-        ConditioningDone, FormatRequest, conditioner_event, format_raw,
+        ConditioningDone, FormatRequest, conditioner_event, format_raw, raw_formatter,
     };
+    use core::sync::atomic::{AtomicU8, Ordering};
 
     #[test]
     fn raw_formatter_matches_reference_concatenation_and_capacity() {
@@ -63,8 +63,22 @@ mod conditioner_contract_tests {
     }
 
     #[test]
+    fn bind_rejects_missing_dependency_routes() {
+        let mut conditioner = Conditioner::default();
+        assert_eq!(
+            conditioner.process_event(conditioner_event::Bind {
+                tokenizer_available: true,
+                formatter_available: true,
+                model_valid: true,
+            }),
+            Err(ConditionerError::Backend)
+        );
+    }
+
+    #[test]
     fn bind_classifies_reference_error_paths() {
         let mut conditioner = Conditioner::default();
+        conditioner.set_dependencies(injected_formatter, injected_tokenizer);
         assert_eq!(
             conditioner.process_event(conditioner_event::Bind {
                 tokenizer_available: false,
@@ -95,6 +109,7 @@ mod conditioner_contract_tests {
     #[test]
     fn prepare_requires_bound_capacity_and_caller_storage() {
         let mut conditioner = Conditioner::default();
+        conditioner.set_dependencies(raw_formatter, injected_tokenizer);
         let mut token_ids = [7, 8];
         let mut token_count = 99;
         assert_eq!(
@@ -200,7 +215,9 @@ mod conditioner_contract_tests {
             })
             .unwrap();
 
-        for (add_special, parse_special) in [(false, false), (false, true), (true, false), (true, true)] {
+        for (add_special, parse_special) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let mut token_ids = [0; 2];
             let mut token_count = 0;
             conditioner
@@ -292,6 +309,45 @@ mod conditioner_contract_tests {
             Err(ConditionerError::ModelInvalid)
         );
     }
+    fn rejecting_tokenizer(
+        _: &[u8],
+        _: bool,
+        _: bool,
+        _: &mut [i32],
+    ) -> Result<usize, ConditionerError> {
+        Err(ConditionerError::Backend)
+    }
+
+    #[test]
+    fn injected_tokenizer_error_is_preserved() {
+        let mut conditioner = Conditioner::default();
+        conditioner.set_dependencies(injected_formatter, rejecting_tokenizer);
+        conditioner
+            .process_event(conditioner_event::Bind {
+                tokenizer_available: true,
+                formatter_available: true,
+                model_valid: true,
+            })
+            .unwrap();
+        let mut ids = [0; 2];
+        let mut count = 0;
+        assert_eq!(
+            conditioner.prepare(conditioner_event::Prepare {
+                messages: &[],
+                formatter_available: true,
+                tokenizer_available: true,
+                model_valid: true,
+                token_capacity: 2,
+                token_ids: &mut ids,
+                token_count: &mut count,
+                add_generation_prompt: false,
+                enable_thinking: false,
+                add_special: true,
+                parse_special: false,
+            }),
+            Err(ConditionerError::Backend)
+        );
+    }
 
     fn over_capacity_tokenizer(
         _: &[u8],
@@ -359,6 +415,7 @@ mod conditioner_contract_tests {
     #[test]
     fn observer_receives_rtc_success_and_error_outcomes() {
         let mut conditioner = Conditioner::default();
+        conditioner.set_dependencies(injected_formatter, injected_tokenizer);
         let mut observer = Observer::default();
         let bind = conditioner.bind_with_observer(
             conditioner_event::Bind {
@@ -369,7 +426,7 @@ mod conditioner_contract_tests {
             &mut observer,
         );
         assert!(bind.is_ok());
-        let mut ids = [0; 1];
+        let mut ids = [0; 2];
         let mut count = 0;
         let prepared = conditioner.prepare_with_observer(
             conditioner_event::Prepare {
@@ -377,7 +434,7 @@ mod conditioner_contract_tests {
                 formatter_available: true,
                 tokenizer_available: true,
                 model_valid: true,
-                token_capacity: 1,
+                token_capacity: 2,
                 token_ids: &mut ids,
                 token_count: &mut count,
                 add_generation_prompt: false,
@@ -408,7 +465,10 @@ pub enum ConditionerError {
 }
 
 /// Canonical stateless formatter contracts and raw implementation.
-pub use formatter::{ChatMessage, FormatRequest, Formatter, format_raw, raw_formatter};
+pub use formatter::{
+    ChatMessage, FormatRequest, Formatter, RawFormatRequest, format_raw, format_raw_request,
+    raw_formatter,
+};
 /// Synchronous tokenizer dependency. It must write only to caller-owned output.
 pub trait Tokenizer {
     fn bind(&mut self) -> Result<(), ConditionerError>;
@@ -562,6 +622,9 @@ impl Conditioner {
         if !event.tokenizer_available || !event.formatter_available {
             return Err(ConditionerError::Backend);
         }
+        if self.formatter.is_none() || self.tokenizer.is_none() {
+            return Err(ConditionerError::Backend);
+        }
         if !event.model_valid {
             return Err(ConditionerError::ModelInvalid);
         }
@@ -596,7 +659,12 @@ impl Conditioner {
             return Err(ConditionerError::InvalidArgument);
         }
         let mut formatted_len = 0;
-        let formatter = self.formatter.unwrap_or(default_formatter);
+        let Some(formatter) = self.formatter else {
+            return Err(ConditionerError::Backend);
+        };
+        let Some(tokenizer) = self.tokenizer else {
+            return Err(ConditionerError::Backend);
+        };
         formatter(FormatRequest {
             messages: event.messages,
             add_generation_prompt: event.add_generation_prompt,
@@ -612,23 +680,12 @@ impl Conditioner {
             *event.token_count = 0;
             return Ok(ConditioningDone { token_count: 0 });
         }
-        let count = if let Some(tokenizer) = self.tokenizer {
-            tokenizer(
-                &self.formatted[..formatted_len],
-                event.add_special,
-                event.parse_special,
-                &mut event.token_ids[..event.token_capacity],
-            )?
-        } else {
-            let count = formatted_len.min(event.token_capacity);
-            for (slot, byte) in event.token_ids[..count]
-                .iter_mut()
-                .zip(self.formatted[..count].iter().copied())
-            {
-                *slot = i32::from(byte);
-            }
-            count
-        };
+        let count = tokenizer(
+            &self.formatted[..formatted_len],
+            event.add_special,
+            event.parse_special,
+            &mut event.token_ids[..event.token_capacity],
+        )?;
         if count > event.token_capacity {
             return Err(ConditionerError::Capacity);
         }
@@ -636,11 +693,6 @@ impl Conditioner {
         Ok(ConditioningDone { token_count: count })
     }
 }
-
-fn default_formatter(request: FormatRequest<'_>) -> Result<(), ConditionerError> {
-    raw_formatter(request)
-}
-pub(crate) mod conditioner;
 pub mod detokenizer;
 pub(crate) mod encoders;
 pub(crate) mod formatter;

@@ -236,8 +236,65 @@ fn array(entry: Entry<'_>) -> Option<Array<'_>> {
     })
 }
 
-const fn valid_entry(entry: Entry<'_>) -> bool {
-    entry.validated
+fn valid_entry(entry: Entry<'_>) -> bool {
+    entry.validated && (entry.kind != TYPE_ARRAY || valid_array(entry))
+}
+
+fn valid_array(entry: Entry<'_>) -> bool {
+    let Some(array) = array(entry) else {
+        return false;
+    };
+    if let Some(element_size) = scalar_size(array.kind) {
+        let Ok(count) = usize::try_from(array.count) else {
+            return false;
+        };
+        let Some(payload_length) = count.checked_mul(element_size) else {
+            return false;
+        };
+        return array.payload.len() == payload_length && array.string_array_bytes == 0;
+    }
+    if array.kind != TYPE_STRING {
+        return false;
+    }
+
+    let Ok(count) = usize::try_from(array.count) else {
+        return false;
+    };
+    if count > array.payload.len() / 8 {
+        return false;
+    }
+    let mut cursor = 0_usize;
+    let mut total_string_bytes = 0_u64;
+    for _ in 0..count {
+        let Some(prefix_end) = cursor.checked_add(8) else {
+            return false;
+        };
+        let Some(length_bytes) = array.payload.get(cursor..prefix_end) else {
+            return false;
+        };
+        let Ok(length_bytes) = <[u8; 8]>::try_from(length_bytes) else {
+            return false;
+        };
+        let Ok(length) = usize::try_from(u64::from_le_bytes(length_bytes)) else {
+            return false;
+        };
+        cursor += 8;
+        let Some(end) = cursor.checked_add(length) else {
+            return false;
+        };
+        if array.payload.get(cursor..end).is_none() {
+            return false;
+        }
+        let Ok(length_u64) = u64::try_from(length) else {
+            return false;
+        };
+        let Some(total) = total_string_bytes.checked_add(length_u64) else {
+            return false;
+        };
+        total_string_bytes = total;
+        cursor = end;
+    }
+    cursor == array.payload.len() && total_string_bytes == array.string_array_bytes
 }
 
 fn decision<'data, O: Operation + 'data>(request: &QueryRequest<'data, O>) -> Option<Decision> {
@@ -1610,6 +1667,92 @@ mod tests {
         operation.apply_array_int64(array);
         operation.apply_array_float64(array);
         assert_eq!(operation.errors, 24);
+    }
+
+    fn actor_storage(value: Vec<u8>, value_type: u32, string_array_bytes: u64) -> Storage {
+        let value_offset = 1_u32;
+        let value_length = u32::try_from(value.len()).expect("test value fits u32");
+        let mut kv_arena = vec![b'k'];
+        kv_arena.extend(value);
+        Storage {
+            source: std::sync::Arc::from([]),
+            kv_arena,
+            kv_entries: vec![super::super::KvEntry {
+                key_offset: 0,
+                key_length: 1,
+                value_offset,
+                value_length,
+                value_type,
+                string_array_bytes,
+                validated: true,
+            }],
+            tensors: Vec::new(),
+        }
+    }
+
+    fn array_bytes(kind: u32, count: u64, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(12 + payload.len());
+        bytes.extend(kind.to_le_bytes());
+        bytes.extend(count.to_le_bytes());
+        bytes.extend(payload);
+        bytes
+    }
+
+    #[test]
+    fn malformed_numeric_array_is_rejected_before_indexed_or_bulk_reads() {
+        let storage = actor_storage(array_bytes(TYPE_UINT32, 2, &[1, 0, 0, 0]), TYPE_ARRAY, 0);
+
+        let mut indexed = ReadUnsignedArrayElement::new(b"k", 0);
+        process(true, Some(&storage), 1, &mut indexed);
+        assert_eq!(indexed.result, Err(QueryError::Malformed));
+
+        let mut metrics = ReadUnsignedArrayMetrics::new(b"k");
+        process(true, Some(&storage), 1, &mut metrics);
+        assert_eq!(metrics.result, Err(QueryError::Malformed));
+
+        let mut visited = 0_u32;
+        let mut visitor = VisitUnsignedArray::new(b"k", |_: u32, _: u64| visited += 1);
+        process(true, Some(&storage), 1, &mut visitor);
+        assert_eq!(visitor.result, Err(QueryError::Malformed));
+        assert_eq!(visited, 0);
+
+        let mut bytes_called = false;
+        let mut bytes = WithByteArray::new(b"k", |_: &[u8]| bytes_called = true);
+        process(true, Some(&storage), 1, &mut bytes);
+        assert_eq!(bytes.result, Err(QueryError::Malformed));
+        assert!(!bytes_called);
+
+        let overflow = actor_storage(array_bytes(TYPE_UINT64, u64::MAX, &[]), TYPE_ARRAY, 0);
+        let mut overflow_read = ReadUnsignedArrayElement::new(b"k", 0);
+        process(true, Some(&overflow), 1, &mut overflow_read);
+        assert_eq!(overflow_read.result, Err(QueryError::Malformed));
+    }
+
+    #[test]
+    fn malformed_string_array_is_rejected_before_element_or_bulk_reads() {
+        let storage = actor_storage(
+            array_bytes(TYPE_STRING, 1, &3_u64.to_le_bytes()[..]),
+            TYPE_ARRAY,
+            3,
+        );
+
+        let mut element_called = false;
+        let mut element = WithStringArrayElement::new(b"k", 0, |_: &[u8]| {
+            element_called = true;
+        });
+        process(true, Some(&storage), 1, &mut element);
+        assert_eq!(element.result, Err(QueryError::Malformed));
+        assert!(!element_called);
+
+        let mut metrics = ReadStringArrayMetrics::new(b"k");
+        process(true, Some(&storage), 1, &mut metrics);
+        assert_eq!(metrics.result, Err(QueryError::Malformed));
+
+        let mut visited = 0_u32;
+        let mut visitor = VisitStringArray::new(b"k", |_: u32, _: &[u8]| visited += 1);
+        process(true, Some(&storage), 1, &mut visitor);
+        assert_eq!(visitor.result, Err(QueryError::Malformed));
+        assert_eq!(visited, 0);
     }
 
     #[test]

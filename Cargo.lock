@@ -152,6 +152,7 @@ dependencies = [
 name = "emel-batch"
 version = "0.1.0"
 dependencies = [
+ "opentelemetry",
  "stateforward-sml",
 ]
 
@@ -174,6 +175,9 @@ version = "0.1.0"
 name = "emel-diarization"
 version = "0.1.0"
 dependencies = [
+ "emel-kernels",
+ "emel-model",
+ "opentelemetry",
  "stateforward-sml",
 ]
 
@@ -182,6 +186,8 @@ name = "emel-embeddings"
 version = "0.1.0"
 dependencies = [
  "emel-model",
+ "emel-tensor",
+ "emel-text",
  "stateforward-sml",
 ]
 
@@ -534,6 +540,7 @@ name = "emel-speech"
 version = "0.1.0"
 dependencies = [
  "emel-gguf",
+ "emel-kernels",
  "emel-model",
  "emel-tensor",
  "stateforward-sml",
@@ -593,6 +600,12 @@ name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
+
+[[package]]
+name = "futures-sink"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c39754e157331b013978ec91992bde1ac089843443c49cbc7f46150b0fad0893"
 
 [[package]]
 name = "futures-task"
@@ -744,6 +757,19 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "opentelemetry"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror",
+]
 
 [[package]]
 name = "paste"
@@ -1018,6 +1044,26 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

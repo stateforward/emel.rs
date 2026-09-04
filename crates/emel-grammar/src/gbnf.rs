@@ -5,7 +5,13 @@
 //! represented with an optional borrowed slice so invalid rules cannot create
 //! an invalid pointer while retaining the same null-and-zero result.
 
-#![allow(non_camel_case_types)]
+#![allow(
+    non_camel_case_types,
+    non_upper_case_globals,
+    clippy::cast_possible_truncation,
+    clippy::large_stack_frames,
+    clippy::large_stack_arrays
+)]
 
 /// GBNF element type mappings from `llama.cpp`'s `llama_gretype`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -44,7 +50,7 @@ pub const k_max_gbnf_symbols: usize = 2048;
 /// Number of slots in the parser symbol table.
 pub const k_gbnf_symbol_table_slots: usize = 4096;
 
-const _: () = assert!(k_gbnf_symbol_table_slots & (k_gbnf_symbol_table_slots - 1) == 0);
+const _: () = assert!(k_gbnf_symbol_table_slots.is_power_of_two());
 const _: () = assert!(k_max_gbnf_rule_elements <= k_max_gbnf_elements);
 
 /// A borrowed view of one grammar rule.
@@ -72,6 +78,7 @@ pub struct grammar {
 }
 
 impl Default for grammar {
+    #[allow(clippy::large_stack_frames, clippy::large_stack_arrays)]
     fn default() -> Self {
         Self {
             elements: [element::default(); k_max_gbnf_elements],
@@ -98,7 +105,12 @@ impl grammar {
 
     /// Returns a borrowed rule view, or a null-equivalent empty view when the
     /// ID, length, or element range is invalid.
-    #[must_use]
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic for any input; the checked conversion is
+    /// bounded by the fixed-capacity element storage.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn rule(&self, rule_id: u32) -> rule_view<'_> {
         let index = rule_id as usize;
         if index >= self.rule_count as usize || index >= k_max_gbnf_rules {
@@ -122,7 +134,7 @@ impl grammar {
 
         rule_view {
             elements: Some(&self.elements[offset..end]),
-            length: length as u32,
+            length: u32::try_from(length).expect("rule length is bounded by storage"),
         }
     }
 }
@@ -147,7 +159,11 @@ mod tests {
 
     #[test]
     fn rule_returns_borrowed_bounded_slice() {
-        let mut grammar = grammar::default();
+        let mut grammar = grammar {
+            rule_count: 3,
+            element_count: 5,
+            ..grammar::default()
+        };
         grammar.elements[3] = element {
             r#type: element_type::character,
             value: 65,
@@ -158,8 +174,6 @@ mod tests {
         };
         grammar.rule_offsets[2] = 3;
         grammar.rule_lengths[2] = 2;
-        grammar.rule_count = 3;
-        grammar.element_count = 5;
 
         let view = grammar.rule(2);
         assert_eq!(view.length, 2);
@@ -168,9 +182,11 @@ mod tests {
 
     #[test]
     fn invalid_rule_lookup_is_empty_for_id_length_and_bounds() {
-        let mut grammar = grammar::default();
-        grammar.rule_count = 1;
-        grammar.element_count = 4;
+        let mut grammar = grammar {
+            rule_count: 1,
+            element_count: 4,
+            ..grammar::default()
+        };
 
         assert_eq!(grammar.rule(1), rule_view::default());
         assert_eq!(grammar.rule(u32::MAX), rule_view::default());
@@ -185,11 +201,13 @@ mod tests {
 
     #[test]
     fn reset_clears_active_metadata_and_counts() {
-        let mut grammar = grammar::default();
+        let mut grammar = grammar {
+            rule_count: 1,
+            element_count: 12,
+            ..grammar::default()
+        };
         grammar.rule_offsets[0] = 8;
         grammar.rule_lengths[0] = 4;
-        grammar.rule_count = 1;
-        grammar.element_count = 12;
 
         grammar.reset();
 

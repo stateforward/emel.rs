@@ -54,10 +54,19 @@ pub(crate) enum SlotLifecycle {
     Failed,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct WindowSlot {
     pub(crate) layer: i32,
     pub(crate) lifecycle: SlotLifecycle,
+}
+
+impl Default for WindowSlot {
+    fn default() -> Self {
+        Self {
+            layer: -1,
+            lifecycle: SlotLifecycle::Vacant,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,10 +107,33 @@ impl Default for WindowState {
 }
 
 pub(crate) const fn aligned_bytes(bytes: u64) -> Option<u64> {
-    match bytes.checked_add(SLOT_ALIGNMENT_BYTES - 1) {
-        Some(value) => Some(value & !(SLOT_ALIGNMENT_BYTES - 1)),
-        None => None,
+    let Some(value) = bytes.checked_add(SLOT_ALIGNMENT_BYTES - 1) else {
+        return None;
+    };
+    Some(value & !(SLOT_ALIGNMENT_BYTES - 1))
+}
+pub(crate) const fn slot_bytes_needed(window: &WindowState, slots: u32) -> Option<u64> {
+    window.slot_capacity_bytes.checked_mul(slots as u64)
+}
+
+pub(crate) fn slot_storage_sufficient(window: &WindowState, storage: &[u8], slots: u32) -> bool {
+    let Some(needed) = slot_bytes_needed(window, slots) else {
+        return false;
+    };
+    let Ok(needed) = usize::try_from(needed) else {
+        return false;
+    };
+    !storage.is_empty()
+        && storage.len() >= needed
+        && (storage.as_ptr() as usize).is_multiple_of(SLOT_ALIGNMENT_BYTES as usize)
+}
+
+pub(crate) fn reset_slots(window: &mut WindowState) {
+    for slot in &mut window.slots {
+        *slot = WindowSlot::default();
     }
+    window.slot_count = 0;
+    window.next_prefetch_layer = -1;
 }
 
 pub(crate) fn reset(window: &mut WindowState) {
@@ -116,7 +148,7 @@ pub(crate) fn prefetch_layer(window: &WindowState, published_layer: i32) -> Opti
     let candidate = (published_layer + window.prefetch_depth as i32).rem_euclid(count);
     let published_slot = published_layer.rem_euclid(count) as u32 % window.slot_count;
     let candidate_slot = candidate as u32 % window.slot_count;
-    if candidate_slot == published_slot && window.slots[candidate_slot as usize].layer >= 0 {
+    if candidate_slot == published_slot {
         return None;
     }
     let slot = window.slots[candidate_slot as usize];
@@ -146,10 +178,12 @@ pub(crate) fn scan_layer_descriptors(
     let mut total_stream_bytes = 0u64;
     for (layer, &count) in layer_weight_counts.iter().enumerate() {
         let count = count as usize;
-        if count > MAX_WEIGHTS_PER_LAYER || cursor.checked_add(count).is_none() {
+        if count > MAX_WEIGHTS_PER_LAYER {
             return false;
         }
-        let end = cursor + count;
+        let Some(end) = cursor.checked_add(count) else {
+            return false;
+        };
         if end > extents.len() {
             return false;
         }

@@ -10,7 +10,7 @@
     clippy::missing_const_for_fn,
     dead_code,
     unused_imports,
-    missing_docs,
+    missing_docs
 )]
 
 use sml::sml;
@@ -35,10 +35,14 @@ pub enum CandidateParserError {
     /// No prior sampler error.
     #[default]
     None = 0,
+    /// The caller supplied an invalid request.
+    InvalidRequest = 1,
     /// The candidate parser rejected the input.
     ParseFailed = 1 << 1,
     /// An event was not valid for the current machine state.
     InternalError = 1 << 2,
+    /// The source pipeline reported an untracked error.
+    Untracked = 1 << 3,
 }
 
 /// Owned result produced by one candidate-parser dispatch.
@@ -123,53 +127,57 @@ impl GbnfSamplerCandidateParserContext {
         self.result = CandidateParserOutcome::Parsed(CandidateKind::Unknown);
     }
 
-    fn consume(&mut self, kind: CandidateKind) -> Result<(), ()> {
+    fn consume(&mut self, kind: CandidateKind) {
         self.result = CandidateParserOutcome::Parsed(kind);
-        Ok(())
     }
 
-    fn dispatch_parse_failed_result(&mut self) -> Result<(), ()> {
+    fn dispatch_parse_failed_result(&mut self) {
         self.result = CandidateParserOutcome::ParseFailed;
-        Ok(())
     }
 
-    fn unexpected(&mut self) -> Result<(), ()> {
+    fn unexpected(&mut self) {
         self.result = CandidateParserOutcome::Unexpected;
-        Ok(())
     }
 }
 
 impl GbnfSamplerCandidateParserStateMachineContext for GbnfSamplerCandidateParserContext {
     // Source mapping: candidate_parser/actions.hpp::consume_empty.
     fn consume_empty(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
-        self.consume(CandidateKind::Empty)
+        self.consume(CandidateKind::Empty);
+        Ok(())
     }
 
     // Source mapping: candidate_parser/actions.hpp::consume_text.
     fn consume_text(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
-        self.consume(CandidateKind::Text)
+        self.consume(CandidateKind::Text);
+        Ok(())
     }
 
     // Source mapping: candidate_parser/actions.hpp::dispatch_parse_failed.
     fn dispatch_parse_failed(&mut self, _event_data: &SamplerEventSampleRuntime) -> Result<(), ()> {
-        self.dispatch_parse_failed_result()
+        self.dispatch_parse_failed_result();
+        Ok(())
     }
 
     // Source mapping: candidate_parser/actions.hpp::on_unexpected.
     fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
 
     fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
 
     fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
 
     fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
-        self.unexpected()
+        self.unexpected();
+        Ok(())
     }
 
     // Source mapping: candidate_parser/guards.hpp::has_apply_text.
@@ -193,6 +201,10 @@ impl GbnfSamplerCandidateParserStateMachineContext for GbnfSamplerCandidateParse
 }
 
 /// Synchronous actor around the generated candidate-parser machine.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
 pub struct GbnfSamplerCandidateParserActor {
     machine: GbnfSamplerCandidateParserStateMachine<GbnfSamplerCandidateParserContext>,
 }
@@ -208,7 +220,9 @@ impl GbnfSamplerCandidateParserActor {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: GbnfSamplerCandidateParserStateMachine::new(Default::default()),
+            machine: GbnfSamplerCandidateParserStateMachine::new(
+                GbnfSamplerCandidateParserContext::default(),
+            ),
         }
     }
 
@@ -217,12 +231,21 @@ impl GbnfSamplerCandidateParserActor {
         if !self.machine.is(&GbnfSamplerCandidateParserStates::Deciding) {
             return self.process_unexpected();
         }
+        if input.err != CandidateParserError::None {
+            self.machine.context_mut().set_input(input);
+            self.machine.context_mut().unexpected();
+            self.machine
+                .set_state(GbnfSamplerCandidateParserStates::UnexpectedEvent);
+            return self.machine.context().result;
+        }
         self.machine.context_mut().set_input(input);
-        if self.machine.process_event(GbnfSamplerCandidateParserEvents::SamplerEventSampleRuntime(input)).is_err() {
+        let event_result = self.machine.process_event(
+            GbnfSamplerCandidateParserEvents::SamplerEventSampleRuntime(input),
+        );
+        if event_result.is_err() || self.machine.initialize().is_err() {
             self.machine.context_mut().result = CandidateParserOutcome::Unexpected;
-        } else if self.machine.initialize().is_err() {
-            self.machine.context_mut().result = CandidateParserOutcome::Unexpected;
-            self.machine.set_state(GbnfSamplerCandidateParserStates::UnexpectedEvent);
+            self.machine
+                .set_state(GbnfSamplerCandidateParserStates::UnexpectedEvent);
         }
         self.machine.context().result
     }
@@ -234,7 +257,7 @@ impl GbnfSamplerCandidateParserActor {
 
     /// Processes an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> CandidateParserOutcome {
-        let _ = self.machine.context_mut().unexpected();
+        self.machine.context_mut().unexpected();
         self.machine
             .set_state(GbnfSamplerCandidateParserStates::UnexpectedEvent);
         self.machine.context().result
@@ -259,35 +282,56 @@ impl GbnfSamplerCandidateParserActor {
     }
 }
 
-/// Short actor alias for candidate-parser callers.
-pub type CandidateParser = GbnfSamplerCandidateParserActor;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn classifies_text_and_empty_candidates() {
-        let mut parser = CandidateParser::new();
-        assert_eq!(parser.classify(CandidateKind::Text), CandidateParserOutcome::Parsed(CandidateKind::Text));
+        let mut parser = GbnfSamplerCandidateParserActor::new();
+        assert_eq!(
+            parser.classify(CandidateKind::Text),
+            CandidateParserOutcome::Parsed(CandidateKind::Text)
+        );
         assert!(parser.is(&GbnfSamplerCandidateParserStates::X));
 
-        let mut parser = CandidateParser::new();
-        assert_eq!(parser.classify(CandidateKind::Empty), CandidateParserOutcome::Parsed(CandidateKind::Empty));
+        let mut parser = GbnfSamplerCandidateParserActor::new();
+        assert_eq!(
+            parser.classify(CandidateKind::Empty),
+            CandidateParserOutcome::Parsed(CandidateKind::Empty)
+        );
         assert!(parser.is(&GbnfSamplerCandidateParserStates::X));
     }
 
     #[test]
     fn unknown_candidate_is_parse_failed() {
-        let mut parser = CandidateParser::new();
-        assert_eq!(parser.classify(CandidateKind::Unknown), CandidateParserOutcome::ParseFailed);
+        let mut parser = GbnfSamplerCandidateParserActor::new();
+        assert_eq!(
+            parser.classify(CandidateKind::Unknown),
+            CandidateParserOutcome::ParseFailed
+        );
         assert!(parser.is(&GbnfSamplerCandidateParserStates::X));
     }
 
     #[test]
     fn explicit_unexpected_event_is_reported() {
-        let mut parser = CandidateParser::new();
-        assert_eq!(parser.process_unexpected(), CandidateParserOutcome::Unexpected);
+        let mut parser = GbnfSamplerCandidateParserActor::new();
+        assert_eq!(
+            parser.process_unexpected(),
+            CandidateParserOutcome::Unexpected
+        );
+        assert!(parser.is(&GbnfSamplerCandidateParserStates::UnexpectedEvent));
+    }
+
+    #[test]
+    fn prior_error_is_unexpected_event() {
+        let mut parser = GbnfSamplerCandidateParserActor::new();
+        assert_eq!(
+            parser.process_event(SamplerEventSampleRuntime::with_error(
+                CandidateParserError::ParseFailed,
+            )),
+            CandidateParserOutcome::Unexpected
+        );
         assert!(parser.is(&GbnfSamplerCandidateParserStates::UnexpectedEvent));
     }
 }

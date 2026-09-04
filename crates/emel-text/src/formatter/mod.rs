@@ -1,4 +1,4 @@
-//! Pure formatter dependency and formatter state-machine scaffold.
+//! Pure formatter dependency and bounded synchronous formatter actor.
 
 pub mod actions;
 pub mod context;
@@ -7,4 +7,7 @@ pub mod format;
 pub mod guards;
 pub mod sm;
 
-pub use format::{ChatMessage, FormatRequest, Formatter, RawFormatRequest, format_raw, format_raw_request, raw_formatter};
+pub use format::{
+    ChatMessage, FormatRequest, Formatter, RawFormatRequest, format_raw, format_raw_request,
+    raw_formatter,
+};

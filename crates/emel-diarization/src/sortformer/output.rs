@@ -9,7 +9,7 @@ use emel_model::bridge::Data;
 
 use super::pipeline::sm::{
     FRAME_COUNT, HIDDEN_DIM, REQUIRED_HIDDEN_VALUE_COUNT, REQUIRED_PROBABILITY_VALUE_COUNT,
-    SegmentRecord, SPEAKER_COUNT,
+    SPEAKER_COUNT, SegmentRecord,
 };
 
 const FRAME_COUNT_USIZE: usize = FRAME_COUNT as usize;
@@ -100,6 +100,11 @@ impl<'a> Route<'a> {
     }
 
     /// Computes frame-major speaker probabilities without dispatch allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Shape`] when input or output dimensions are invalid, or
+    /// the binding's typed model/kernel error.
     pub fn compute(&mut self, hidden: &[f32], probabilities: &mut [f32]) -> Result<(), Error> {
         if hidden.len() != REQUIRED_HIDDEN_VALUE_COUNT
             || probabilities.len() != REQUIRED_PROBABILITY_VALUE_COUNT
@@ -111,6 +116,12 @@ impl<'a> Route<'a> {
 
     /// Decodes speaker-major contiguous active runs from frame-major probabilities.
     /// Runs use inclusive threshold activation and flush an active final run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Shape`] for invalid probability storage, [`Error::Threshold`]
+    /// for an invalid threshold, or [`Error::SegmentCapacity`] when output storage
+    /// is insufficient.
     pub fn decode_segments(
         &mut self,
         probabilities: &[f32],
@@ -125,11 +136,13 @@ impl<'a> Route<'a> {
         if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
             return Err(Error::Threshold);
         }
-        for speaker in 0..SPEAKER_COUNT {
+        for speaker_index in 0..SPEAKER_COUNT_USIZE {
+            let speaker = i32::try_from(speaker_index).map_err(|_| Error::Shape)?;
             let mut start_frame = -1;
             let mut max_probability = 0.0_f32;
-            for frame in 0..FRAME_COUNT {
-                let offset = (frame as usize) * SPEAKER_COUNT_USIZE + speaker as usize;
+            for frame_index in 0..FRAME_COUNT_USIZE {
+                let frame = i32::try_from(frame_index).map_err(|_| Error::Shape)?;
+                let offset = frame_index * SPEAKER_COUNT_USIZE + speaker_index;
                 let probability = probabilities[offset];
                 if probability >= threshold {
                     if start_frame < 0 {
@@ -139,19 +152,34 @@ impl<'a> Route<'a> {
                         max_probability = max_probability.max(probability);
                     }
                 } else if start_frame >= 0 {
-                    append_segment(segments, segment_count, speaker, start_frame, frame, max_probability)?;
+                    append_segment(
+                        segments,
+                        segment_count,
+                        speaker,
+                        start_frame,
+                        frame,
+                        max_probability,
+                    )?;
                     start_frame = -1;
                     max_probability = 0.0;
                 }
             }
             if start_frame >= 0 {
-                append_segment(segments, segment_count, speaker, start_frame, FRAME_COUNT, max_probability)?;
+                append_segment(
+                    segments,
+                    segment_count,
+                    speaker,
+                    start_frame,
+                    i32::try_from(FRAME_COUNT_USIZE).map_err(|_| Error::Shape)?,
+                    max_probability,
+                )?;
             }
         }
         Ok(())
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn append_segment(
     segments: &mut [SegmentRecord],
     segment_count: &mut i32,
@@ -168,8 +196,8 @@ fn append_segment(
         speaker,
         start_frame,
         end_frame,
-        start_seconds: (start_frame as f32) * 0.08,
-        end_seconds: (end_frame as f32) * 0.08,
+        start_seconds: start_frame as f32 * 0.08,
+        end_seconds: end_frame as f32 * 0.08,
         max_probability,
     };
     *segment_count += 1;
@@ -333,11 +361,36 @@ fn sigmoid(value: f32) -> f32 {
 pub const INPUT_VALUE_COUNT: usize = REQUIRED_HIDDEN_VALUE_COUNT;
 /// Number of frame-major probabilities produced by the route.
 pub const OUTPUT_VALUE_COUNT: usize = REQUIRED_PROBABILITY_VALUE_COUNT;
+/// Returns the source-defined label for a Sortformer speaker index.
+///
+/// Speaker indices `0..=3` map to `speaker_0` through `speaker_3`; values
+/// outside that range return an empty string.
+#[must_use]
+pub const fn speaker_label(speaker: i32) -> &'static str {
+    match speaker {
+        0 => "speaker_0",
+        1 => "speaker_1",
+        2 => "speaker_2",
+        3 => "speaker_3",
+        _ => "",
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_label_maps_valid_and_invalid_indices() {
+        assert_eq!(speaker_label(0), "speaker_0");
+        assert_eq!(speaker_label(1), "speaker_1");
+        assert_eq!(speaker_label(2), "speaker_2");
+        assert_eq!(speaker_label(3), "speaker_3");
+        for speaker in [-1, 4, i32::MIN, i32::MAX] {
+            assert_eq!(speaker_label(speaker), "");
+        }
+    }
 
     #[test]
     fn native_output_is_frame_major_and_relu_sigmoid_numeric() {
@@ -451,7 +504,12 @@ mod tests {
         let mut count = 99;
 
         assert_eq!(
-            route.decode_segments(&probabilities[..OUTPUT_VALUE_COUNT - 1], 0.5, &mut segments, &mut count),
+            route.decode_segments(
+                &probabilities[..OUTPUT_VALUE_COUNT - 1],
+                0.5,
+                &mut segments,
+                &mut count
+            ),
             Err(Error::Shape)
         );
         assert_eq!(count, 0);
@@ -467,4 +525,4 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(segments[0].speaker, 0);
     }
- }
+}

@@ -11,11 +11,19 @@
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
+    clippy::unnecessary_wraps,
+    clippy::unnecessary_map_or,
+    clippy::default_trait_access,
+    clippy::needless_pass_by_value,
     clippy::missing_const_for_fn,
-    dead_code,
     unused_imports,
     missing_docs,
-    private_interfaces
+    // Generated SML event/context surfaces necessarily carry private runtime
+    // payloads and are not exposed as public cross-crate API.
+    private_interfaces,
+    // Equality is retained for copied request snapshots; callback identity is
+    // intentionally best-effort because these callbacks run synchronously.
+    unpredictable_function_pointer_comparisons,
 )]
 
 use core::fmt;
@@ -44,7 +52,9 @@ impl ProcessorError {
 
     /// Retains a callback's raw error code.
     #[must_use]
-    pub const fn from_code(code: i32) -> Self { Self(code) }
+    pub const fn from_code(code: i32) -> Self {
+        Self(code)
+    }
 }
 
 /// Outcome retained for the kernel phase.
@@ -150,6 +160,8 @@ pub struct ExecuteRequest {
     pub alloc_graph: Option<AllocGraphFn>,
     pub bind_inputs: Option<BindInputsFn>,
     pub run_kernel: Option<RunKernelFn>,
+    /// Root callback retained by the owning processor for the typed bridge.
+    pub root_run_kernel: Option<crate::processor::sm::RunKernelFn>,
     pub extract_outputs: Option<ExtractOutputsFn>,
     pub dispatch_done: Option<DispatchDoneFn>,
     pub dispatch_error: Option<DispatchErrorFn>,
@@ -217,7 +229,9 @@ impl GraphProcessorKernelStepContext {
 }
 
 impl GraphProcessorKernelStepStateMachineContext for GraphProcessorKernelStepContext {
-    fn callback_error(&self) -> Result<bool, ()> { Ok(self.phase_callback_err != 0) }
+    fn callback_error(&self) -> Result<bool, ()> {
+        Ok(self.phase_callback_err != 0)
+    }
 
     fn callback_failed_without_error(&self) -> Result<bool, ()> {
         Ok(!self.phase_callback_ok && self.phase_callback_err == 0)
@@ -256,17 +270,29 @@ impl GraphProcessorKernelStepStateMachineContext for GraphProcessorKernelStepCon
         Ok(())
     }
 
-    fn on_unexpected_from_callback_decision(&mut self) -> Result<(), ()> { self.mark_unexpected() }
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.mark_unexpected() }
-    fn on_unexpected_from_execute_failed(&mut self) -> Result<(), ()> { self.mark_unexpected() }
-    fn on_unexpected_from_executed(&mut self) -> Result<(), ()> { self.mark_unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.mark_unexpected() }
+    fn on_unexpected_from_callback_decision(&mut self) -> Result<(), ()> {
+        self.mark_unexpected()
+    }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.mark_unexpected()
+    }
+    fn on_unexpected_from_execute_failed(&mut self) -> Result<(), ()> {
+        self.mark_unexpected()
+    }
+    fn on_unexpected_from_executed(&mut self) -> Result<(), ()> {
+        self.mark_unexpected()
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.mark_unexpected()
+    }
 
     fn phase_missing_callback(&self) -> Result<bool, ()> {
         Ok(self.err == ProcessorError::NONE && self.request.run_kernel.is_none())
     }
 
-    fn phase_prefailed(&self) -> Result<bool, ()> { Ok(self.err != ProcessorError::NONE) }
+    fn phase_prefailed(&self) -> Result<bool, ()> {
+        Ok(self.err != ProcessorError::NONE)
+    }
 
     fn phase_request_callback(&self) -> Result<bool, ()> {
         Ok(self.err == ProcessorError::NONE && self.request.run_kernel.is_some())
@@ -274,10 +300,9 @@ impl GraphProcessorKernelStepStateMachineContext for GraphProcessorKernelStepCon
 
     fn run_callback(&mut self) -> Result<(), ()> {
         self.phase_callback_err = 0;
-        self.phase_callback_ok = self
-            .request
-            .run_kernel
-            .map_or(false, |callback| callback(&self.request, &mut self.phase_callback_err));
+        self.phase_callback_ok = self.request.run_kernel.map_or(false, |callback| {
+            callback(&self.request, &mut self.phase_callback_err)
+        });
         Ok(())
     }
 }
@@ -291,21 +316,24 @@ impl fmt::Debug for GraphProcessorKernelStepActor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GraphProcessorKernelStepActor")
-            .field("state", self.machine.state())
             .field("context", self.machine.context())
             .finish()
     }
 }
 
 impl Default for GraphProcessorKernelStepActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GraphProcessorKernelStepActor {
     /// Constructs an actor in generated `deciding` state.
     #[must_use]
     pub fn new() -> Self {
-        Self { machine: GraphProcessorKernelStepStateMachine::new(Default::default()) }
+        Self {
+            machine: GraphProcessorKernelStepStateMachine::new(Default::default()),
+        }
     }
 
     /// Processes one copied request synchronously through the child machine.
@@ -316,7 +344,7 @@ impl GraphProcessorKernelStepActor {
         self.machine.context_mut().set_request(event);
         if self
             .machine
-            .process_event(GraphProcessorKernelStepEvents::ProcessorEventExecuteStep(event))
+            .process_event(GraphProcessorKernelStepEvents::ProcessorEventExecuteStep)
             .is_err()
         {
             self.machine.context_mut().mark_unexpected().ok();
@@ -331,22 +359,26 @@ impl GraphProcessorKernelStepActor {
     /// Processes an explicit unexpected event synchronously.
     pub fn process_unexpected(&mut self) -> Result<PhaseOutcome, ProcessorError> {
         self.machine.context_mut().mark_unexpected().ok();
-        self.machine.set_state(GraphProcessorKernelStepStates::UnexpectedEvent);
+        self.machine
+            .set_state(GraphProcessorKernelStepStates::UnexpectedEvent);
         Err(ProcessorError::INTERNAL_ERROR)
     }
 
     /// Returns generated state inspection data.
     #[must_use]
-    pub fn state(&self) -> &GraphProcessorKernelStepStates { self.machine.state() }
+    pub fn state(&self) -> &GraphProcessorKernelStepStates {
+        self.machine.state()
+    }
 
     /// Reports whether the generated machine is in `state`.
     #[must_use]
-    pub fn is(&self, state: &GraphProcessorKernelStepStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &GraphProcessorKernelStepStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns retained phase context for root integration.
     #[must_use]
-    pub fn context(&self) -> &GraphProcessorKernelStepContext { self.machine.context() }
+    pub fn context(&self) -> &GraphProcessorKernelStepContext {
+        self.machine.context()
+    }
 }
-
-/// Short actor alias for processor callers.
-pub type KernelStep = GraphProcessorKernelStepActor;

@@ -11,13 +11,23 @@ fn detokenizer_keeps_typed_unexpected_events() {
     assert!(n >= 60, "expected ~65 typed unexpected handlers, got {n}");
     assert!(src.contains("unexpected_event<EventBind>"));
 }
+struct EmptyVocabulary;
+impl VocabularyView for EmptyVocabulary {
+    fn token_count(&self) -> u32 {
+        0
+    }
+    fn token(&self, _: u32) -> Option<TokenEntry<'_>> {
+        None
+    }
+}
+
 struct Vocabulary {
     entries: [&'static [u8]; 7],
     types: [TokenType; 7],
 }
 impl VocabularyView for Vocabulary {
     fn token_count(&self) -> u32 {
-        self.entries.len() as u32
+        u32::try_from(self.entries.len()).expect("fixed vocabulary fits u32")
     }
     fn token(&self, index: u32) -> Option<TokenEntry<'_>> {
         self.entries.get(index as usize).map(|piece| TokenEntry {
@@ -42,15 +52,13 @@ fn vocabulary() -> Vocabulary {
         ],
     }
 }
-fn bind(actor: &mut TextDetokenizer<'_, Vocabulary>) -> BindResult {
-    let mut result = Err(super::detokenizer::BindError::Internal);
-    let out = actor.bind(Bind {
-        result: &mut result,
-    });
-    out
+fn bind<V: VocabularyView + ?Sized>(actor: &mut TextDetokenizer<'_, V>) -> BindResult {
+    actor.bind(Bind {
+        result: &mut Err(super::detokenizer::BindError::Internal),
+    })
 }
-fn decode(
-    actor: &mut TextDetokenizer<'_, Vocabulary>,
+fn decode<V: VocabularyView + ?Sized>(
+    actor: &mut TextDetokenizer<'_, V>,
     id: i32,
     special: bool,
     pending: &mut [u8],
@@ -68,6 +76,18 @@ fn decode(
     });
     assert_eq!(out, result);
     out
+}
+#[test]
+fn detokenizer_binds_empty_vocabulary_but_rejects_token() {
+    let vocab = EmptyVocabulary;
+    let mut actor = TextDetokenizer::new(&vocab);
+    assert!(bind(&mut actor).is_ok());
+    let mut pending = [0; 4];
+    let mut output = [0; 4];
+    assert_eq!(
+        decode(&mut actor, 0, false, &mut pending, 0, &mut output).error_kind(),
+        Some(DetokenizeError::ModelInvalid)
+    );
 }
 #[test]
 fn detokenizer_decodes_special_text_and_model_range() {
@@ -132,6 +152,11 @@ fn detokenizer_rejects_unbound_invalid_pending_and_recovers_unexpected() {
         decode(&mut actor, 0, false, &mut pending[..3], 0, &mut output).error_kind(),
         Some(DetokenizeError::InvalidRequest)
     );
+    let before = output;
+    let result = decode(&mut actor, 0, false, &mut pending, 5, &mut output);
+    assert_eq!(result.error_kind(), Some(DetokenizeError::InvalidRequest));
+    assert_eq!(result.pending_length(), 5);
+    assert_eq!(output, before);
     actor.unexpected(super::detokenizer::UnexpectedEvent::Detokenize);
     assert_eq!(actor.state(), "unexpected");
 }

@@ -16,6 +16,18 @@ use std::ops::{Deref, DerefMut};
 use emel_tensor::dtype::SerializedType;
 use emel_token::profile::event::{Model as TokenizerProfileModel, PreId};
 
+type ObservedTensor = (emel_gguf::event::TensorDescriptor, usize, usize);
+#[derive(Clone)]
+/// Preallocated tensor destinations populated by one synchronous GGUF query.
+///
+/// The payload allocation is completed before the second `WithTensor` dispatch;
+/// after that callback returns, the box moves directly into the model record.
+struct OwnedGgufTensor {
+    descriptor: emel_gguf::event::TensorDescriptor,
+    name: Box<[u8]>,
+    bytes: Box<[u8]>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Fixed<T, const N: usize>([T; N]);
 
@@ -662,6 +674,69 @@ pub enum MoshiComponent {
 pub const MAX_MOSHI_DELAYS: usize = 64;
 pub const MAX_INFERENCE_PROMPT_TOKENS: usize = MAX_MOSHI_DELAYS;
 pub const MAX_DEPFORMER_WEIGHT_SCHEDULE: usize = MAX_MOSHI_DELAYS;
+pub const MAX_MOSHI_VOICE_FORMAT: usize = 64;
+pub const MAX_MOSHI_VOICE_EMBEDDING_DIM: usize = 8192;
+pub const MAX_MOSHI_VOICE_CACHE_ROWS: usize = 128;
+pub const MAX_MOSHI_VOICE_CACHE_COLUMNS: usize = MAX_MOSHI_DELAYS;
+pub const MOSHI_VOICE_FORMAT_PERSONAPLEX_PROMPT_V1: &[u8] = b"personaplex_prompt_v1";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MoshiLmHParamsInput {
+    pub card: i32,
+    pub n_q: i32,
+    pub dep_q: i32,
+    pub inference_dep_q: i32,
+    pub text_card: i32,
+    pub text_padding_id: i32,
+    pub dim: i32,
+    pub num_layers: i32,
+    pub num_heads: i32,
+    pub context: i32,
+    pub max_period: i32,
+    pub dim_feedforward: i32,
+    pub depformer_dim: i32,
+    pub depformer_num_heads: i32,
+    pub depformer_num_layers: i32,
+    pub depformer_dim_feedforward: i32,
+    pub depformer_context: i32,
+    pub depformer_max_period: i32,
+    pub depformer_low_rank_embeddings: i32,
+    pub extra_heads_num_heads: i32,
+    pub inference_pre_text_silence_frames: i32,
+    pub inference_post_text_silence_frames: i32,
+    pub delay_count: u32,
+    pub inference_prompt_token_count: u32,
+    pub depformer_weight_schedule_count: u32,
+    pub delays: [i32; MAX_MOSHI_DELAYS],
+    pub inference_prompt_tokens: [i32; MAX_INFERENCE_PROMPT_TOKENS],
+    pub depformer_weight_schedule: [i32; MAX_DEPFORMER_WEIGHT_SCHEDULE],
+    pub causal: bool,
+    pub cross_attention: bool,
+    pub demux_second_stream: bool,
+    pub depformer_multi_linear: bool,
+    pub depformer_weights_per_step: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MoshiLmHParamsError {
+    InvalidValue,
+    Capacity,
+    InvalidDelays,
+    InvalidArray,
+}
+
+impl std::fmt::Display for MoshiLmHParamsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidValue => "Moshi LM metadata contains an invalid scalar",
+            Self::Capacity => "Moshi LM metadata exceeds fixed capacity",
+            Self::InvalidDelays => "Moshi LM delay metadata is incomplete or negative",
+            Self::InvalidArray => "Moshi LM array metadata is invalid",
+        })
+    }
+}
+impl std::error::Error for MoshiLmHParamsError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MoshiLmHParams {
@@ -701,48 +776,329 @@ pub struct MoshiLmHParams {
 }
 
 impl MoshiLmHParams {
+    /// Validates and copies caller-owned Moshi LM metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when scalar, array, delay, or fixed-capacity
+    /// constraints are violated.
+    pub fn try_new(input: &MoshiLmHParamsInput) -> Result<Self, MoshiLmHParamsError> {
+        let scalars = [
+            input.card,
+            input.n_q,
+            input.dep_q,
+            input.inference_dep_q,
+            input.text_card,
+            input.dim,
+            input.num_layers,
+            input.num_heads,
+            input.context,
+            input.max_period,
+            input.dim_feedforward,
+            input.depformer_dim,
+            input.depformer_num_heads,
+            input.depformer_num_layers,
+            input.depformer_dim_feedforward,
+            input.depformer_context,
+            input.depformer_max_period,
+        ];
+        if scalars.iter().any(|value| *value <= 0)
+            || input.dep_q > input.n_q
+            || input.inference_dep_q > input.dep_q
+            || input.dim % input.num_heads != 0
+            || input.depformer_dim % input.depformer_num_heads != 0
+            || input.inference_pre_text_silence_frames < 0
+            || input.inference_post_text_silence_frames < 0
+        {
+            return Err(MoshiLmHParamsError::InvalidValue);
+        }
+        let count = usize::try_from(input.n_q)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or(MoshiLmHParamsError::Capacity)?;
+        let delays =
+            usize::try_from(input.delay_count).map_err(|_| MoshiLmHParamsError::Capacity)?;
+        let prompts = usize::try_from(input.inference_prompt_token_count)
+            .map_err(|_| MoshiLmHParamsError::Capacity)?;
+        let schedule = usize::try_from(input.depformer_weight_schedule_count)
+            .map_err(|_| MoshiLmHParamsError::Capacity)?;
+        if count > MAX_MOSHI_DELAYS
+            || delays > MAX_MOSHI_DELAYS
+            || prompts > MAX_INFERENCE_PROMPT_TOKENS
+            || schedule > MAX_DEPFORMER_WEIGHT_SCHEDULE
+        {
+            return Err(MoshiLmHParamsError::Capacity);
+        }
+        if delays < count || input.delays[..delays].iter().any(|value| *value < 0) {
+            return Err(MoshiLmHParamsError::InvalidDelays);
+        }
+        if input.inference_prompt_tokens[..prompts]
+            .iter()
+            .any(|value| *value < 0)
+            || input.depformer_weight_schedule[..schedule]
+                .iter()
+                .any(|value| *value < 0)
+        {
+            return Err(MoshiLmHParamsError::InvalidArray);
+        }
+        Ok(Self {
+            card: input.card,
+            n_q: input.n_q,
+            dep_q: input.dep_q,
+            inference_dep_q: input.inference_dep_q,
+            text_card: input.text_card,
+            text_padding_id: input.text_padding_id,
+            dim: input.dim,
+            num_layers: input.num_layers,
+            num_heads: input.num_heads,
+            context: input.context,
+            max_period: input.max_period,
+            dim_feedforward: input.dim_feedforward,
+            depformer_dim: input.depformer_dim,
+            depformer_num_heads: input.depformer_num_heads,
+            depformer_num_layers: input.depformer_num_layers,
+            depformer_dim_feedforward: input.depformer_dim_feedforward,
+            depformer_context: input.depformer_context,
+            depformer_max_period: input.depformer_max_period,
+            depformer_low_rank_embeddings: input.depformer_low_rank_embeddings,
+            extra_heads_num_heads: input.extra_heads_num_heads,
+            inference_pre_text_silence_frames: input.inference_pre_text_silence_frames,
+            inference_post_text_silence_frames: input.inference_post_text_silence_frames,
+            delay_count: input.delay_count,
+            inference_prompt_token_count: input.inference_prompt_token_count,
+            depformer_weight_schedule_count: input.depformer_weight_schedule_count,
+            delays: Fixed(input.delays),
+            inference_prompt_tokens: Fixed(input.inference_prompt_tokens),
+            depformer_weight_schedule: Fixed(input.depformer_weight_schedule),
+            causal: input.causal,
+            cross_attention: input.cross_attention,
+            demux_second_stream: input.demux_second_stream,
+            depformer_multi_linear: input.depformer_multi_linear,
+            depformer_weights_per_step: input.depformer_weights_per_step,
+        })
+    }
     fn reset(&mut self) {
         *self = Self::default();
     }
+    pub const fn card(&self) -> i32 {
+        self.card
+    }
+    pub const fn n_q(&self) -> i32 {
+        self.n_q
+    }
+    pub const fn dep_q(&self) -> i32 {
+        self.dep_q
+    }
+    pub const fn inference_dep_q(&self) -> i32 {
+        self.inference_dep_q
+    }
+    pub const fn text_card(&self) -> i32 {
+        self.text_card
+    }
+    pub const fn text_padding_id(&self) -> i32 {
+        self.text_padding_id
+    }
+    pub const fn dim(&self) -> i32 {
+        self.dim
+    }
+    pub const fn context(&self) -> i32 {
+        self.context
+    }
+    pub const fn delay_count(&self) -> u32 {
+        self.delay_count
+    }
+    pub const fn delays(&self) -> &[i32; MAX_MOSHI_DELAYS] {
+        &self.delays.0
+    }
+    pub const fn inference_prompt_token_count(&self) -> u32 {
+        self.inference_prompt_token_count
+    }
+    pub const fn inference_pre_text_silence_frames(&self) -> i32 {
+        self.inference_pre_text_silence_frames
+    }
+    pub const fn inference_post_text_silence_frames(&self) -> i32 {
+        self.inference_post_text_silence_frames
+    }
+    pub const fn num_layers(&self) -> i32 {
+        self.num_layers
+    }
+    pub const fn num_heads(&self) -> i32 {
+        self.num_heads
+    }
+    pub const fn inference_prompt_tokens(&self) -> &[i32; MAX_INFERENCE_PROMPT_TOKENS] {
+        &self.inference_prompt_tokens.0
+    }
+    pub const fn depformer_weights_per_step(&self) -> bool {
+        self.depformer_weights_per_step
+    }
+    /// Revalidates this owned view before handing it to another boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the owned metadata no longer satisfies the Moshi
+    /// LM contract.
+    pub fn validate(&self) -> Result<(), MoshiLmHParamsError> {
+        let input = MoshiLmHParamsInput {
+            card: self.card,
+            n_q: self.n_q,
+            dep_q: self.dep_q,
+            inference_dep_q: self.inference_dep_q,
+            text_card: self.text_card,
+            text_padding_id: self.text_padding_id,
+            dim: self.dim,
+            num_layers: self.num_layers,
+            num_heads: self.num_heads,
+            context: self.context,
+            max_period: self.max_period,
+            dim_feedforward: self.dim_feedforward,
+            depformer_dim: self.depformer_dim,
+            depformer_num_heads: self.depformer_num_heads,
+            depformer_num_layers: self.depformer_num_layers,
+            depformer_dim_feedforward: self.depformer_dim_feedforward,
+            depformer_context: self.depformer_context,
+            depformer_max_period: self.depformer_max_period,
+            depformer_low_rank_embeddings: self.depformer_low_rank_embeddings,
+            extra_heads_num_heads: self.extra_heads_num_heads,
+            inference_pre_text_silence_frames: self.inference_pre_text_silence_frames,
+            inference_post_text_silence_frames: self.inference_post_text_silence_frames,
+            delay_count: self.delay_count,
+            inference_prompt_token_count: self.inference_prompt_token_count,
+            depformer_weight_schedule_count: self.depformer_weight_schedule_count,
+            delays: self.delays.0,
+            inference_prompt_tokens: self.inference_prompt_tokens.0,
+            depformer_weight_schedule: self.depformer_weight_schedule.0,
+            causal: self.causal,
+            cross_attention: self.cross_attention,
+            demux_second_stream: self.demux_second_stream,
+            depformer_multi_linear: self.depformer_multi_linear,
+            depformer_weights_per_step: self.depformer_weights_per_step,
+        };
+        Self::try_new(&input).map(|_| ())
+    }
 }
-
 impl Default for MoshiLmHParams {
     fn default() -> Self {
         Self {
-            card: Default::default(),
-            n_q: Default::default(),
-            dep_q: Default::default(),
-            inference_dep_q: Default::default(),
-            text_card: Default::default(),
+            card: 0,
+            n_q: 0,
+            dep_q: 0,
+            inference_dep_q: 0,
+            text_card: 0,
             text_padding_id: -1,
-            dim: Default::default(),
-            num_layers: Default::default(),
-            num_heads: Default::default(),
-            context: Default::default(),
-            max_period: Default::default(),
-            dim_feedforward: Default::default(),
-            depformer_dim: Default::default(),
-            depformer_num_heads: Default::default(),
-            depformer_num_layers: Default::default(),
-            depformer_dim_feedforward: Default::default(),
-            depformer_context: Default::default(),
-            depformer_max_period: Default::default(),
-            depformer_low_rank_embeddings: Default::default(),
-            extra_heads_num_heads: Default::default(),
-            inference_pre_text_silence_frames: Default::default(),
-            inference_post_text_silence_frames: Default::default(),
-            delay_count: Default::default(),
-            inference_prompt_token_count: Default::default(),
-            depformer_weight_schedule_count: Default::default(),
+            dim: 0,
+            num_layers: 0,
+            num_heads: 0,
+            context: 0,
+            max_period: 0,
+            dim_feedforward: 0,
+            depformer_dim: 0,
+            depformer_num_heads: 0,
+            depformer_num_layers: 0,
+            depformer_dim_feedforward: 0,
+            depformer_context: 0,
+            depformer_max_period: 0,
+            depformer_low_rank_embeddings: 0,
+            extra_heads_num_heads: 0,
+            inference_pre_text_silence_frames: 0,
+            inference_post_text_silence_frames: 0,
+            delay_count: 0,
+            inference_prompt_token_count: 0,
+            depformer_weight_schedule_count: 0,
             delays: Fixed::default(),
             inference_prompt_tokens: Fixed::default(),
             depformer_weight_schedule: Fixed::default(),
-            causal: Default::default(),
-            cross_attention: Default::default(),
-            demux_second_stream: Default::default(),
-            depformer_multi_linear: Default::default(),
-            depformer_weights_per_step: Default::default(),
+            causal: false,
+            cross_attention: false,
+            demux_second_stream: false,
+            depformer_multi_linear: false,
+            depformer_weights_per_step: false,
         }
+    }
+}
+
+/// Caller-owned values used to construct immutable Moshi LM data.
+#[derive(Clone, Debug)]
+pub struct MoshiLmDataInput<'a> {
+    pub hparams: MoshiLmHParams,
+    pub tensors: &'a [TensorInput<'a>],
+}
+
+/// Immutable model facts consumed by the Moshi LM owner.
+#[derive(Clone, Copy, Debug)]
+pub struct MoshiLmBindingInput<'a> {
+    data: &'a Data,
+}
+
+impl<'a> MoshiLmBindingInput<'a> {
+    pub fn architecture_name(self) -> &'a [u8] {
+        architecture_name_view(self.data)
+    }
+    pub const fn component(self) -> MoshiComponent {
+        self.data.moshi_component_id
+    }
+    pub const fn hparams(self) -> &'a MoshiLmHParams {
+        &self.data.moshi_lm
+    }
+    pub const fn tensor_count(self) -> u32 {
+        self.data.n_tensors
+    }
+    pub fn tensor(self, index: u32) -> Option<TensorView<'a>> {
+        let index = usize::try_from(index).ok()?;
+        if index >= usize::try_from(self.data.n_tensors).ok()? || index >= self.data.tensors.len() {
+            return None;
+        }
+        Some(TensorView {
+            data: self.data,
+            record: &self.data.tensors[index],
+        })
+    }
+    pub fn tensor_named(self, name: &[u8]) -> Option<TensorView<'a>> {
+        self.data
+            .tensors
+            .iter()
+            .take(usize::try_from(self.data.n_tensors).ok()?)
+            .find(|record| tensor_name_view(self.data, record) == name)
+            .map(|record| TensorView {
+                data: self.data,
+                record,
+            })
+    }
+}
+
+/// Caller-owned values used to construct immutable Moshi voice data.
+#[derive(Clone, Copy, Debug)]
+pub struct MoshiVoiceDataInput<'a> {
+    pub format: &'a [u8],
+    pub tensors: &'a [TensorInput<'a>],
+}
+
+/// Immutable model facts consumed by the Moshi voice owner.
+#[derive(Clone, Copy, Debug)]
+pub struct MoshiVoiceBindingInput<'a> {
+    data: &'a Data,
+}
+
+impl<'a> MoshiVoiceBindingInput<'a> {
+    pub fn architecture_name(self) -> &'a [u8] {
+        architecture_name_view(self.data)
+    }
+    pub const fn component(self) -> MoshiComponent {
+        self.data.moshi_component_id
+    }
+    pub fn format(self) -> &'a [u8] {
+        let end = self
+            .data
+            .moshi_voice_format
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(MAX_MOSHI_VOICE_FORMAT);
+        &self.data.moshi_voice_format[..end]
+    }
+    pub fn embeddings(self) -> Option<TensorView<'a>> {
+        self.data.tensor_named(b"voice.embeddings")
+    }
+    pub fn cache(self) -> Option<TensorView<'a>> {
+        self.data.tensor_named(b"voice.cache")
     }
 }
 
@@ -774,8 +1130,6 @@ impl std::fmt::Display for MimiHParamsError {
     }
 }
 
-impl std::error::Error for MimiHParamsError {}
-
 /// Caller-owned values used to construct immutable Mimi metadata.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MimiHParamsInput {
@@ -792,7 +1146,6 @@ pub struct MimiHParamsInput {
     pub transformer_max_period: i32,
 }
 
-/// Validated immutable Mimi metadata owned by a [`Data`] value.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MimiHParams {
     pub(crate) sample_rate: i32,
@@ -1456,22 +1809,23 @@ impl Metadata {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WeightsBinding;
 
-/// Failure while constructing model-owned Mimi metadata and tensor records.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum DataError {
-    /// A fixed model region cannot represent the supplied input.
     Capacity,
-    /// The input contains more tensors than the model owner can store.
     TooManyTensors,
-    /// Tensor names exceed the model-owned name arena.
     NameCapacity,
-    /// A tensor metadata field is not representable by the model schema.
     InvalidTensor,
-    /// The public GGUF tensor observer returned a typed query failure.
     GgufQuery(emel_gguf::event::QueryError),
-    /// Mimi metadata failed its typed validation contract.
     InvalidMimiHParams(MimiHParamsError),
+    InvalidMoshiLmHParams(MoshiLmHParamsError),
+    InvalidMoshiVoice,
+    InvalidOmniEmbed(crate::omniembed::Error),
+    OmniEmbedNonResident,
+    OmniEmbedDuplicateTensor,
+    OmniEmbedUnknownTensorFamily,
+    OmniEmbedTensorFamilyMismatch(crate::omniembed::Family),
+    InvalidWhisper(crate::whisper::WhisperError),
 }
 
 impl std::fmt::Display for DataError {
@@ -1483,6 +1837,20 @@ impl std::fmt::Display for DataError {
             Self::InvalidTensor => "Mimi tensor metadata is invalid",
             Self::GgufQuery(_) => "GGUF tensor query failed",
             Self::InvalidMimiHParams(error) => return error.fmt(formatter),
+            Self::InvalidMoshiLmHParams(error) => return error.fmt(formatter),
+            Self::InvalidMoshiVoice => "Moshi voice metadata is invalid",
+            Self::InvalidOmniEmbed(error) => {
+                return write!(formatter, "OmniEmbed model contract is invalid: {error}");
+            }
+            Self::OmniEmbedNonResident => "OmniEmbed tensor payload is not resident",
+            Self::OmniEmbedDuplicateTensor => "OmniEmbed tensor names are duplicated",
+            Self::OmniEmbedUnknownTensorFamily => "OmniEmbed tensor name has an unknown family",
+            Self::OmniEmbedTensorFamilyMismatch(_) => {
+                "OmniEmbed tensor family count does not match metadata"
+            }
+            Self::InvalidWhisper(error) => {
+                return write!(formatter, "Whisper model contract is invalid: {error:?}");
+            }
         })
     }
 }
@@ -1502,6 +1870,90 @@ pub struct MimiDataInput<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct MimiBindingInput<'a> {
     data: &'a Data,
+}
+/// Borrowed setup input used to create an immutable model-owned `OmniEmbed` value.
+#[derive(Clone, Copy, Debug)]
+pub struct OmniEmbedDataInput<'a> {
+    /// Exact architecture bytes from validated model metadata.
+    pub architecture: &'a [u8],
+    /// Validated `OmniEmbed` metadata.
+    pub hparams: crate::omniembed::HParams,
+    /// Exact source tensor-family counts from model metadata.
+    pub tensor_families: crate::omniembed::TensorFamilies,
+    /// Resident tensor names, metadata, and payloads copied into model-owned storage.
+    pub tensors: &'a [TensorInput<'a>],
+}
+
+/// Immutable model facts consumed by an embeddings-owned `OmniEmbed` binding.
+#[derive(Clone, Copy, Debug)]
+pub struct OmniEmbedBindingInput<'a> {
+    data: &'a Data,
+}
+
+impl<'a> OmniEmbedBindingInput<'a> {
+    /// Returns the exact model architecture bytes.
+    #[must_use]
+    pub fn architecture_name(self) -> &'a [u8] {
+        architecture_name_view(self.data)
+    }
+
+    /// Returns validated immutable `OmniEmbed` metadata.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called for data that does not contain `OmniEmbed` metadata.
+    #[must_use]
+    pub const fn hparams(self) -> &'a crate::omniembed::HParams {
+        self.data
+            .omniembed
+            .as_ref()
+            .expect("OmniEmbed binding belongs to OmniEmbed data")
+    }
+
+    /// Returns exact source tensor-family counts.
+    #[must_use]
+    pub const fn tensor_families(self) -> crate::omniembed::TensorFamilies {
+        self.data.omniembed_tensor_families
+    }
+
+    /// Returns the number of populated tensor records.
+    #[must_use]
+    pub const fn tensor_count(self) -> u32 {
+        self.data.n_tensors
+    }
+
+    /// Returns one immutable tensor view by populated ordinal.
+    #[must_use]
+    pub fn tensor(self, index: u32) -> Option<TensorView<'a>> {
+        let index = usize::try_from(index).ok()?;
+        if index >= usize::try_from(self.data.n_tensors).ok()? || index >= self.data.tensors.len() {
+            return None;
+        }
+        Some(TensorView {
+            data: self.data,
+            record: &self.data.tensors[index],
+        })
+    }
+
+    /// Returns the first immutable tensor view with the given byte-oriented name.
+    #[must_use]
+    pub fn tensor_named(self, name: &[u8]) -> Option<TensorView<'a>> {
+        self.data
+            .tensors
+            .iter()
+            .take(usize::try_from(self.data.n_tensors).ok()?)
+            .find(|record| tensor_name_view(self.data, record) == name)
+            .map(|record| TensorView {
+                data: self.data,
+                record,
+            })
+    }
+
+    /// Returns the aggregate resident weight byte count.
+    #[must_use]
+    pub const fn weights_size(self) -> u64 {
+        self.data.weights_size
+    }
 }
 
 impl<'a> MimiBindingInput<'a> {
@@ -1643,173 +2095,20 @@ pub struct Data {
     pub(crate) meta: Metadata,
     pub(crate) moshi_component_id: MoshiComponent,
     pub(crate) moshi_lm: MoshiLmHParams,
+    pub(crate) moshi_voice_format: [u8; MAX_MOSHI_VOICE_FORMAT],
     pub(crate) mimi: MimiHParams,
+    pub(crate) whisper: Option<crate::whisper::WhisperHParams>,
+    pub(crate) omniembed: Option<crate::omniembed::HParams>,
+    pub(crate) omniembed_tensor_families: crate::omniembed::TensorFamilies,
 }
 
 impl Data {
-    /// Builds model-owned tensor records from a parsed public GGUF actor.
-    ///
-    /// This is the maintained GGUF-to-model storage path; callers must provide
-    /// metadata whose hparams correspond to the parsed image.
-    ///
-    /// Every tensor name, descriptor, and payload is observed through
-    /// `Loader::process_event(WithTensor)`. Payloads are copied before this
-    /// function returns, so the resulting model remains valid after the GGUF
-    /// source owner is dropped. The GGUF descriptor's `data_offset` remains
-    /// relative to its data section; `file_offset` is computed from the
-    /// observed payload address only after checking source geometry.
+    /// Allocates an empty model with all bounded storage initialized.
     ///
     /// # Errors
     ///
-    /// Returns a typed GGUF query, capacity, or tensor validation error.
-    pub fn try_from_gguf_mimi(
-        loader: &mut emel_gguf::Loader,
-        parsed: emel_gguf::event::ParseDone,
-        hparams: MimiHParams,
-    ) -> Result<Self, DataError> {
-        hparams.validate().map_err(DataError::InvalidMimiHParams)?;
-        let count =
-            usize::try_from(parsed.tensor_count()).map_err(|_| DataError::TooManyTensors)?;
-        if count == 0 || count > MAX_TENSORS {
-            return Err(DataError::TooManyTensors);
-        }
-        // Observe descriptor and view lengths before allocating copy storage.
-        // `WithTensor` borrows source views only for synchronous dispatch, so
-        // every destination buffer is initialized before the second pass.
-        let mut descriptors = Vec::new();
-        descriptors
-            .try_reserve_exact(count)
-            .map_err(|_| DataError::Capacity)?;
-        descriptors.resize_with(count, || None);
-        for index in 0..parsed.tensor_count() {
-            let slot =
-                &mut descriptors[usize::try_from(index).map_err(|_| DataError::TooManyTensors)?];
-            let result = loader.process_event(emel_gguf::event::WithTensor::new(
-                index,
-                |name: &[u8], descriptor: emel_gguf::event::TensorDescriptor, bytes: &[u8]| {
-                    *slot = Some((descriptor, name.len(), bytes.len()));
-                },
-            ));
-            result
-                .map_err(DataError::GgufQuery)?
-                .ok_or(DataError::InvalidTensor)?;
-        }
-
-        // Reserve and initialize every owned destination before any second-pass
-        // dispatch. The callbacks below only compare metadata and copy bytes;
-        // they never grow or allocate a Vec.
-        let mut owned = Vec::new();
-        owned
-            .try_reserve_exact(count)
-            .map_err(|_| DataError::Capacity)?;
-        for index in 0..parsed.tensor_count() {
-            let slot = descriptors
-                [usize::try_from(index).map_err(|_| DataError::TooManyTensors)?]
-            .ok_or(DataError::InvalidTensor)?;
-            let (descriptor, name_capacity, bytes_capacity) = slot;
-            if name_capacity > MAX_NAME_BYTES || bytes_capacity == 0 {
-                return Err(DataError::InvalidTensor);
-            }
-            let mut name = Vec::new();
-            name.try_reserve_exact(name_capacity)
-                .map_err(|_| DataError::Capacity)?;
-            name.resize(name_capacity, 0);
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(bytes_capacity)
-                .map_err(|_| DataError::Capacity)?;
-            bytes.resize(bytes_capacity, 0);
-            owned.push((name, descriptor, bytes));
-        }
-
-        for index in 0..parsed.tensor_count() {
-            let (name, descriptor, bytes) =
-                &mut owned[usize::try_from(index).map_err(|_| DataError::TooManyTensors)?];
-            let observed = loader.process_event(emel_gguf::event::WithTensor::new(
-                index,
-                |borrowed_name: &[u8],
-                 observed_descriptor: emel_gguf::event::TensorDescriptor,
-                 borrowed_bytes: &[u8]| {
-                    if observed_descriptor == *descriptor
-                        && borrowed_name.len() == name.len()
-                        && borrowed_bytes.len() == bytes.len()
-                    {
-                        name.copy_from_slice(borrowed_name);
-                        bytes.copy_from_slice(borrowed_bytes);
-                        true
-                    } else {
-                        false
-                    }
-                },
-            ));
-            if !observed
-                .map_err(DataError::GgufQuery)?
-                .ok_or(DataError::InvalidTensor)?
-            {
-                return Err(DataError::InvalidTensor);
-            }
-            let descriptor_size = descriptor.data_size();
-            let dimensions = descriptor.dimensions();
-            let dimension_count = descriptor.dimension_count();
-            let active = usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
-            if descriptor_size == 0
-                || u64::try_from(bytes.len()).ok() != Some(descriptor_size)
-                || !(1..=4).contains(&dimension_count)
-            {
-                return Err(DataError::InvalidTensor);
-            }
-            if dimensions[..active]
-                .iter()
-                .any(|dimension| *dimension == 0 || *dimension > i64::MAX as u64)
-                || dimensions[active..].iter().any(|dimension| *dimension != 1)
-                || descriptor.alignment() == 0
-                || descriptor.data_offset() % u64::from(descriptor.alignment()) != 0
-                || descriptor
-                    .data_section_offset()
-                    .checked_add(descriptor.data_offset())
-                    != Some(descriptor.file_offset())
-            {
-                return Err(DataError::InvalidTensor);
-            }
-        }
-
-        let mut tensors = Vec::new();
-        tensors
-            .try_reserve_exact(count)
-            .map_err(|_| DataError::Capacity)?;
-        for (name, descriptor, bytes) in &owned {
-            let descriptor_size = descriptor.data_size();
-            tensors.push(TensorInput::with_bytes(
-                name,
-                TensorMetadata::new(TensorMetadataInput {
-                    tensor_type: descriptor.tensor_type(),
-                    dimension_count: descriptor.dimension_count(),
-                    dimensions: descriptor.dimensions(),
-                    data_offset: descriptor.data_offset(),
-                    file_offset: descriptor.file_offset(),
-                    data_size: descriptor_size,
-                    file_index: descriptor.file_index(),
-                    storage: Some(TensorBinding::new(
-                        descriptor.file_index(),
-                        descriptor.file_offset(),
-                        descriptor_size,
-                    )),
-                }),
-                bytes,
-            ));
-        }
-        Self::try_from_mimi(MimiDataInput {
-            hparams,
-            tensors: &tensors,
-        })
-    }
-
-    /// Allocates an empty model owner during setup.
-    ///
-    /// # Errors
-    ///
-    /// Returns the allocator's typed reservation failure when a bounded model
-    /// region cannot be allocated.
+    /// Returns the allocator's reservation error when bounded model storage
+    /// cannot be allocated.
     pub fn try_new() -> Result<Self, TryReserveError> {
         let mut params = HParams::default();
         params.reset();
@@ -1832,8 +2131,38 @@ impl Data {
             meta: Metadata::try_new()?,
             moshi_component_id: MoshiComponent::None,
             moshi_lm,
+            moshi_voice_format: [0; MAX_MOSHI_VOICE_FORMAT],
             mimi: MimiHParams::default(),
+            whisper: None,
+            omniembed: None,
+            omniembed_tensor_families: crate::omniembed::TensorFamilies::default(),
         })
+    }
+
+    /// Builds model-owned tensor records from a parsed public GGUF actor.
+    ///
+    /// The descriptor pass records only bounded lengths; the population pass
+    /// allocates exact owned destinations before dispatching callbacks, so the
+    /// resulting model remains valid after the GGUF source owner is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed GGUF query, capacity, metadata, or tensor validation error.
+    pub fn try_from_gguf_mimi(
+        loader: &mut emel_gguf::Loader,
+        parsed: emel_gguf::event::ParseDone,
+        hparams: MimiHParams,
+    ) -> Result<Self, DataError> {
+        hparams.validate().map_err(DataError::InvalidMimiHParams)?;
+        let count =
+            usize::try_from(parsed.tensor_count()).map_err(|_| DataError::TooManyTensors)?;
+        if count == 0 || count > MAX_TENSORS {
+            return Err(DataError::TooManyTensors);
+        }
+        let (descriptors, name_bytes) = observe_gguf_descriptors(loader, parsed, count)?;
+        let mut data = Self::try_new().map_err(|_| DataError::Capacity)?;
+        populate_gguf_data(&mut data, loader, parsed, hparams, descriptors, name_bytes)?;
+        Ok(data)
     }
 
     /// Copies validated Mimi metadata and tensor records into model-owned storage.
@@ -1851,6 +2180,253 @@ impl Data {
         initialize_mimi_data(&mut data, input.hparams);
         copy_mimi_tensors(&mut data, input.tensors)?;
         Ok(data)
+    }
+    /// Copies validated Moshi `PersonaPlex` voice metadata and tensor records into model-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed voice metadata, invalid tensors, or allocation failure.
+    pub fn try_from_moshi_voice(input: MoshiVoiceDataInput<'_>) -> Result<Self, DataError> {
+        if input.format != MOSHI_VOICE_FORMAT_PERSONAPLEX_PROMPT_V1
+            || input.tensors.len() != 2
+            || input.tensors.iter().any(|tensor| {
+                !matches!(tensor.name(), b"voice.embeddings" | b"voice.cache")
+                    || tensor.bytes().is_none()
+            })
+            || input.tensors[0].name() == input.tensors[1].name()
+        {
+            return Err(DataError::InvalidMoshiVoice);
+        }
+        let mut data = Self::try_new().map_err(|_| DataError::Capacity)?;
+        data.architecture_name[..crate::moshi::ARCHITECTURE_NAME.len()]
+            .copy_from_slice(crate::moshi::ARCHITECTURE_NAME);
+        data.moshi_component_id = MoshiComponent::Voice;
+        data.moshi_voice_format[..input.format.len()].copy_from_slice(input.format);
+        copy_mimi_tensors(&mut data, input.tensors)?;
+        Ok(data)
+    }
+    /// Copies checked Moshi LM metadata and tensor records into model-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed LM tensors or allocation failure.
+    pub fn try_from_moshi_lm(input: MoshiLmDataInput<'_>) -> Result<Self, DataError> {
+        let hparams = input.hparams;
+        hparams
+            .validate()
+            .map_err(DataError::InvalidMoshiLmHParams)?;
+        let mut data = Self::try_new().map_err(|_| DataError::Capacity)?;
+        data.architecture_name[..crate::moshi::ARCHITECTURE_NAME.len()]
+            .copy_from_slice(crate::moshi::ARCHITECTURE_NAME);
+        data.moshi_component_id = MoshiComponent::Lm;
+        data.params.n_ctx = hparams.context;
+        data.params.n_embd = hparams.dim;
+        data.params.n_embd_out = hparams.dim;
+        data.params.n_head = hparams.num_heads;
+        data.params.n_layer = hparams.num_layers;
+        data.params.n_vocab = hparams.text_card;
+        data.moshi_lm = hparams;
+        if input.tensors.is_empty()
+            || input
+                .tensors
+                .iter()
+                .any(|tensor| !tensor.name().starts_with(b"lm."))
+        {
+            return Err(DataError::InvalidTensor);
+        }
+        copy_mimi_tensors(&mut data, input.tensors)?;
+        Ok(data)
+    }
+
+    /// Copies and validates Whisper metadata and tensor payloads into model-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid Whisper metadata, tensors, or allocation failure.
+    pub fn try_from_whisper(
+        input: crate::whisper::WhisperDataInput<'_>,
+    ) -> Result<Self, DataError> {
+        let hparams = crate::whisper::WhisperHParams::try_new(input.hparams)
+            .map_err(crate::whisper::WhisperError::InvalidHParams)
+            .map_err(DataError::InvalidWhisper)?;
+        crate::whisper::validate_input(input, hparams).map_err(DataError::InvalidWhisper)?;
+        let mut data = Self::try_new().map_err(|_| DataError::Capacity)?;
+        data.architecture_name[..crate::whisper::ARCHITECTURE_NAME.len()]
+            .copy_from_slice(crate::whisper::ARCHITECTURE_NAME);
+        data.params.n_ctx = i32::try_from(hparams.n_ctx()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_embd =
+            i32::try_from(hparams.n_embd()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_embd_out = data.params.n_embd;
+        data.params.n_ff = i32::try_from(hparams.n_ff()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_head =
+            i32::try_from(hparams.n_head()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_head_kv =
+            i32::try_from(hparams.n_head_kv()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_layer =
+            i32::try_from(hparams.decoder_block_count()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_vocab =
+            i32::try_from(hparams.n_vocab()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.n_features =
+            i32::try_from(hparams.n_mels()).map_err(|_| DataError::InvalidTensor)?;
+        data.params.decoder_block_count =
+            i32::try_from(hparams.decoder_block_count()).map_err(|_| DataError::InvalidTensor)?;
+        copy_mimi_tensors(&mut data, input.tensors)?;
+        data.whisper = Some(hparams);
+        Ok(data)
+    }
+    /// Copies validated `OmniEmbed` metadata and resident tensor payloads into model-owned storage.
+    /// Copies validated `OmniEmbed` metadata and resident tensor payloads into model-owned storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid metadata, duplicate or unknown tensors, or allocation failure.
+    pub fn try_from_omniembed(input: OmniEmbedDataInput<'_>) -> Result<Self, DataError> {
+        let hparams = input.hparams;
+        crate::omniembed::Detail
+            .validate(crate::omniembed::BindingInput::new(
+                input.architecture,
+                &hparams,
+                input.tensor_families,
+            ))
+            .map_err(DataError::InvalidOmniEmbed)?;
+        if input.tensors.is_empty() {
+            return Err(DataError::TooManyTensors);
+        }
+        let mut seen_families = crate::omniembed::TensorFamilies::default();
+        for tensor in input.tensors.iter().copied() {
+            if tensor.bytes().is_none() {
+                return Err(DataError::OmniEmbedNonResident);
+            }
+            if input
+                .tensors
+                .iter()
+                .filter(|candidate| candidate.name() == tensor.name())
+                .count()
+                != 1
+            {
+                return Err(DataError::OmniEmbedDuplicateTensor);
+            }
+            let family = if tensor
+                .name()
+                .starts_with(crate::omniembed::Family::TextEncoder.prefix())
+            {
+                crate::omniembed::Family::TextEncoder
+            } else if tensor
+                .name()
+                .starts_with(crate::omniembed::Family::TextProjection.prefix())
+            {
+                crate::omniembed::Family::TextProjection
+            } else if tensor
+                .name()
+                .starts_with(crate::omniembed::Family::ImageEncoder.prefix())
+            {
+                crate::omniembed::Family::ImageEncoder
+            } else if tensor
+                .name()
+                .starts_with(crate::omniembed::Family::ImageProjection.prefix())
+            {
+                crate::omniembed::Family::ImageProjection
+            } else if tensor
+                .name()
+                .starts_with(crate::omniembed::Family::AudioEncoder.prefix())
+            {
+                crate::omniembed::Family::AudioEncoder
+            } else if tensor
+                .name()
+                .starts_with(crate::omniembed::Family::AudioProjection.prefix())
+            {
+                crate::omniembed::Family::AudioProjection
+            } else {
+                return Err(DataError::OmniEmbedUnknownTensorFamily);
+            };
+            match family {
+                crate::omniembed::Family::TextEncoder => seen_families.text_encoder += 1,
+                crate::omniembed::Family::TextProjection => seen_families.text_projection += 1,
+                crate::omniembed::Family::ImageEncoder => seen_families.image_encoder += 1,
+                crate::omniembed::Family::ImageProjection => seen_families.image_projection += 1,
+                crate::omniembed::Family::AudioEncoder => seen_families.audio_encoder += 1,
+                crate::omniembed::Family::AudioProjection => seen_families.audio_projection += 1,
+            }
+        }
+        for family in [
+            crate::omniembed::Family::TextEncoder,
+            crate::omniembed::Family::TextProjection,
+            crate::omniembed::Family::ImageEncoder,
+            crate::omniembed::Family::ImageProjection,
+            crate::omniembed::Family::AudioEncoder,
+            crate::omniembed::Family::AudioProjection,
+        ] {
+            if seen_families.count(family) != input.tensor_families.count(family) {
+                return Err(DataError::OmniEmbedTensorFamilyMismatch(family));
+            }
+        }
+        let mut data = Self::try_new().map_err(|_| DataError::Capacity)?;
+        data.architecture_name[..crate::omniembed::ARCHITECTURE_NAME.len()]
+            .copy_from_slice(crate::omniembed::ARCHITECTURE_NAME);
+        copy_mimi_tensors(&mut data, input.tensors)?;
+        data.omniembed = Some(hparams);
+        data.omniembed_tensor_families = input.tensor_families;
+        Ok(data)
+    }
+
+    pub(crate) const fn whisper_hparams(&self) -> Option<&crate::whisper::WhisperHParams> {
+        self.whisper.as_ref()
+    }
+    pub(crate) fn whisper_tensor_count(&self) -> u32 {
+        self.whisper.map_or(0, |_| self.n_tensors)
+    }
+    pub(crate) fn whisper_tensor(&self, index: u32) -> Option<TensorView<'_>> {
+        self.whisper?;
+        let index = usize::try_from(index).ok()?;
+        let count = usize::try_from(self.n_tensors).ok()?;
+        (index < count).then(|| TensorView {
+            data: self,
+            record: &self.tensors[index],
+        })
+    }
+    pub(crate) fn whisper_tensor_named(&self, name: &[u8]) -> Option<TensorView<'_>> {
+        self.whisper?;
+        self.tensors
+            .iter()
+            .take(usize::try_from(self.n_tensors).ok()?)
+            .find(|record| tensor_name_view(self, record) == name)
+            .map(|record| TensorView { data: self, record })
+    }
+    pub(crate) fn whisper_block_count(&self, family: crate::whisper::WhisperFamily) -> u32 {
+        self.whisper.as_ref().map_or(0, |hparams| match family {
+            crate::whisper::WhisperFamily::Encoder => hparams.encoder_block_count(),
+            crate::whisper::WhisperFamily::Decoder => hparams.decoder_block_count(),
+        })
+    }
+    pub(crate) fn whisper_family_count(&self, family: crate::whisper::WhisperFamily) -> u32 {
+        let prefix = match family {
+            crate::whisper::WhisperFamily::Encoder => b"model.encoder.layers.".as_slice(),
+            crate::whisper::WhisperFamily::Decoder => b"model.decoder.layers.".as_slice(),
+        };
+        u32::try_from(
+            self.tensors
+                .iter()
+                .take(usize::try_from(self.n_tensors).unwrap_or(0))
+                .filter(|record| tensor_name_view(self, record).starts_with(prefix))
+                .count(),
+        )
+        .unwrap_or(0)
+    }
+    pub(crate) fn whisper_family_tensor(
+        &self,
+        family: crate::whisper::WhisperFamily,
+        index: u32,
+    ) -> Option<TensorView<'_>> {
+        let prefix = match family {
+            crate::whisper::WhisperFamily::Encoder => b"model.encoder.layers.".as_slice(),
+            crate::whisper::WhisperFamily::Decoder => b"model.decoder.layers.".as_slice(),
+        };
+        self.tensors
+            .iter()
+            .take(usize::try_from(self.n_tensors).ok()?)
+            .filter(|record| tensor_name_view(self, record).starts_with(prefix))
+            .nth(usize::try_from(index).ok()?)
+            .map(|record| TensorView { data: self, record })
     }
 
     /// Returns the immutable model architecture bytes.
@@ -1903,11 +2479,87 @@ impl Data {
     pub const fn weights_split_count(&self) -> u16 {
         self.weights_split_count
     }
+    /// Installs one validated, caller-owned tensor payload into this model.
+    ///
+    /// The tensor record and all model metadata remain in place; only its
+    /// resident payload slot is changed. Validation happens before assignment,
+    /// so malformed input cannot replace existing model state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataError::InvalidTensor`] when the ordinal, stored tensor
+    /// metadata, split-file geometry, or payload length is invalid, or when
+    /// the tensor is already resident.
+    pub(crate) fn install_tensor_bytes(
+        &mut self,
+        tensor_id: u32,
+        bytes: Box<[u8]>,
+    ) -> Result<(), DataError> {
+        let index = usize::try_from(tensor_id).map_err(|_| DataError::InvalidTensor)?;
+        let count = usize::try_from(self.n_tensors).map_err(|_| DataError::InvalidTensor)?;
+        let record = self
+            .tensors
+            .get(index)
+            .filter(|_| index < count)
+            .ok_or(DataError::InvalidTensor)?;
+        let tensor_type = SerializedType::try_from(
+            u32::try_from(record.r#type).map_err(|_| DataError::InvalidTensor)?,
+        )
+        .map_err(|_| DataError::InvalidTensor)?;
+        let dimension_count = u32::try_from(record.n_dims).map_err(|_| DataError::InvalidTensor)?;
+        let active = usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
+        if !(1..=4).contains(&dimension_count) {
+            return Err(DataError::InvalidTensor);
+        }
+        let mut dimensions = [0_u64; 4];
+        for (index, dimension) in record.dims.iter().copied().enumerate() {
+            dimensions[index] = u64::try_from(dimension).map_err(|_| DataError::InvalidTensor)?;
+        }
+        if dimensions[..active].contains(&0)
+            || dimensions[active..].iter().any(|dimension| *dimension != 1)
+            || tensor_type.data_size(dimensions, dimension_count).ok() != Some(record.data_size)
+            || record.data_size == 0
+            || u64::try_from(bytes.len()).ok() != Some(record.data_size)
+            || record.bytes.is_some()
+            || usize::from(record.file_index) >= MAX_SPLIT_FILES
+            || record.data_offset.checked_add(record.data_size).is_none()
+            || record.file_offset.checked_add(record.data_size).is_none()
+            || record.data.is_some_and(|binding| {
+                binding.split_index() != record.file_index
+                    || binding.offset() != record.file_offset
+                    || binding.length() != record.data_size
+            })
+        {
+            return Err(DataError::InvalidTensor);
+        }
+        self.tensors[index].bytes = Some(bytes);
+        Ok(())
+    }
 
+    /// Creates an immutable Moshi LM binding input view.
+    #[must_use]
+    pub const fn moshi_lm_binding_input(&self) -> MoshiLmBindingInput<'_> {
+        MoshiLmBindingInput { data: self }
+    }
+    /// Creates an immutable Moshi voice binding input view.
+    #[must_use]
+    pub const fn moshi_voice_binding_input(&self) -> MoshiVoiceBindingInput<'_> {
+        MoshiVoiceBindingInput { data: self }
+    }
     /// Creates an immutable Mimi binding input view for a speech owner.
     #[must_use]
     pub const fn mimi_binding_input(&self) -> MimiBindingInput<'_> {
         MimiBindingInput { data: self }
+    }
+    /// Creates an immutable `OmniEmbed` binding input view.
+    #[must_use]
+    pub const fn omniembed_binding_input(&self) -> OmniEmbedBindingInput<'_> {
+        OmniEmbedBindingInput { data: self }
+    }
+    /// Creates an immutable Whisper binding input view for a speech owner.
+    #[must_use]
+    pub const fn whisper_binding_input(&self) -> crate::whisper::WhisperBindingInput<'_> {
+        crate::whisper::WhisperBindingInput { data: self }
     }
 
     pub(crate) fn reset(&mut self) {
@@ -1928,7 +2580,213 @@ impl Data {
         self.moshi_component_id = MoshiComponent::None;
         self.moshi_lm.reset();
         self.mimi = MimiHParams::default();
+        self.whisper = None;
+        self.omniembed = None;
+        self.omniembed_tensor_families = crate::omniembed::TensorFamilies::default();
     }
+}
+
+fn observe_gguf_descriptors(
+    loader: &mut emel_gguf::Loader,
+    parsed: emel_gguf::event::ParseDone,
+    count: usize,
+) -> Result<(Vec<Option<ObservedTensor>>, usize), DataError> {
+    let mut descriptors = Vec::new();
+    descriptors
+        .try_reserve_exact(count)
+        .map_err(|_| DataError::Capacity)?;
+    descriptors.resize_with(count, || None);
+    let mut name_bytes = 0usize;
+    for index in 0..parsed.tensor_count() {
+        let slot_index = usize::try_from(index).map_err(|_| DataError::TooManyTensors)?;
+        let slot = &mut descriptors[slot_index];
+        let observed = loader
+            .process_event(emel_gguf::event::WithTensor::new(
+                index,
+                |name: &[u8], descriptor: emel_gguf::event::TensorDescriptor, bytes: &[u8]| {
+                    *slot = Some((descriptor, name.len(), bytes.len()));
+                    true
+                },
+            ))
+            .map_err(DataError::GgufQuery)?
+            .ok_or(DataError::InvalidTensor)?;
+        if !observed {
+            return Err(DataError::InvalidTensor);
+        }
+        let (_, length, _) = slot.ok_or(DataError::InvalidTensor)?;
+        name_bytes = name_bytes
+            .checked_add(length)
+            .ok_or(DataError::NameCapacity)?;
+    }
+    if name_bytes > MAX_NAME_BYTES || name_bytes > u32::MAX as usize {
+        return Err(DataError::NameCapacity);
+    }
+    Ok((descriptors, name_bytes))
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the GGUF bridge validates and moves each bounded tensor in one explicit pass"
+)]
+fn populate_gguf_data(
+    data: &mut Data,
+    loader: &mut emel_gguf::Loader,
+    parsed: emel_gguf::event::ParseDone,
+    hparams: MimiHParams,
+    descriptors: Vec<Option<ObservedTensor>>,
+    name_bytes: usize,
+) -> Result<(), DataError> {
+    let count = descriptors.len();
+    // Allocate every callback destination before the second actor dispatch.
+    // The callback only copies into these exact-length boxes; it never grows a
+    // collection or creates an owned temporary.
+    let mut owned =
+        try_boxed_slice::<Option<OwnedGgufTensor>>(count).map_err(|_| DataError::Capacity)?;
+    for (slot, observed) in owned.iter_mut().zip(descriptors) {
+        let (descriptor, name_length, bytes_length) = observed.ok_or(DataError::InvalidTensor)?;
+        if name_length > MAX_NAME_BYTES || name_length > u32::MAX as usize || bytes_length == 0 {
+            return Err(DataError::InvalidTensor);
+        }
+        let name = try_boxed_slice::<u8>(name_length).map_err(|_| DataError::Capacity)?;
+        let bytes = try_boxed_slice::<u8>(bytes_length).map_err(|_| DataError::Capacity)?;
+        *slot = Some(OwnedGgufTensor {
+            descriptor,
+            name,
+            bytes,
+        });
+    }
+
+    initialize_mimi_data(data, hparams);
+    data.n_tensors = u32::try_from(count).map_err(|_| DataError::TooManyTensors)?;
+    data.name_bytes_used = u32::try_from(name_bytes).map_err(|_| DataError::NameCapacity)?;
+    let mut name_offset = 0usize;
+    let mut split_sizes = [0_u64; MAX_SPLIT_FILES];
+    let mut max_split = 0_u16;
+    let tensor_count =
+        usize::try_from(parsed.tensor_count()).map_err(|_| DataError::TooManyTensors)?;
+    if tensor_count != count {
+        return Err(DataError::InvalidTensor);
+    }
+    for slot_index in 0..tensor_count {
+        let index = u32::try_from(slot_index).map_err(|_| DataError::TooManyTensors)?;
+        copy_gguf_tensor(
+            loader,
+            index,
+            owned[slot_index].as_mut().ok_or(DataError::InvalidTensor)?,
+        )?;
+
+        let owned_tensor = owned[slot_index].take().ok_or(DataError::InvalidTensor)?;
+
+        let descriptor = owned_tensor.descriptor;
+        let descriptor_size = descriptor.data_size();
+        let dimensions = descriptor.dimensions();
+        let dimension_count = descriptor.dimension_count();
+        let active = usize::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?;
+        if descriptor_size == 0
+            || u64::try_from(owned_tensor.bytes.len()).ok() != Some(descriptor_size)
+            || !(1..=4).contains(&dimension_count)
+        {
+            return Err(DataError::InvalidTensor);
+        }
+        if dimensions[..active]
+            .iter()
+            .any(|dimension| *dimension == 0 || *dimension > i64::MAX as u64)
+            || dimensions[active..].iter().any(|dimension| *dimension != 1)
+            || descriptor.alignment() == 0
+            || descriptor.data_offset() % u64::from(descriptor.alignment()) != 0
+            || descriptor
+                .data_section_offset()
+                .checked_add(descriptor.data_offset())
+                != Some(descriptor.file_offset())
+        {
+            return Err(DataError::InvalidTensor);
+        }
+
+        let name_end = name_offset
+            .checked_add(owned_tensor.name.len())
+            .ok_or(DataError::NameCapacity)?;
+        if name_end > name_bytes || name_end > MAX_NAME_BYTES {
+            return Err(DataError::NameCapacity);
+        }
+        data.name_storage[name_offset..name_end].copy_from_slice(&owned_tensor.name);
+
+        let mut dimensions_i64 = [0_i64; 4];
+        for (dimension_index, dimension) in dimensions.into_iter().enumerate() {
+            dimensions_i64[dimension_index] =
+                i64::try_from(dimension).map_err(|_| DataError::InvalidTensor)?;
+        }
+        let split = usize::from(descriptor.file_index());
+        if split >= MAX_SPLIT_FILES {
+            return Err(DataError::InvalidTensor);
+        }
+        let end = descriptor
+            .file_offset()
+            .checked_add(descriptor_size)
+            .ok_or(DataError::InvalidTensor)?;
+        let storage = TensorBinding::new(
+            descriptor.file_index(),
+            descriptor.file_offset(),
+            descriptor_size,
+        );
+        data.tensors[slot_index] = TensorRecord {
+            name_offset: u32::try_from(name_offset).map_err(|_| DataError::NameCapacity)?,
+            name_length: u32::try_from(owned_tensor.name.len())
+                .map_err(|_| DataError::NameCapacity)?,
+            r#type: i32::try_from(descriptor.tensor_type().wire_code())
+                .map_err(|_| DataError::InvalidTensor)?,
+            n_dims: i32::try_from(dimension_count).map_err(|_| DataError::InvalidTensor)?,
+            dims: dimensions_i64,
+            data_offset: descriptor.data_offset(),
+            file_offset: descriptor.file_offset(),
+            data_size: descriptor_size,
+            data: Some(storage),
+            bytes: Some(owned_tensor.bytes),
+            file_index: descriptor.file_index(),
+        };
+        split_sizes[split] = split_sizes[split].max(end);
+        max_split = max_split.max(descriptor.file_index());
+        name_offset = name_end;
+    }
+
+    data.weights_data = Some(WeightsBinding);
+    data.weights_split_count = max_split.saturating_add(1).max(1);
+    data.weights_split_sizes = split_sizes;
+    data.weights_size = split_sizes
+        .iter()
+        .take(usize::from(data.weights_split_count))
+        .try_fold(0_u64, |total, size| total.checked_add(*size))
+        .ok_or(DataError::Capacity)?;
+    Ok(())
+}
+
+fn copy_gguf_tensor(
+    loader: &mut emel_gguf::Loader,
+    index: u32,
+    destination: &mut OwnedGgufTensor,
+) -> Result<(), DataError> {
+    let observed = loader
+        .process_event(emel_gguf::event::WithTensor::new(
+            index,
+            |borrowed_name: &[u8],
+             observed_descriptor: emel_gguf::event::TensorDescriptor,
+             borrowed_bytes: &[u8]| {
+                if observed_descriptor == destination.descriptor
+                    && borrowed_name.len() == destination.name.len()
+                    && borrowed_bytes.len() == destination.bytes.len()
+                {
+                    destination.name.copy_from_slice(borrowed_name);
+                    destination.bytes.copy_from_slice(borrowed_bytes);
+                    true
+                } else {
+                    false
+                }
+            },
+        ))
+        .map_err(DataError::GgufQuery)?;
+    if !observed.ok_or(DataError::InvalidTensor)? {
+        return Err(DataError::InvalidTensor);
+    }
+    Ok(())
 }
 
 fn initialize_mimi_data(data: &mut Data, hparams: MimiHParams) {
@@ -2239,8 +3097,10 @@ mod tests {
         });
         assert_eq!(allocation.count_total, 0);
         let (descriptor, name_length, bytes_length) = observed[0].unwrap();
-        let mut name = vec![0_u8; name_length];
-        let mut bytes = vec![0_u8; bytes_length];
+        let mut name = try_boxed_slice::<u8>(name_length).unwrap();
+        let mut bytes = try_boxed_slice::<u8>(bytes_length).unwrap();
+        assert_eq!(name.len(), name_length);
+        assert_eq!(bytes.len(), bytes_length);
         let allocation = measure(|| {
             let result = loader.process_event(WithTensor::new(
                 0,
@@ -2254,8 +3114,19 @@ mod tests {
             assert_eq!(result, Ok(Some(true)));
         });
         assert_eq!(allocation.count_total, 0);
-        assert_eq!(name, b"weight");
-        assert_eq!(bytes, vec![7_u8; 128]);
+        assert_eq!(&*name, b"weight");
+        assert_eq!(&*bytes, &[7_u8; 128]);
+        let mut owned = OwnedGgufTensor {
+            descriptor,
+            name: try_boxed_slice::<u8>(name_length).unwrap(),
+            bytes: try_boxed_slice::<u8>(bytes_length).unwrap(),
+        };
+        let allocation = measure(|| {
+            copy_gguf_tensor(&mut loader, 0, &mut owned).unwrap();
+        });
+        assert_eq!(allocation.count_total, 0);
+        assert_eq!(&*owned.name, b"weight");
+        assert_eq!(&*owned.bytes, &[7_u8; 128]);
 
         let hparams = MimiHParams::try_new(MimiHParamsInput {
             sample_rate: 24_000,
@@ -2338,6 +3209,7 @@ mod tests {
             file_index: 0,
             storage: Some(TensorBinding::new(0, 256, 128)),
         });
+
         let tensors = [TensorInput::with_bytes(
             b"mimi.encoder.weight",
             metadata,
@@ -3028,5 +3900,195 @@ mod tests {
         }
         samples.sort_by(f64::total_cmp);
         samples[samples.len() / 2]
+    }
+    #[test]
+    fn install_tensor_bytes_validates_ordinal_length_and_duplicate_state() {
+        let metadata = TensorMetadata::new(TensorMetadataInput {
+            tensor_type: SerializedType::F32,
+            dimension_count: 1,
+            dimensions: [4, 1, 1, 1],
+            data_offset: 8,
+            file_offset: 16,
+            data_size: 16,
+            file_index: 3,
+            storage: None,
+        });
+        let hparams = MimiHParams::try_new(MimiHParamsInput {
+            sample_rate: 24_000,
+            frame_rate: 12.5,
+            n_q: 2,
+            card: 32,
+            dim: 16,
+            semantic_n_q: 1,
+            codebook_dim: 8,
+            transformer_num_layers: 2,
+            transformer_num_heads: 2,
+            transformer_context: 8,
+            transformer_max_period: 1_000,
+        })
+        .unwrap();
+        let mut data = Data::try_from_mimi(MimiDataInput {
+            hparams,
+            tensors: &[TensorInput::new(b"weight", metadata)],
+        })
+        .unwrap();
+        assert_eq!(
+            data.install_tensor_bytes(1, vec![0; 16].into_boxed_slice()),
+            Err(DataError::InvalidTensor)
+        );
+        assert_eq!(
+            data.install_tensor_bytes(0, vec![0; 15].into_boxed_slice()),
+            Err(DataError::InvalidTensor)
+        );
+        assert_eq!(
+            data.install_tensor_bytes(0, vec![7; 16].into_boxed_slice()),
+            Ok(())
+        );
+        assert_eq!(data.tensor(0).unwrap().metadata(), Some(metadata));
+        assert_eq!(data.tensor(0).unwrap().byte_view(), Some(&[7; 16][..]));
+        assert_eq!(
+            data.install_tensor_bytes(0, vec![8; 16].into_boxed_slice()),
+            Err(DataError::InvalidTensor)
+        );
+    }
+
+    fn omniembed_hparams() -> crate::omniembed::HParams {
+        crate::omniembed::HParams::try_new(crate::omniembed::HParamsInput {
+            embedding_length: 4,
+            image_encoder_length: 2,
+            audio_encoder_length: 2,
+            image_encoder: crate::omniembed::Encoder::MobileNetV4Medium,
+            audio_encoder: crate::omniembed::Encoder::EfficientAtMn20As,
+            matryoshka_dimensions: &[2, 1],
+        })
+        .unwrap()
+    }
+
+    fn omniembed_families() -> crate::omniembed::TensorFamilies {
+        crate::omniembed::TensorFamilies {
+            text_encoder: 1,
+            text_projection: 1,
+            image_encoder: 1,
+            image_projection: 1,
+            audio_encoder: 1,
+            audio_projection: 1,
+        }
+    }
+
+    fn omniembed_tensors(payload: &[u8; 4]) -> [TensorInput<'_>; 6] {
+        let names = [
+            b"text_encoder.weight".as_slice(),
+            b"text_projection.weight".as_slice(),
+            b"image_encoder.weight".as_slice(),
+            b"image_projection.weight".as_slice(),
+            b"audio_encoder.weight".as_slice(),
+            b"audio_projection.weight".as_slice(),
+        ];
+        names.map(|name| {
+            TensorInput::with_bytes(
+                name,
+                TensorMetadata::new(TensorMetadataInput {
+                    tensor_type: SerializedType::F32,
+                    dimension_count: 1,
+                    dimensions: [1, 1, 1, 1],
+                    data_offset: 0,
+                    file_offset: 0,
+                    data_size: 4,
+                    file_index: 0,
+                    storage: Some(TensorBinding::new(0, 0, 4)),
+                }),
+                payload,
+            )
+        })
+    }
+
+    #[test]
+    fn omniembed_owner_copies_metadata_tensors_and_survives_source_drop() {
+        let payload = [7_u8; 4];
+        let tensors = omniembed_tensors(&payload);
+        let data = Data::try_from_omniembed(OmniEmbedDataInput {
+            architecture: b"omniembed",
+            hparams: omniembed_hparams(),
+            tensor_families: omniembed_families(),
+            tensors: &tensors,
+        })
+        .unwrap();
+        let binding = data.omniembed_binding_input();
+        assert_eq!(binding.architecture_name(), b"omniembed");
+        assert_eq!(binding.hparams().embedding_length(), 4);
+        assert_eq!(binding.hparams().matryoshka_dimension_count(), 2);
+        assert_eq!(binding.tensor_families(), omniembed_families());
+        assert_eq!(binding.tensor_count(), 6);
+        let tensor = binding.tensor_named(b"audio_projection.weight").unwrap();
+        assert_eq!(
+            tensor.metadata().unwrap().tensor_type(),
+            SerializedType::F32
+        );
+        assert_eq!(tensor.byte_view(), Some(&[7_u8; 4][..]));
+    }
+
+    #[test]
+    fn omniembed_owner_rejects_missing_payload_duplicate_unknown_and_bad_size() {
+        let payload = [0_u8; 4];
+        let mut tensors = omniembed_tensors(&payload);
+        tensors[0] = TensorInput::new(tensors[0].name(), tensors[0].metadata());
+        assert_eq!(
+            Data::try_from_omniembed(OmniEmbedDataInput {
+                architecture: b"omniembed",
+                hparams: omniembed_hparams(),
+                tensor_families: omniembed_families(),
+                tensors: &tensors,
+            }),
+            Err(DataError::OmniEmbedNonResident)
+        );
+
+        tensors = omniembed_tensors(&payload);
+        tensors[1] = TensorInput::with_bytes(tensors[0].name(), tensors[1].metadata(), &payload);
+        assert_eq!(
+            Data::try_from_omniembed(OmniEmbedDataInput {
+                architecture: b"omniembed",
+                hparams: omniembed_hparams(),
+                tensor_families: omniembed_families(),
+                tensors: &tensors,
+            }),
+            Err(DataError::OmniEmbedDuplicateTensor)
+        );
+
+        tensors = omniembed_tensors(&payload);
+        tensors[0] = TensorInput::with_bytes(b"unknown.weight", tensors[0].metadata(), &payload);
+        assert_eq!(
+            Data::try_from_omniembed(OmniEmbedDataInput {
+                architecture: b"omniembed",
+                hparams: omniembed_hparams(),
+                tensor_families: omniembed_families(),
+                tensors: &tensors,
+            }),
+            Err(DataError::OmniEmbedUnknownTensorFamily)
+        );
+
+        tensors = omniembed_tensors(&payload);
+        tensors[0] = TensorInput::with_bytes(
+            b"text_encoder.weight",
+            TensorMetadata::new(TensorMetadataInput {
+                tensor_type: SerializedType::F32,
+                dimension_count: 1,
+                dimensions: [1, 1, 1, 1],
+                data_offset: 0,
+                file_offset: 0,
+                data_size: 8,
+                file_index: 0,
+                storage: Some(TensorBinding::new(0, 0, 8)),
+            }),
+            &payload,
+        );
+        assert_eq!(
+            Data::try_from_omniembed(OmniEmbedDataInput {
+                architecture: b"omniembed",
+                hparams: omniembed_hparams(),
+                tensor_families: omniembed_families(),
+                tensors: &tensors,
+            }),
+            Err(DataError::InvalidTensor)
+        );
     }
 }

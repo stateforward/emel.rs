@@ -527,6 +527,7 @@ define_quantized_argmax_event!(
     Q3_K_CODE,
     "`Q3_K` packed matrix-vector argmax using a reusable `Q8_K` RHS."
 );
+
 define_quantized_argmax_event!(
     OpMulMatArgmaxQ4K,
     Q4_K_CODE,
@@ -1058,6 +1059,7 @@ impl_quantized_argmax_event!(
 );
 impl_quantized_argmax_event!(OpMulMatArgmaxQ2K, MatmulArgmaxQ2KRuntime, MulMatArgmaxQ2K);
 impl_quantized_argmax_event!(OpMulMatArgmaxQ3K, MatmulArgmaxQ3KRuntime, MulMatArgmaxQ3K);
+
 impl_quantized_argmax_event!(OpMulMatArgmaxQ4K, MatmulArgmaxQ4KRuntime, MulMatArgmaxQ4K);
 impl_quantized_argmax_event!(OpMulMatArgmaxQ6K, MatmulArgmaxQ6KRuntime, MulMatArgmaxQ6K);
 
@@ -1800,11 +1802,6 @@ const fn packed_u16(bytes: &[u8], offset: usize) -> u16 {
 }
 
 /// Computes the pinned scalar `q4_0` by `q8_0` row dot product.
-///
-/// This is the packed arithmetic from `detail.hpp:3131-3153`; it reads the
-/// two nibbles in the reference ordering and never materializes a row.
-// Keep the reference's separate multiply and accumulation operations. A
-// fused `mul_add` changes intermediate rounding and can change parity bits.
 #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn dot_q4_0(row: &[u8], rhs: &[Q8_0Scratch], blocks: usize) -> f32 {
     let mut sum = 0.0_f32;

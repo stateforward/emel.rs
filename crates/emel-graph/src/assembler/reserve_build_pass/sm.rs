@@ -10,16 +10,14 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::return_self_not_must_use,
-    clippy::empty_structs_with_brackets,
+    clippy::needless_pass_by_value,
     clippy::missing_const_for_fn,
     dead_code,
     unused_imports,
     missing_docs
 )]
-
+use crate::assembler::sm::AllocationPlan;
 use sml::sml;
-use crate::allocator::AllocationPlan;
-
 
 /// Outcome of an assembler phase, matching the C++ phase outcome values.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -210,25 +208,31 @@ impl GraphAssemblerReserveBuildPassStateMachineContext for GraphAssemblerReserve
     }
     fn phase_capacity_exceeded(&self) -> Result<bool, ()> {
         let request = self.request;
-        let overflow = product_overflows_u64(request.max_tensor_count as u64, request.bytes_per_tensor);
+        let overflow = product_overflows_u64(
+            u64::from(request.max_tensor_count),
+            request.bytes_per_tensor,
+        );
         Ok(self.err == AssemblerError::None
             && self.validate_outcome == PhaseOutcome::Done
             && request.max_tensor_count != 0
             && request.bytes_per_tensor != 0
             && (overflow
-                || (request.max_tensor_count as u64).saturating_mul(request.bytes_per_tensor)
+                || u64::from(request.max_tensor_count).saturating_mul(request.bytes_per_tensor)
                     > request.workspace_capacity_bytes))
     }
     fn phase_done(&self) -> Result<bool, ()> {
         let request = self.request;
-        let overflow = product_overflows_u64(request.max_tensor_count as u64, request.bytes_per_tensor);
+        let overflow = product_overflows_u64(
+            u64::from(request.max_tensor_count),
+            request.bytes_per_tensor,
+        );
         Ok(self.err == AssemblerError::None
             && self.validate_outcome == PhaseOutcome::Done
             && request.max_node_count != 0
             && request.max_tensor_count != 0
             && request.bytes_per_tensor != 0
             && !overflow
-            && (request.max_tensor_count as u64) * request.bytes_per_tensor
+            && u64::from(request.max_tensor_count) * request.bytes_per_tensor
                 <= request.workspace_capacity_bytes)
     }
     fn phase_invalid_request(&self) -> Result<bool, ()> {
@@ -247,10 +251,14 @@ fn product_overflows_u64(lhs: u64, rhs: u64) -> bool {
 
 impl GraphAssemblerReserveBuildPassContext {
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.build_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.build_outcome
+    }
 
     #[must_use]
-    pub const fn error(&self) -> AssemblerError { self.err }
+    pub const fn error(&self) -> AssemblerError {
+        self.err
+    }
 }
 
 /// Single-writer, synchronous reserve-build actor.
@@ -277,40 +285,45 @@ impl GraphAssemblerReserveBuildPass {
 
     /// Processes one copied reserve-graph completion synchronously.
     pub fn process_event(&mut self, event: AssemblerEventReserveGraph) -> bool {
-        if !self.machine.is(&GraphAssemblerReserveBuildPassStates::Deciding) {
+        if !self
+            .machine
+            .is(&GraphAssemblerReserveBuildPassStates::Deciding)
+        {
             self.machine.context_mut().build_outcome = PhaseOutcome::Failed;
             self.machine.context_mut().err = AssemblerError::Internal;
             return false;
         }
         self.machine.context_mut().set_event(event);
         self.machine
-            .process_event(GraphAssemblerReserveBuildPassEvents::AssemblerEventReserveGraph(event))
+            .process_event(GraphAssemblerReserveBuildPassEvents::AssemblerEventReserveGraph)
             .is_ok()
     }
 
-    /// Dispatches an explicit unexpected event synchronously.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().build_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = AssemblerError::Internal;
         self.machine
-            .process_event(GraphAssemblerReserveBuildPassEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphAssemblerReserveBuildPassStates::UnexpectedEvent);
+        false
     }
-
     /// Returns the generated machine state.
     #[must_use]
-    pub fn state(&self) -> GraphAssemblerReserveBuildPassStates {
-        *self.machine.state()
+    pub fn state(&self) -> &GraphAssemblerReserveBuildPassStates {
+        self.machine.state()
     }
 
     /// Returns whether the actor is waiting for the completion event.
     #[must_use]
     pub fn is_deciding(&self) -> bool {
-        self.machine.is(&GraphAssemblerReserveBuildPassStates::Deciding)
+        self.machine
+            .is(&GraphAssemblerReserveBuildPassStates::Deciding)
     }
 
     /// Returns whether the build completed successfully.
     #[must_use]
     pub fn is_assembled(&self) -> bool {
-        self.machine.is(&GraphAssemblerReserveBuildPassStates::Assembled)
+        self.machine
+            .is(&GraphAssemblerReserveBuildPassStates::Assembled)
     }
 
     /// Returns whether the build failed.
@@ -326,5 +339,3 @@ impl GraphAssemblerReserveBuildPass {
         self.machine.context()
     }
 }
-/// Short actor alias matching the phase name.
-pub type Actor = GraphAssemblerReserveBuildPass;

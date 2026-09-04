@@ -5,10 +5,10 @@ use emel_gguf::Loader;
 use emel_gguf::event::{
     Bind, ElementKind, Error, MetadataDescriptor, MetadataKind, Parse, Probe, QueryError,
     ReadArrayLength, ReadBool, ReadBoolArrayElement, ReadF32, ReadF32ArrayElement, ReadF64,
-    ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics, ReadUnsigned,
-    ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage, TensorDescriptor, VisitBoolArray,
-    VisitF32Array, VisitStringArray, VisitUnsignedArray, WithByteArray, WithMetadataDescriptor,
-    WithString, WithStringArrayElement, WithTensor,
+    ReadF64ArrayElement, ReadSigned, ReadSignedArrayElement, ReadStringArrayMetrics,
+    ReadStringInto, ReadUnsigned, ReadUnsignedArrayElement, ReadUnsignedArrayMetrics, Storage,
+    TensorDescriptor, VisitBoolArray, VisitF32Array, VisitStringArray, VisitUnsignedArray,
+    WithByteArray, WithMetadataDescriptor, WithString, WithStringArrayElement, WithTensor,
 };
 use emel_tensor::dtype::SerializedType;
 use sml as _;
@@ -846,6 +846,181 @@ fn large_numeric_arrays_use_one_allocation_free_bulk_dispatch() {
 }
 
 #[test]
+fn scalar_query_mismatches_and_fixed_string_capacity_are_classified() {
+    let mut loader = load(&typed_metadata_fixture()).unwrap();
+
+    assert_eq!(
+        loader.process_event(ReadUnsigned::new(b"string")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadSigned::new(b"string")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadF32::new(b"u8")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadF64::new(b"u8")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadBool::new(b"u8")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(WithString::new(b"u8", |value: &[u8]| value.len())),
+        Err(QueryError::TypeMismatch)
+    );
+
+    let mut destination = [0_u8; 2];
+    assert_eq!(
+        loader.process_event(ReadStringInto::new(b"string", &mut destination)),
+        Err(QueryError::Range)
+    );
+    assert_eq!(destination, [0, 0]);
+
+    let mut destination = [0_u8; 2];
+    assert_eq!(
+        loader.process_event(ReadStringInto::new(b"missing", &mut destination)),
+        Ok(None)
+    );
+    let mut destination = [0_u8; 2];
+    assert_eq!(
+        loader.process_event(ReadStringInto::new(b"u8", &mut destination)),
+        Err(QueryError::TypeMismatch)
+    );
+}
+
+#[test]
+fn array_query_mismatches_and_each_indexed_error_are_classified() {
+    let mut loader = load(&typed_metadata_fixture()).unwrap();
+
+    assert_eq!(
+        loader.process_event(ReadArrayLength::new(b"a.u8", ElementKind::Int8)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadUnsignedArrayElement::new(b"a.string", 0)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadSignedArrayElement::new(b"a.string", 0)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadF32ArrayElement::new(b"a.u8", 0)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadF64ArrayElement::new(b"a.u8", 0)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadBoolArrayElement::new(b"a.u8", 0)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(WithStringArrayElement::new(b"a.u8", 0, |value: &[u8]| {
+            value.len()
+        },)),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitStringArray::new(
+            b"a.u8",
+            |_index: u32, _value: &[u8]| {}
+        )),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitF32Array::new(b"a.u8", |_index, _value| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitUnsignedArray::new(b"a.f32", |_index, _value| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(VisitBoolArray::new(b"a.u8", |_index, _value| {})),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadStringArrayMetrics::new(b"a.u8")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(ReadUnsignedArrayMetrics::new(b"a.string")),
+        Err(QueryError::TypeMismatch)
+    );
+    assert_eq!(
+        loader.process_event(WithByteArray::new(b"a.string", |_value: &[u8]| ())),
+        Err(QueryError::TypeMismatch)
+    );
+
+    assert_eq!(
+        loader.process_event(ReadUnsignedArrayElement::new(b"a.u8", 2)),
+        Err(QueryError::IndexOutOfBounds)
+    );
+    assert_eq!(
+        loader.process_event(ReadSignedArrayElement::new(b"a.i16", 2)),
+        Err(QueryError::IndexOutOfBounds)
+    );
+    assert_eq!(
+        loader.process_event(ReadF32ArrayElement::new(b"a.f32", 1)),
+        Err(QueryError::IndexOutOfBounds)
+    );
+    assert_eq!(
+        loader.process_event(ReadF64ArrayElement::new(b"a.f64", 1)),
+        Err(QueryError::IndexOutOfBounds)
+    );
+    assert_eq!(
+        loader.process_event(ReadBoolArrayElement::new(b"a.bool", 2)),
+        Err(QueryError::IndexOutOfBounds)
+    );
+    assert_eq!(
+        loader.process_event(WithStringArrayElement::new(
+            b"a.string",
+            2,
+            |_value: &[u8]| (),
+        )),
+        Err(QueryError::IndexOutOfBounds)
+    );
+}
+
+#[test]
+fn public_outcomes_expose_lifecycle_counts_and_stable_error_text() {
+    let file = typed_metadata_fixture();
+    let mut loader = Loader::new();
+    let probe = loader.process_event(Probe::new(source(&file))).unwrap();
+    assert_eq!(probe.tensor_count(), 0);
+    assert_eq!(probe.metadata_count(), 24);
+    assert!(format!("{probe:?}").starts_with("ProbeDone"));
+    let storage = Storage::exact(probe).unwrap();
+    loader.process_event(Bind::new(storage)).unwrap();
+    let parsed = loader.process_event(Parse::new()).unwrap();
+    assert_eq!(parsed.tensor_count(), 0);
+    assert_eq!(parsed.metadata_count(), 24);
+    assert_eq!(parsed, parsed);
+    assert_eq!(
+        format!("{parsed:?}"),
+        "ParseDone { requirements: Requirements { tensor_count: 0, kv_count: 24, max_key_bytes: 8, max_value_bytes: 32, tensor_data_bytes: 0 } }"
+    );
+
+    for (error, message) in [
+        (Error::InvalidRequest, "invalid GGUF loader request"),
+        (Error::ModelInvalid, "invalid or unsupported GGUF model"),
+        (Error::Capacity, "GGUF loader capacity exceeded"),
+        (Error::ParseFailed, "failed to parse GGUF image"),
+        (Error::Internal, "internal GGUF loader error"),
+        (Error::Untracked, "untracked GGUF loader error"),
+    ] {
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+#[test]
 fn lifecycle_requires_probe_bind_parse_and_reprobe_invalidates_queries() {
     let file = typed_metadata_fixture();
     let mut loader = Loader::new();
@@ -1308,4 +1483,111 @@ fn diagnostics_do_not_expose_generated_state_or_storage_internals() {
     ] {
         assert_eq!(error.to_string(), message);
     }
+}
+
+#[test]
+fn probe_classifies_malformed_metadata_shapes_and_recovers() {
+    fn image(entries: &[(&[u8], u32, &[u8])]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAGIC);
+        append_u32(&mut bytes, VERSION);
+        append_u64(&mut bytes, 0);
+        append_u64(&mut bytes, entries.len() as u64);
+        for (key, kind, payload) in entries {
+            append_kv(&mut bytes, key, *kind, payload);
+        }
+        bytes
+    }
+
+    let cases: Vec<(Error, Vec<u8>)> = vec![
+        (Error::ModelInvalid, image(&[(b"", TYPE_UINT8, &[1])])),
+        (Error::ModelInvalid, image(&[(b"unknown", 13, &[])])),
+        (
+            Error::ParseFailed,
+            image(&[(b"truncated", TYPE_UINT32, &[1, 2])]),
+        ),
+        (
+            Error::ModelInvalid,
+            image(&[(b"general.alignment", TYPE_UINT8, &[64])]),
+        ),
+        (
+            Error::ModelInvalid,
+            image(&[(b"general.alignment", TYPE_UINT32, &[3, 0, 0, 0])]),
+        ),
+        (
+            Error::ModelInvalid,
+            image(&[(b"nested", TYPE_ARRAY, &{
+                let mut value = Vec::new();
+                append_u32(&mut value, TYPE_ARRAY);
+                append_u64(&mut value, 0);
+                value
+            })]),
+        ),
+        (
+            Error::ParseFailed,
+            image(&[(b"huge-string", TYPE_STRING, &u64::MAX.to_le_bytes())]),
+        ),
+        (
+            Error::ModelInvalid,
+            image(&[(b"huge-array", TYPE_ARRAY, &{
+                let mut value = Vec::new();
+                append_u32(&mut value, TYPE_UINT8);
+                append_u64(&mut value, 1_u64 << 30 | 1);
+                value
+            })]),
+        ),
+    ];
+
+    let mut loader = Loader::new();
+    for (expected, file) in cases {
+        assert!(matches!(
+            loader.process_event(Probe::new(source(&file))),
+            Err(actual) if actual == expected
+        ));
+    }
+
+    let valid = typed_metadata_fixture();
+    let probe = loader
+        .process_event(Probe::new(source(&valid)))
+        .expect("a valid probe recovers after malformed requests");
+    assert_eq!(probe.metadata_count(), 24);
+}
+
+#[test]
+fn probe_classifies_truncated_and_inconsistent_tensor_records() {
+    let too_many_dimensions = serialized_tensor_fixture(TYPE_UINT8, &[1, 2, 3, 4, 5], 0);
+    assert!(matches!(
+        Loader::new().process_event(Probe::new(source(&too_many_dimensions))),
+        Err(actual) if actual == Error::ModelInvalid
+    ));
+
+    let truncated_dimensions = serialized_tensor_fixture(TYPE_UINT8, &[1, 2], 0);
+    let mut truncated_dimensions = truncated_dimensions;
+    truncated_dimensions.truncate(24 + 8 + 4 + 8);
+    assert!(matches!(
+        Loader::new().process_event(Probe::new(source(&truncated_dimensions))),
+        Err(actual) if actual == Error::ParseFailed
+    ));
+
+    let mut wrong_offset = serialized_tensor_fixture(TYPE_UINT8, &[4], 4);
+    // Header (24), name length/name (14), dimension count (4), dimension (8),
+    // and type (4) precede the tensor's serialized data offset.
+    wrong_offset[54..62].copy_from_slice(&32_u64.to_le_bytes());
+    assert!(matches!(
+        Loader::new().process_event(Probe::new(source(&wrong_offset))),
+        Err(actual) if actual == Error::ParseFailed
+    ));
+
+    let missing_payload = serialized_tensor_fixture(TYPE_UINT8, &[4], 0);
+    assert!(matches!(
+        Loader::new().process_event(Probe::new(source(&missing_payload))),
+        Err(actual) if actual == Error::ParseFailed
+    ));
+
+    let valid = tensor_fixture();
+    let mut loader = Loader::new();
+    let probe = loader
+        .process_event(Probe::new(source(&valid)))
+        .expect("valid tensor probe remains available after malformed images");
+    assert_eq!(probe.tensor_count(), 1);
 }

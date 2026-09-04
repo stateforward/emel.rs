@@ -89,6 +89,8 @@ pub struct ProcessorExecuteRequest {
     pub seq_primary_ids: u64,
     pub seq_primary_ids_count: i32,
     pub prepare_graph: Option<PrepareGraphFn>,
+    /// Root callback retained by the owning processor for the typed bridge.
+    pub root_prepare_graph: Option<crate::processor::sm::PrepareGraphFn>,
 }
 
 /// Compatibility alias for the C++ `event::execute` request role.
@@ -106,7 +108,10 @@ impl ProcessorEventExecuteStep {
     /// Creates an event with no pre-existing phase error.
     #[must_use]
     pub const fn new(request: ProcessorExecuteRequest) -> Self {
-        Self { request, err: ProcessorError::None }
+        Self {
+            request,
+            err: ProcessorError::None,
+        }
     }
 
     /// Creates an event with a pre-existing phase error.
@@ -117,7 +122,10 @@ impl ProcessorEventExecuteStep {
 
     /// Creates an event selecting the prepare callback.
     #[must_use]
-    pub const fn with_callback(mut request: ProcessorExecuteRequest, callback: PrepareGraphFn) -> Self {
+    pub const fn with_callback(
+        mut request: ProcessorExecuteRequest,
+        callback: PrepareGraphFn,
+    ) -> Self {
         request.prepare_graph = Some(callback);
         Self::new(request)
     }
@@ -171,15 +179,21 @@ impl GraphProcessorPrepareStepContext {
 
     /// Returns the retained phase outcome.
     #[must_use]
-    pub const fn outcome(&self) -> PhaseOutcome { self.prepare_outcome }
+    pub const fn outcome(&self) -> PhaseOutcome {
+        self.prepare_outcome
+    }
 
     /// Returns the retained processor error.
     #[must_use]
-    pub const fn error(&self) -> ProcessorError { self.err }
+    pub const fn error(&self) -> ProcessorError {
+        self.err
+    }
 
     /// Returns whether preparation reused an existing graph.
     #[must_use]
-    pub const fn reused(&self) -> bool { self.graph_reused }
+    pub const fn reused(&self) -> bool {
+        self.graph_reused
+    }
 
     /// Returns a public snapshot of outcome, reuse, and error.
     #[must_use]
@@ -291,57 +305,77 @@ impl GraphProcessorPrepareStepStateMachineContext for GraphProcessorPrepareStepC
 }
 
 /// Synchronous single-writer prepare-phase actor.
-pub struct Processor {
+pub struct GraphProcessorPrepareStepActor {
     machine: GraphProcessorPrepareStepStateMachine<GraphProcessorPrepareStepContext>,
 }
 
-impl Default for Processor {
-    fn default() -> Self { Self::new() }
+impl Default for GraphProcessorPrepareStepActor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl Processor {
+impl GraphProcessorPrepareStepActor {
     /// Creates an actor in generated `deciding` state.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: GraphProcessorPrepareStepStateMachine::new(GraphProcessorPrepareStepContext::default()),
+            machine: GraphProcessorPrepareStepStateMachine::new(
+                GraphProcessorPrepareStepContext::default(),
+            ),
         }
     }
 
     /// Copies and dispatches one execute event synchronously.
     pub fn process_event(&mut self, event: ProcessorEventExecuteStep) -> bool {
         self.machine.context_mut().set_request(event);
-        self.machine
-            .process_event(GraphProcessorPrepareStepEvents::ProcessorEventExecuteStep(event))
-            .is_ok()
+        let origin = GraphProcessorPrepareStepCompletionOrigin::ProcessorEventExecuteStep;
+        if self.machine.process_completion(&origin) != Ok(true) {
+            return false;
+        }
+        if self
+            .machine
+            .is(&GraphProcessorPrepareStepStates::CallbackDecision)
+        {
+            self.machine.process_completion(&origin) == Ok(true)
+        } else {
+            true
+        }
     }
 
     /// Records an explicit unexpected event and transitions to its generated state.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().prepare_outcome = PhaseOutcome::Failed;
+        self.machine.context_mut().err = ProcessorError::InternalError;
         self.machine
-            .process_event(GraphProcessorPrepareStepEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphProcessorPrepareStepStates::UnexpectedEvent);
+        true
     }
 
     /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> &GraphProcessorPrepareStepStates { self.machine.state() }
+    pub fn state(&self) -> &GraphProcessorPrepareStepStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GraphProcessorPrepareStepStates) -> bool { self.machine.is(&state) }
+    pub fn is(&self, state: &GraphProcessorPrepareStepStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns retained bounded context for outcome, reuse, and error inspection.
     #[must_use]
-    pub fn context(&self) -> &GraphProcessorPrepareStepContext { self.machine.context() }
+    pub fn context(&self) -> &GraphProcessorPrepareStepContext {
+        self.machine.context()
+    }
 
     /// Returns a public snapshot of the retained child outcome.
     #[must_use]
-    pub fn outcome(&self) -> PrepareStepOutcome { self.machine.context().outcome_snapshot() }
+    pub fn outcome(&self) -> PrepareStepOutcome {
+        self.machine.context().outcome_snapshot()
+    }
 }
-
-/// Short actor alias used by processor-root integration.
-pub type PrepareStep = Processor;
 
 #[cfg(test)]
 mod tests {
@@ -367,44 +401,54 @@ mod tests {
 
     #[test]
     fn success_preserves_reuse_and_reaches_executed() {
-        let mut request = ProcessorExecuteRequest::default();
-        request.step_index = 7;
-        request.prepare_graph = Some(success);
-        let mut actor = Processor::new();
+        let request = ProcessorExecuteRequest {
+            step_index: 7,
+            prepare_graph: Some(success),
+            ..Default::default()
+        };
+        let mut actor = GraphProcessorPrepareStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
         assert_eq!(actor.context().outcome(), PhaseOutcome::Done);
         assert!(actor.context().reused());
         assert_eq!(actor.context().error(), ProcessorError::None);
-        assert!(actor.is(GraphProcessorPrepareStepStates::Executed));
+        assert!(actor.is(&GraphProcessorPrepareStepStates::Executed));
     }
 
     #[test]
     fn callback_error_preserves_error_and_reuse() {
-        let request = ProcessorExecuteRequest { prepare_graph: Some(callback_error), ..Default::default() };
-        let mut actor = Processor::new();
+        let request = ProcessorExecuteRequest {
+            prepare_graph: Some(callback_error),
+            ..Default::default()
+        };
+        let mut actor = GraphProcessorPrepareStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
         assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
         assert_eq!(actor.context().error(), ProcessorError::Callback(37));
         assert!(actor.context().reused());
-        assert!(actor.is(GraphProcessorPrepareStepStates::ExecuteFailed));
+        assert!(actor.is(&GraphProcessorPrepareStepStates::ExecuteFailed));
     }
 
     #[test]
     fn callback_without_error_maps_to_kernel_failure() {
-        let request = ProcessorExecuteRequest { prepare_graph: Some(callback_failed), ..Default::default() };
-        let mut actor = Processor::new();
+        let request = ProcessorExecuteRequest {
+            prepare_graph: Some(callback_failed),
+            ..Default::default()
+        };
+        let mut actor = GraphProcessorPrepareStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::new(request)));
         assert_eq!(actor.context().error(), ProcessorError::KernelFailed);
     }
 
     #[test]
     fn missing_and_prefailed_requests_are_rejected() {
-        let mut actor = Processor::new();
-        assert!(actor.process_event(ProcessorEventExecuteStep::new(ProcessorExecuteRequest::default())));
+        let mut actor = GraphProcessorPrepareStepActor::new();
+        assert!(actor.process_event(ProcessorEventExecuteStep::new(
+            ProcessorExecuteRequest::default()
+        )));
         assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
         assert_eq!(actor.context().error(), ProcessorError::InvalidRequest);
 
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorPrepareStepActor::new();
         assert!(actor.process_event(ProcessorEventExecuteStep::with_error(
             ProcessorExecuteRequest::default(),
             ProcessorError::Callback(99),
@@ -415,10 +459,10 @@ mod tests {
 
     #[test]
     fn unexpected_event_is_explicit_and_inspectable() {
-        let mut actor = Processor::new();
+        let mut actor = GraphProcessorPrepareStepActor::new();
         assert!(actor.process_unexpected_event());
         assert_eq!(actor.context().outcome(), PhaseOutcome::Failed);
         assert_eq!(actor.context().error(), ProcessorError::InternalError);
-        assert!(actor.is(GraphProcessorPrepareStepStates::UnexpectedEvent));
+        assert!(actor.is(&GraphProcessorPrepareStepStates::UnexpectedEvent));
     }
 }

@@ -6,6 +6,12 @@
 //! fixed-size storage before the generated SML machine is dispatched.
 
 #![allow(
+    clippy::cast_possible_truncation,
+    clippy::derivable_impls,
+    clippy::large_types_passed_by_value,
+    clippy::large_stack_frames,
+    clippy::large_stack_arrays,
+    clippy::elidable_lifetime_names,
     clippy::derive_partial_eq_without_eq,
     clippy::module_name_repetitions,
     clippy::missing_errors_doc,
@@ -62,6 +68,10 @@ pub enum TokenType {
 pub type TokenKind = TokenType;
 
 /// A bounded copy of one lexer token.
+#[allow(
+    clippy::struct_field_names,
+    reason = "public token_type and value_* fields preserve the source parser token contract"
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Token {
     /// Token category.
@@ -97,7 +107,7 @@ impl Token {
         let mut token = Self {
             token_type,
             value: [0; MAX_TOKEN_VALUE_BYTES],
-            value_len: copied as u8,
+            value_len: u8::try_from(copied).expect("bounded token value fits in u8"),
             value_valid: bytes.len() <= MAX_TOKEN_VALUE_BYTES,
             pos,
         };
@@ -224,7 +234,8 @@ impl EventParseRuntime {
         let copied = tokens.len().min(MAX_STATEMENT_TOKENS);
         let mut runtime = Self::default();
         runtime.tokens[..copied].copy_from_slice(&tokens[..copied]);
-        runtime.token_count = copied as u16;
+        runtime.token_count =
+            u16::try_from(copied).expect("bounded statement token count fits in u16");
         runtime
     }
 
@@ -249,7 +260,8 @@ impl EventParseRuntime {
             runtime.tokens[count] = Token::kind(TokenType::CloseStatement, 2 + name.len());
             count += 1;
         }
-        runtime.token_count = count as u16;
+        runtime.token_count =
+            u16::try_from(count).expect("bounded statement token count fits in u16");
         runtime
     }
 }
@@ -321,9 +333,11 @@ impl TextJinjaParserProgramParserStatementParserContext {
     }
 
     fn statement_name_is(&self, expected: &str) -> bool {
-        self.at(1)
-            .and_then(Token::value_str)
-            .is_some_and(|value| self.at(1).is_some_and(|token| token.token_type == TokenType::Identifier) && value == expected)
+        self.at(1).and_then(Token::value_str).is_some_and(|value| {
+            self.at(1)
+                .is_some_and(|token| token.token_type == TokenType::Identifier)
+                && value == expected
+        })
     }
 
     fn fail(&mut self, error: StatementParserError, pos: usize) -> Result<(), ()> {
@@ -387,59 +401,132 @@ impl TextJinjaParserProgramParserStatementParserStateMachineContext
         self.fail(StatementParserError::ParseFailed, pos)
     }
 
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_statement_kind_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_statement_scan(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
-
-    fn statement_identifier_missing(&self) -> Result<bool, ()> {
-        Ok(!self.at(1).is_some_and(|token| token.token_type == TokenType::Identifier))
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_statement_kind_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_statement_scan(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.unexpected()
     }
 
-    fn statement_name_break(&self) -> Result<bool, ()> { Ok(self.statement_name_is("break")) }
-    fn statement_name_call(&self) -> Result<bool, ()> { Ok(self.statement_name_is("call")) }
-    fn statement_name_continue(&self) -> Result<bool, ()> { Ok(self.statement_name_is("continue")) }
-    fn statement_name_elif(&self) -> Result<bool, ()> { Ok(self.statement_name_is("elif")) }
-    fn statement_name_else(&self) -> Result<bool, ()> { Ok(self.statement_name_is("else")) }
-    fn statement_name_endcall(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endcall")) }
-    fn statement_name_endfilter(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endfilter")) }
-    fn statement_name_endfor(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endfor")) }
-    fn statement_name_endgeneration(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endgeneration")) }
-    fn statement_name_endif(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endif")) }
-    fn statement_name_endmacro(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endmacro")) }
-    fn statement_name_endset(&self) -> Result<bool, ()> { Ok(self.statement_name_is("endset")) }
-    fn statement_name_filter(&self) -> Result<bool, ()> { Ok(self.statement_name_is("filter")) }
-    fn statement_name_for(&self) -> Result<bool, ()> { Ok(self.statement_name_is("for")) }
-    fn statement_name_generation(&self) -> Result<bool, ()> { Ok(self.statement_name_is("generation")) }
-    fn statement_name_if(&self) -> Result<bool, ()> { Ok(self.statement_name_is("if")) }
-    fn statement_name_macro(&self) -> Result<bool, ()> { Ok(self.statement_name_is("macro")) }
-    fn statement_name_set(&self) -> Result<bool, ()> { Ok(self.statement_name_is("set")) }
+    fn statement_identifier_missing(&self) -> Result<bool, ()> {
+        Ok(!self
+            .at(1)
+            .is_some_and(|token| token.token_type == TokenType::Identifier))
+    }
+
+    fn statement_name_break(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("break"))
+    }
+    fn statement_name_call(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("call"))
+    }
+    fn statement_name_continue(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("continue"))
+    }
+    fn statement_name_elif(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("elif"))
+    }
+    fn statement_name_else(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("else"))
+    }
+    fn statement_name_endcall(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endcall"))
+    }
+    fn statement_name_endfilter(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endfilter"))
+    }
+    fn statement_name_endfor(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endfor"))
+    }
+    fn statement_name_endgeneration(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endgeneration"))
+    }
+    fn statement_name_endif(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endif"))
+    }
+    fn statement_name_endmacro(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endmacro"))
+    }
+    fn statement_name_endset(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("endset"))
+    }
+    fn statement_name_filter(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("filter"))
+    }
+    fn statement_name_for(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("for"))
+    }
+    fn statement_name_generation(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("generation"))
+    }
+    fn statement_name_if(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("if"))
+    }
+    fn statement_name_macro(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("macro"))
+    }
+    fn statement_name_set(&self) -> Result<bool, ()> {
+        Ok(self.statement_name_is("set"))
+    }
 
     fn statement_name_unknown(&self) -> Result<bool, ()> {
-        let Some(token) = self.at(1) else { return Ok(false) };
+        let Some(token) = self.at(1) else {
+            return Ok(false);
+        };
         if token.token_type != TokenType::Identifier {
             return Ok(false);
         }
         Ok(![
-            "set", "if", "elif", "else", "endif", "for", "endfor", "macro",
-            "endmacro", "call", "endcall", "filter", "endfilter", "break",
-            "continue", "generation", "endgeneration", "endset",
+            "set",
+            "if",
+            "elif",
+            "else",
+            "endif",
+            "for",
+            "endfor",
+            "macro",
+            "endmacro",
+            "call",
+            "endcall",
+            "filter",
+            "endfilter",
+            "break",
+            "continue",
+            "generation",
+            "endgeneration",
+            "endset",
         ]
         .into_iter()
         .any(|name| self.statement_name_is(name)))
     }
 
     fn statement_scan_at_close(&self) -> Result<bool, ()> {
-        Ok(self.current().is_some_and(|token| token.token_type == TokenType::CloseStatement))
+        Ok(self
+            .current()
+            .is_some_and(|token| token.token_type == TokenType::CloseStatement))
     }
 
     fn statement_scan_continue(&self) -> Result<bool, ()> {
-        Ok(self.current().is_some_and(|token| token.token_type != TokenType::CloseStatement))
+        Ok(self
+            .current()
+            .is_some_and(|token| token.token_type != TokenType::CloseStatement))
     }
 
-    fn statement_scan_eof(&self) -> Result<bool, ()> { Ok(self.current().is_none()) }
+    fn statement_scan_eof(&self) -> Result<bool, ()> {
+        Ok(self.current().is_none())
+    }
 }
 
 /// Synchronous single-writer actor around the generated statement parser.
@@ -450,7 +537,9 @@ pub struct TextJinjaParserProgramParserStatementParserActor {
 }
 
 impl Default for TextJinjaParserProgramParserStatementParserActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TextJinjaParserProgramParserStatementParserActor {
@@ -458,13 +547,18 @@ impl TextJinjaParserProgramParserStatementParserActor {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            machine: TextJinjaParserProgramParserStatementParserStateMachine::new(Default::default()),
+            machine: TextJinjaParserProgramParserStatementParserStateMachine::new(
+                TextJinjaParserProgramParserStatementParserContext::default(),
+            ),
         }
     }
 
     /// Copies and dispatches one bounded runtime request to completion.
     pub fn process_event(&mut self, event: EventParseRuntime) -> StatementParseResult {
-        if !self.machine.is(&TextJinjaParserProgramParserStatementParserStates::Deciding) {
+        if !self
+            .machine
+            .is(&TextJinjaParserProgramParserStatementParserStates::Deciding)
+        {
             self.machine.context_mut().result.unexpected = true;
             self.machine.context_mut().result.error = StatementParserError::InternalError;
             self.machine
@@ -473,9 +567,9 @@ impl TextJinjaParserProgramParserStatementParserActor {
         }
         self.machine.context_mut().input = event;
         self.machine.context_mut().result = StatementParseResult::initial();
-        let _ = self.machine.process_event(
-            TextJinjaParserProgramParserStatementParserEvents::EventParseRuntime(event),
-        );
+        let _ = self
+            .machine
+            .process_event(TextJinjaParserProgramParserStatementParserEvents::EventParseRuntime);
         self.machine.context().result
     }
 

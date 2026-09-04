@@ -17,25 +17,34 @@ pub const U64: u32 = 10;
 pub const I64: u32 = 11;
 pub const F64: u32 = 12;
 
+#[derive(Debug, Default)]
 pub struct Fixture {
     entries: Vec<(Vec<u8>, u32, Vec<u8>)>,
 }
 impl Fixture {
+    #[must_use]
     pub fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
+        Self::default()
     }
+    #[must_use]
     pub fn scalar(mut self, key: &[u8], kind: u32, payload: impl Into<Vec<u8>>) -> Self {
         self.entries.push((key.to_vec(), kind, payload.into()));
         self
     }
+    #[must_use]
     pub fn string(self, key: &[u8], value: &[u8]) -> Self {
         self.scalar(key, STRING, string_payload(value))
     }
+    #[must_use]
     pub fn array(self, key: &[u8], kind: u32, values: &[u8], count: u64) -> Self {
         self.scalar(key, ARRAY, array_payload(kind, count, values))
     }
+    /// Adds encoded strings to an array fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the string count cannot be represented by GGUF's fixed-width count.
+    #[must_use]
     pub fn strings(self, key: &[u8], values: &[&[u8]]) -> Self {
         let mut p = Vec::new();
         for v in values {
@@ -48,6 +57,12 @@ impl Fixture {
             u64::try_from(values.len()).expect("fixture string count fits u64"),
         )
     }
+    /// Adds repeated encoded strings to an array fixture.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the repetition count cannot be represented by GGUF's fixed-width count.
+    #[must_use]
     pub fn repeated_strings(self, key: &[u8], value: &[u8], count: usize) -> Self {
         let mut payload = Vec::with_capacity(count.saturating_mul(value.len().saturating_add(8)));
         for _ in 0..count {
@@ -60,6 +75,12 @@ impl Fixture {
             u64::try_from(count).expect("fixture string count fits u64"),
         )
     }
+    /// Builds a complete GGUF v3 image.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fixture lengths cannot be represented by GGUF length fields.
+    #[must_use]
     pub fn build(self) -> Vec<u8> {
         let mut b = b"GGUF".to_vec();
         push_u32(&mut b, 3);
@@ -101,6 +122,11 @@ fn array_payload(k: u32, n: u64, v: &[u8]) -> Vec<u8> {
     b.extend_from_slice(v);
     b
 }
+/// Loads and parses a complete GGUF fixture image.
+///
+/// # Panics
+///
+/// Panics when probing, binding, or parsing the supplied bytes fails.
 pub fn load(bytes: Vec<u8>) -> Loader {
     let mut g = Loader::new();
     let p = g.process_event(Probe::new(Arc::from(bytes))).unwrap();

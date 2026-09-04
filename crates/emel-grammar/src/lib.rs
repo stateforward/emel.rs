@@ -26,13 +26,12 @@ pub mod sampler;
 
 /// Public root rule-parser actor and its typed request/result/state contracts.
 pub use rule_parser::sm::{
-    DoneCallback, ErrorCallback, EventParseRules, GbnfRuleParser, GbnfRuleParserActor,
-    GbnfRuleParserContext, GbnfRuleParserStates, ParseDone, ParseError, ParseOutcome, ParsingDone,
-    ParsingError, RuleParser,
+    DoneCallback, ErrorCallback, EventParseRules, GbnfRuleParserActor, GbnfRuleParserContext,
+    GbnfRuleParserStates, ParseDone, ParseError, ParseOutcome,
 };
 
 /// Public root sampler actor and its typed request/result/state contracts.
 pub use sampler::sm::{
     EventSampleRuntime, GbnfSampler, GbnfSamplerContext, GbnfSamplerStates, Sample, SampleDone,
-    Sampler, SamplerError, make_sampler,
+    SamplerError, make_sampler,
 };

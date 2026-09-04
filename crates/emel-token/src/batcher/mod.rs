@@ -29,6 +29,10 @@ impl TokenBatcher {
     /// Returns [`BatchError::InvalidRequest`] when a request contract check
     /// fails, or [`BatchError::Internal`] when the local state-machine
     /// contract cannot complete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the generated state machine fails to return to its ready state.
     pub fn process_event(&mut self, request: BatchRequest<'_>) -> Result<BatchResult, BatchError> {
         let result = self.machine.dispatch(request);
         assert!(
@@ -50,6 +54,10 @@ impl TokenBatcher {
     ///
     /// Returns [`BatchError::UnexpectedEvent`] while the batcher is in its
     /// ready state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the generated state machine fails to return to its ready state.
     pub fn process_unexpected(&mut self) -> Result<(), BatchError> {
         let result = self.machine.dispatch_unexpected();
         assert!(

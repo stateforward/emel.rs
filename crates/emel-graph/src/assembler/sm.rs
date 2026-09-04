@@ -12,6 +12,7 @@
 use core::cell::{Cell, RefCell};
 use core::fmt;
 
+use crate::allocator::sm as allocator;
 use sml::sml;
 
 /// Typed graph-assembly failures.
@@ -63,6 +64,11 @@ pub struct AllocationPlan {
 }
 
 /// Output published by reserve and assemble operations.
+///
+/// The value is copied into the optional output sink before the completion
+/// callback is invoked. Both the sink and callback are borrowed only for this
+/// synchronous run-to-completion dispatch; the callback's boolean return is
+/// intentionally observational and does not alter the public [`Outcome`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AssemblyOutput {
     /// Topology identity produced by the operation.
@@ -81,9 +87,26 @@ pub struct AssemblyOutput {
     pub lifecycle: LifecycleManifest,
 }
 
+/// Synchronous assembler completion callback.
+///
+/// The callback runs after `output_out` has been updated, if supplied. It must
+/// not retain references or re-enter the assembler; its return value is ignored
+/// because callback observation is not a second success/failure channel.
+pub type DispatchDoneFn = fn(&AssemblyOutput) -> bool;
+/// Synchronous assembler error callback.
+///
+/// Errors publish the zero/default [`AssemblyOutput`] before this callback.
+/// The callback must not retain references or re-enter the assembler, and its
+/// boolean return is ignored.
+pub type DispatchErrorFn = fn(&AssemblyOutput, Error) -> bool;
+
 /// Reserve request corresponding to the C++ `event::reserve` event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Reserve {
+///
+/// Request fields and callback function pointers are caller-owned for the
+/// duration of one synchronous dispatch; the actor retains only successful
+/// reservation facts in its persistent context.
+#[derive(Clone, Copy, Debug)]
+pub struct Reserve<'request> {
     /// Model topology identity.
     pub model_topology: Topology,
     /// Lifecycle manifest identity.
@@ -96,11 +119,17 @@ pub struct Reserve {
     pub bytes_per_tensor: u64,
     /// Available workspace bytes.
     pub workspace_capacity_bytes: u64,
+    pub output_out: Option<&'request Cell<AssemblyOutput>>,
+    pub dispatch_done: Option<DispatchDoneFn>,
+    pub dispatch_error: Option<DispatchErrorFn>,
 }
-
 /// Assemble request corresponding to the C++ `event::assemble` event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Assemble {
+///
+/// Like [`Reserve`], this request is consumed synchronously. Reuse or rebuild
+/// completion is published before `assemble` returns, and no request callback
+/// or transient phase result is retained by the actor.
+#[derive(Clone, Copy, Debug)]
+pub struct Assemble<'request> {
     /// Step-plan identity.
     pub step_plan: Topology,
     /// Lifecycle manifest identity.
@@ -113,15 +142,18 @@ pub struct Assemble {
     pub bytes_per_tensor: u64,
     /// Available workspace bytes.
     pub workspace_capacity_bytes: u64,
+    pub output_out: Option<&'request Cell<AssemblyOutput>>,
+    pub dispatch_done: Option<DispatchDoneFn>,
+    pub dispatch_error: Option<DispatchErrorFn>,
 }
 
 /// Public event set accepted by the actor.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Event {
+#[derive(Clone, Copy, Debug)]
+pub enum Event<'request> {
     /// Reserve graph storage.
-    Reserve(Reserve),
+    Reserve(Reserve<'request>),
     /// Assemble a step plan, reusing a compatible reservation when possible.
-    Assemble(Assemble),
+    Assemble(Assemble<'request>),
 }
 
 /// Explicit event used to exercise unexpected-event handling.
@@ -156,7 +188,7 @@ enum ReuseOutcome {
 
 #[derive(Clone, Copy)]
 struct ReserveRuntime<'dispatch> {
-    request: Reserve,
+    request: Reserve<'dispatch>,
     validate: &'dispatch Cell<PhaseOutcome>,
     build: &'dispatch Cell<PhaseOutcome>,
     alloc: &'dispatch Cell<PhaseOutcome>,
@@ -168,7 +200,7 @@ struct ReserveRuntime<'dispatch> {
 
 #[derive(Clone, Copy)]
 struct AssembleRuntime<'dispatch> {
-    request: Assemble,
+    request: Assemble<'dispatch>,
     validate: &'dispatch Cell<PhaseOutcome>,
     reuse: &'dispatch Cell<ReuseOutcome>,
     build: &'dispatch Cell<PhaseOutcome>,
@@ -180,7 +212,7 @@ struct AssembleRuntime<'dispatch> {
 }
 
 /// Persistent actor-owned reservation context.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct GraphAssemblerContext {
     reserved_topology: Topology,
     reserved_node_count: u32,
@@ -189,6 +221,45 @@ pub struct GraphAssemblerContext {
     topology_version: u32,
     reserved_lifecycle: LifecycleManifest,
     has_reserved_topology: bool,
+    allocator: allocator::Allocator,
+    last_error: Option<Error>,
+}
+
+const fn allocation_done(_: allocator::AllocationDone) -> bool {
+    true
+}
+const fn allocation_error(_: allocator::AllocationErrorEvent) -> bool {
+    true
+}
+const fn map_allocator_error(error: allocator::AllocationError) -> Option<Error> {
+    match error {
+        allocator::AllocationError::None => None,
+        allocator::AllocationError::InvalidRequest => Some(Error::InvalidRequest),
+        allocator::AllocationError::Capacity => Some(Error::Capacity),
+        allocator::AllocationError::Internal => Some(Error::Internal),
+        allocator::AllocationError::Untracked => Some(Error::Untracked),
+    }
+}
+fn publish_done(
+    sink: Option<&Cell<AssemblyOutput>>,
+    cb: Option<DispatchDoneFn>,
+    output: AssemblyOutput,
+) {
+    if let Some(sink) = sink {
+        sink.set(output);
+    }
+    if let Some(cb) = cb {
+        let _ = cb(&sink.map_or(output, Cell::get));
+    }
+}
+fn publish_error(sink: Option<&Cell<AssemblyOutput>>, cb: Option<DispatchErrorFn>, error: Error) {
+    let output = AssemblyOutput::default();
+    if let Some(sink) = sink {
+        sink.set(output);
+    }
+    if let Some(cb) = cb {
+        let _ = cb(&sink.map_or(output, Cell::get), error);
+    }
 }
 
 fn product_overflows(lhs: u32, rhs: u64) -> bool {
@@ -205,7 +276,9 @@ sml! {
         "reserve_validate"_s <= *"uninitialized"_s
             + Reserve(ReserveRuntime<'dispatch>) [guard_reserve_valid] / effect_begin_reserve,
         "reserved"_s <= "reserved"_s
-            + Reserve(ReserveRuntime<'dispatch>) [guard_reserve_valid] / effect_reject_second_reserve,
+            + Reserve(ReserveRuntime<'dispatch>) [guard_reserve_valid] / effect_invalid_reserve,
+        "reserved"_s <= "reserved"_s
+            + Reserve(ReserveRuntime<'dispatch>) [guard_reserve_invalid] / effect_invalid_reserve,
         "uninitialized"_s <= "uninitialized"_s
             + Reserve(ReserveRuntime<'dispatch>) [guard_reserve_invalid] / effect_invalid_reserve,
 
@@ -257,24 +330,24 @@ sml! {
         "assemble_build_decision"_s <= "assemble_reuse_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_rebuild_selected]
             / effect_select_rebuild,
-        "assemble_error"_s <= "assemble_reuse_decision"_s
+        "assemble_dispatch_decision"_s <= "assemble_reuse_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_reuse_invalid]
             / effect_invalid_rebuild,
 
-        "reserved"_s <= "assemble_reuse"_s
+        "assemble_dispatch_decision"_s <= "assemble_reuse"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_reuse_success]
             / effect_commit_reuse,
-        "reserved"_s <= "assemble_reuse"_s
+        "assemble_dispatch_decision"_s <= "assemble_reuse"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_reuse_failure]
-            / effect_publish_assemble_error,
+            / effect_dispatch_assemble_error,
 
         "assemble_build"_s <= "assemble_build_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_build_valid]
             / effect_assemble_build_done,
-        "assemble_error"_s <= "assemble_build_decision"_s
+        "assemble_dispatch_decision"_s <= "assemble_build_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_build_capacity]
             / effect_assemble_build_capacity,
-        "assemble_error"_s <= "assemble_build_decision"_s
+        "assemble_dispatch_decision"_s <= "assemble_build_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_build_invalid]
             / effect_assemble_build_invalid,
         "assemble_alloc_decision"_s <= "assemble_build"_s
@@ -282,17 +355,21 @@ sml! {
         "assemble_alloc"_s <= "assemble_alloc_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_alloc_valid]
             / effect_assemble_alloc_done,
-        "assemble_error"_s <= "assemble_alloc_decision"_s
+        "assemble_dispatch_decision"_s <= "assemble_alloc_decision"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_alloc_invalid]
             / effect_assemble_alloc_invalid,
-        "reserved"_s <= "assemble_alloc"_s
+        "assemble_dispatch_decision"_s <= "assemble_alloc"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_success]
             / effect_commit_rebuild,
-        "reserved"_s <= "assemble_alloc"_s
+        "assemble_dispatch_decision"_s <= "assemble_alloc"_s
             + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_failure]
-            / effect_publish_assemble_error,
-        "reserved"_s <= "assemble_error"_s
-            + completion<Assemble>(AssembleRuntime<'dispatch>) / effect_publish_assemble_error,
+            / effect_dispatch_assemble_error,
+        "reserved"_s <= "assemble_dispatch_decision"_s
+            + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_error_none]
+            / effect_dispatch_assemble_done,
+        "reserved"_s <= "assemble_dispatch_decision"_s
+            + completion<Assemble>(AssembleRuntime<'dispatch>) [guard_assemble_error]
+            / effect_dispatch_assemble_error,
 
         // Every non-ready state has an explicit recovery path for an unexpected event.
         "uninitialized"_s <= "uninitialized"_s + Unexpected(UnexpectedEvent)
@@ -325,7 +402,7 @@ sml! {
             / effect_unexpected_assemble,
         "reserved"_s <= "assemble_alloc"_s + Unexpected(UnexpectedEvent)
             / effect_unexpected_assemble,
-        "reserved"_s <= "assemble_error"_s + Unexpected(UnexpectedEvent)
+        "reserved"_s <= "assemble_dispatch_decision"_s + Unexpected(UnexpectedEvent)
             / effect_unexpected_assemble,
     }
 }
@@ -361,7 +438,9 @@ impl Assembler {
     }
 
     /// Dispatches a public event synchronously.
-    pub fn process_event(&mut self, event: Event) -> Result<Outcome, Error> {
+    ///
+    /// # Errors
+    pub fn process_event<'request>(&mut self, event: Event<'request>) -> Result<Outcome, Error> {
         match event {
             Event::Reserve(request) => self.reserve(request),
             Event::Assemble(request) => self.assemble(request),
@@ -369,7 +448,11 @@ impl Assembler {
     }
 
     /// Dispatches a reserve request through the explicit reserve phases.
-    pub fn reserve(&mut self, request: Reserve) -> Result<Outcome, Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is invalid, exceeds capacity, or an internal phase fails.
+    pub fn reserve<'request>(&mut self, request: Reserve<'request>) -> Result<Outcome, Error> {
         let validate = Cell::new(PhaseOutcome::Unknown);
         let build = Cell::new(PhaseOutcome::Unknown);
         let alloc = Cell::new(PhaseOutcome::Unknown);
@@ -393,7 +476,11 @@ impl Assembler {
     }
 
     /// Dispatches an assemble request through validation, reuse/rebuild, and allocation phases.
-    pub fn assemble(&mut self, request: Assemble) -> Result<Outcome, Error> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is invalid, exceeds capacity, or an internal phase fails.
+    pub fn assemble<'request>(&mut self, request: Assemble<'request>) -> Result<Outcome, Error> {
         let validate = Cell::new(PhaseOutcome::Unknown);
         let reuse = Cell::new(ReuseOutcome::Unknown);
         let build = Cell::new(PhaseOutcome::Unknown);
@@ -419,6 +506,10 @@ impl Assembler {
     }
 
     /// Dispatches an explicit unexpected event and recovers to the owning public state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnexpectedEvent`] after recovery, or [`Error::Internal`] if recovery fails.
     pub fn process_unexpected(&mut self, event: UnexpectedEvent) -> Result<Outcome, Error> {
         self.machine
             .process_event(GraphAssemblerEvents::Unexpected(event))
@@ -446,7 +537,10 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
             && event.request.max_node_count != 0
             && event.request.max_tensor_count != 0
             && event.request.bytes_per_tensor != 0
-            && event.request.workspace_capacity_bytes != 0)
+            && event.request.workspace_capacity_bytes != 0
+            && event.request.output_out.is_some()
+            && event.request.dispatch_done.is_some()
+            && event.request.dispatch_error.is_some())
     }
 
     fn guard_reserve_invalid(&self, event: &ReserveRuntime<'_>) -> Result<bool, ()> {
@@ -511,7 +605,10 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
             && event.request.node_count_hint != 0
             && event.request.tensor_count_hint != 0
             && event.request.bytes_per_tensor != 0
-            && event.request.workspace_capacity_bytes != 0)
+            && event.request.workspace_capacity_bytes != 0
+            && event.request.output_out.is_some()
+            && event.request.dispatch_done.is_some()
+            && event.request.dispatch_error.is_some())
     }
 
     fn guard_assemble_invalid(&self, event: &AssembleRuntime<'_>) -> Result<bool, ()> {
@@ -522,22 +619,20 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
         Ok(event.validate.get() == PhaseOutcome::Done
             && self.has_reserved_topology
             && event.request.node_count_hint == self.reserved_node_count
-            && event.request.tensor_count_hint == self.reserved_tensor_count
-            && event.request.lifecycle == self.reserved_lifecycle)
+            && event.request.tensor_count_hint == self.reserved_tensor_count)
     }
 
     fn guard_rebuild_selected(&self, event: &AssembleRuntime<'_>) -> Result<bool, ()> {
-        Ok(event.validate.get() == PhaseOutcome::Done
+        Ok((event.validate.get() == PhaseOutcome::Done
             && !self.has_reserved_topology
             && event.request.node_count_hint != 0
-            && event.request.tensor_count_hint != 0
-            || event.validate.get() == PhaseOutcome::Done
+            && event.request.tensor_count_hint != 0)
+            || (event.validate.get() == PhaseOutcome::Done
                 && self.has_reserved_topology
                 && (event.request.node_count_hint != self.reserved_node_count
-                    || event.request.tensor_count_hint != self.reserved_tensor_count
-                    || event.request.lifecycle != self.reserved_lifecycle)
+                    || event.request.tensor_count_hint != self.reserved_tensor_count)
                 && event.request.node_count_hint != 0
-                && event.request.tensor_count_hint != 0)
+                && event.request.tensor_count_hint != 0))
     }
 
     fn guard_assemble_reuse_invalid(&self, event: &AssembleRuntime<'_>) -> Result<bool, ()> {
@@ -603,6 +698,14 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
         Ok(!self.guard_assemble_success(event)?)
     }
 
+    fn guard_assemble_error_none(&self, event: &AssembleRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.err.get().is_none())
+    }
+
+    fn guard_assemble_error(&self, event: &AssembleRuntime<'_>) -> Result<bool, ()> {
+        Ok(event.err.get().is_some())
+    }
+
     fn effect_begin_reserve(&mut self, event: ReserveRuntime<'_>) -> Result<(), ()> {
         event.validate.set(PhaseOutcome::Unknown);
         event.build.set(PhaseOutcome::Unknown);
@@ -614,14 +717,13 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
         Ok(())
     }
 
-    fn effect_reject_second_reserve(&mut self, event: ReserveRuntime<'_>) -> Result<(), ()> {
-        event.err.set(Some(Error::Internal));
-        *event.result.borrow_mut() = Err(Error::Internal);
-        Ok(())
-    }
-
     fn effect_invalid_reserve(&mut self, event: ReserveRuntime<'_>) -> Result<(), ()> {
         event.err.set(Some(Error::InvalidRequest));
+        publish_error(
+            event.request.output_out,
+            event.request.dispatch_error,
+            Error::InvalidRequest,
+        );
         *event.result.borrow_mut() = Err(Error::InvalidRequest);
         Ok(())
     }
@@ -661,7 +763,34 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
     }
 
     fn effect_reserve_alloc_done(&mut self, event: ReserveRuntime<'_>) -> Result<(), ()> {
-        event.alloc.set(PhaseOutcome::Done);
+        let request = allocator::EventAllocateGraphPlan {
+            request: allocator::AllocateGraph {
+                graph_topology: event.request.model_topology.0,
+                plan_out: true,
+                node_count: event.request.max_node_count,
+                tensor_count: event.request.max_tensor_count,
+                tensor_capacity: event.request.max_tensor_count,
+                interval_capacity: event.request.max_tensor_count,
+                bytes_per_tensor: event.request.bytes_per_tensor,
+                workspace_capacity_bytes: event.request.workspace_capacity_bytes,
+                dispatch_done: Some(allocation_done),
+                dispatch_error: Some(allocation_error),
+            },
+        };
+        let accepted = self.allocator.process_event(request);
+        let child_error = map_allocator_error(self.allocator.error());
+        if accepted && child_error.is_none() {
+            let plan = self.allocator.plan();
+            event.plan.set(AllocationPlan {
+                tensor_count: plan.tensor_count,
+                interval_count: plan.interval_count,
+                required_buffer_bytes: plan.required_buffer_bytes,
+            });
+            event.alloc.set(PhaseOutcome::Done);
+        } else {
+            event.alloc.set(PhaseOutcome::Failed);
+            event.err.set(child_error.or(Some(Error::Internal)));
+        }
         Ok(())
     }
 
@@ -689,12 +818,23 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
             lifecycle: self.reserved_lifecycle,
         };
         event.output.set(output);
+        publish_done(
+            event.request.output_out,
+            event.request.dispatch_done,
+            output,
+        );
         *event.result.borrow_mut() = Ok(Outcome::Reserved(output));
         Ok(())
     }
 
     fn effect_publish_reserve_error(&mut self, event: ReserveRuntime<'_>) -> Result<(), ()> {
-        *event.result.borrow_mut() = Err(event.err.get().unwrap_or(Error::Internal));
+        let error = event.err.get().unwrap_or(Error::Internal);
+        publish_error(
+            event.request.output_out,
+            event.request.dispatch_error,
+            error,
+        );
+        *event.result.borrow_mut() = Err(error);
         Ok(())
     }
 
@@ -712,12 +852,22 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
 
     fn effect_invalid_assemble(&mut self, event: AssembleRuntime<'_>) -> Result<(), ()> {
         event.err.set(Some(Error::InvalidRequest));
+        publish_error(
+            event.request.output_out,
+            event.request.dispatch_error,
+            Error::InvalidRequest,
+        );
         *event.result.borrow_mut() = Err(Error::InvalidRequest);
         Ok(())
     }
 
     fn effect_uninitialized_assemble(&mut self, event: AssembleRuntime<'_>) -> Result<(), ()> {
         event.err.set(Some(Error::InvalidRequest));
+        publish_error(
+            event.request.output_out,
+            event.request.dispatch_error,
+            Error::InvalidRequest,
+        );
         *event.result.borrow_mut() = Err(Error::InvalidRequest);
         Ok(())
     }
@@ -756,15 +906,21 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
             required_buffer_bytes: self.reserved_required_buffer_bytes,
             version: self.topology_version,
             reused_topology: true,
-            lifecycle: event.request.lifecycle,
+            lifecycle: self.reserved_lifecycle,
         };
         event.output.set(output);
         *event.result.borrow_mut() = Ok(Outcome::Assembled(output));
         Ok(())
     }
 
-    fn effect_publish_assemble_error(&mut self, event: AssembleRuntime<'_>) -> Result<(), ()> {
-        *event.result.borrow_mut() = Err(event.err.get().unwrap_or(Error::Internal));
+    fn effect_dispatch_assemble_error(&mut self, event: AssembleRuntime<'_>) -> Result<(), ()> {
+        let error = event.err.get().unwrap_or(Error::Internal);
+        publish_error(
+            event.request.output_out,
+            event.request.dispatch_error,
+            error,
+        );
+        *event.result.borrow_mut() = Err(error);
         Ok(())
     }
 
@@ -798,7 +954,34 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
     }
 
     fn effect_assemble_alloc_done(&mut self, event: AssembleRuntime<'_>) -> Result<(), ()> {
-        event.alloc.set(PhaseOutcome::Done);
+        let request = allocator::EventAllocateGraphPlan {
+            request: allocator::AllocateGraph {
+                graph_topology: event.request.step_plan.0,
+                plan_out: true,
+                node_count: event.request.node_count_hint,
+                tensor_count: event.request.tensor_count_hint,
+                tensor_capacity: event.request.tensor_count_hint,
+                interval_capacity: event.request.tensor_count_hint,
+                bytes_per_tensor: event.request.bytes_per_tensor,
+                workspace_capacity_bytes: event.request.workspace_capacity_bytes,
+                dispatch_done: Some(allocation_done),
+                dispatch_error: Some(allocation_error),
+            },
+        };
+        let accepted = self.allocator.process_event(request);
+        let child_error = map_allocator_error(self.allocator.error());
+        if accepted && child_error.is_none() {
+            let plan = self.allocator.plan();
+            event.plan.set(AllocationPlan {
+                tensor_count: plan.tensor_count,
+                interval_count: plan.interval_count,
+                required_buffer_bytes: plan.required_buffer_bytes,
+            });
+            event.alloc.set(PhaseOutcome::Done);
+        } else {
+            event.alloc.set(PhaseOutcome::Failed);
+            event.err.set(child_error.or(Some(Error::Internal)));
+        }
         Ok(())
     }
 
@@ -831,132 +1014,343 @@ impl GraphAssemblerStateMachineContext for GraphAssemblerContext {
     }
 
     fn effect_unexpected_uninitialized(&mut self, _event: UnexpectedEvent) -> Result<(), ()> {
+        self.last_error = Some(Error::Internal);
         Ok(())
     }
 
     fn effect_unexpected_reserved(&mut self, _event: UnexpectedEvent) -> Result<(), ()> {
+        self.last_error = Some(Error::Internal);
         Ok(())
     }
 
     fn effect_unexpected_reserve(&mut self, _event: UnexpectedEvent) -> Result<(), ()> {
+        self.last_error = Some(Error::Internal);
         Ok(())
     }
 
     fn effect_unexpected_assemble(&mut self, _event: UnexpectedEvent) -> Result<(), ()> {
+        self.last_error = Some(Error::Internal);
+        Ok(())
+    }
+
+    fn effect_dispatch_assemble_done(&mut self, event: AssembleRuntime<'_>) -> Result<(), ()> {
+        let output = event.output.get();
+        publish_done(
+            event.request.output_out,
+            event.request.dispatch_done,
+            output,
+        );
         Ok(())
     }
 }
 
-/// Compatibility alias for code that names the actor `GraphAssembler`.
-pub type GraphAssembler = Assembler;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     const TOPOLOGY: Topology = Topology(1);
     const PLAN: Topology = Topology(2);
+    const OTHER_TOPOLOGY: Topology = Topology(9);
     const LIFECYCLE: LifecycleManifest = LifecycleManifest(3);
+    const OTHER_LIFECYCLE: LifecycleManifest = LifecycleManifest(9);
 
-    const fn reserve(workspace_capacity_bytes: u64) -> Reserve {
+    static ORDER_DONE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DUPLICATE_VALID_ERRORS: AtomicUsize = AtomicUsize::new(0);
+    static DUPLICATE_INVALID_ERRORS: AtomicUsize = AtomicUsize::new(0);
+    static REBUILD_DONE_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static REBUILD_CAPACITY_ERRORS: AtomicUsize = AtomicUsize::new(0);
+    static INVALID_ERRORS: AtomicUsize = AtomicUsize::new(0);
+    static LIFECYCLE_DONE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn done_callback(output: &AssemblyOutput) -> bool {
+        assert_ne!(*output, AssemblyOutput::default());
+        true
+    }
+
+    fn error_callback(output: &AssemblyOutput, _: Error) -> bool {
+        assert_eq!(*output, AssemblyOutput::default());
+        true
+    }
+
+    fn ordering_done(output: &AssemblyOutput) -> bool {
+        assert_ne!(*output, AssemblyOutput::default());
+        ORDER_DONE_CALLS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn duplicate_valid_error(output: &AssemblyOutput, error: Error) -> bool {
+        assert_eq!(*output, AssemblyOutput::default());
+        assert_eq!(error, Error::InvalidRequest);
+        DUPLICATE_VALID_ERRORS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn duplicate_invalid_error(output: &AssemblyOutput, error: Error) -> bool {
+        assert_eq!(*output, AssemblyOutput::default());
+        assert_eq!(error, Error::InvalidRequest);
+        DUPLICATE_INVALID_ERRORS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn rebuild_done(output: &AssemblyOutput) -> bool {
+        assert_eq!(output.graph_topology, PLAN);
+        REBUILD_DONE_CALLS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn rebuild_capacity_error(output: &AssemblyOutput, error: Error) -> bool {
+        assert_eq!(*output, AssemblyOutput::default());
+        assert_eq!(error, Error::Capacity);
+        REBUILD_CAPACITY_ERRORS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn invalid_error(output: &AssemblyOutput, error: Error) -> bool {
+        assert_eq!(*output, AssemblyOutput::default());
+        assert_eq!(error, Error::InvalidRequest);
+        INVALID_ERRORS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn lifecycle_done(output: &AssemblyOutput) -> bool {
+        assert_eq!(output.lifecycle, LIFECYCLE);
+        LIFECYCLE_DONE_CALLS.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn callback_false(_: &AssemblyOutput) -> bool {
+        false
+    }
+
+    fn error_callback_false(output: &AssemblyOutput, error: Error) -> bool {
+        assert_eq!(*output, AssemblyOutput::default());
+        assert_eq!(error, Error::InvalidRequest);
+        false
+    }
+
+    fn reserve<'a>(capacity: u64, sink: &'a Cell<AssemblyOutput>) -> Reserve<'a> {
         Reserve {
             model_topology: TOPOLOGY,
             lifecycle: LIFECYCLE,
             max_node_count: 4,
             max_tensor_count: 8,
             bytes_per_tensor: 16,
-            workspace_capacity_bytes,
+            workspace_capacity_bytes: capacity,
+            output_out: Some(sink),
+            dispatch_done: Some(done_callback),
+            dispatch_error: Some(error_callback),
         }
     }
 
-    const fn assemble(node_count_hint: u32, tensor_count_hint: u32, capacity: u64) -> Assemble {
+    fn assemble<'a>(
+        nodes: u32,
+        tensors: u32,
+        capacity: u64,
+        sink: &'a Cell<AssemblyOutput>,
+    ) -> Assemble<'a> {
         Assemble {
             step_plan: PLAN,
             lifecycle: LIFECYCLE,
-            node_count_hint,
-            tensor_count_hint,
+            node_count_hint: nodes,
+            tensor_count_hint: tensors,
             bytes_per_tensor: 16,
             workspace_capacity_bytes: capacity,
+            output_out: Some(sink),
+            dispatch_done: Some(done_callback),
+            dispatch_error: Some(error_callback),
+        }
+    }
+
+    fn reserved_output() -> AssemblyOutput {
+        AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            node_count: 4,
+            tensor_count: 8,
+            required_buffer_bytes: 128,
+            version: 1,
+            reused_topology: false,
+            lifecycle: LIFECYCLE,
+        }
+    }
+
+    fn reused_output() -> AssemblyOutput {
+        AssemblyOutput {
+            reused_topology: true,
+            ..reserved_output()
         }
     }
 
     #[test]
-    fn reserve_success_publishes_allocation_and_enters_reserved_state() {
+    fn reserve_success_publishes_output_and_enters_reserved_state() {
         let mut actor = Assembler::new();
+        let sink = Cell::new(AssemblyOutput::default());
+
         assert_eq!(
-            actor.reserve(reserve(128)),
-            Ok(Outcome::Reserved(AssemblyOutput {
-                graph_topology: TOPOLOGY,
-                node_count: 4,
-                tensor_count: 8,
-                required_buffer_bytes: 128,
-                version: 1,
-                reused_topology: false,
-                lifecycle: LIFECYCLE,
-            }))
+            actor.reserve(reserve(128, &sink)),
+            Ok(Outcome::Reserved(reserved_output()))
         );
+        assert_eq!(sink.get(), reserved_output());
         assert!(actor.is_reserved());
     }
 
     #[test]
-    fn reserve_capacity_failure_is_typed_and_does_not_reserve() {
+    fn reserve_capacity_failure_resets_output_and_does_not_reserve() {
         let mut actor = Assembler::new();
-        assert_eq!(actor.reserve(reserve(127)), Err(Error::Capacity));
+        let sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+        REBUILD_CAPACITY_ERRORS.store(0, Ordering::SeqCst);
+
+        let result = actor.reserve(Reserve {
+            dispatch_error: Some(rebuild_capacity_error),
+            ..reserve(127, &sink)
+        });
+
+        assert_eq!(result, Err(Error::Capacity));
+        assert_eq!(sink.get(), AssemblyOutput::default());
+        assert_eq!(REBUILD_CAPACITY_ERRORS.load(Ordering::SeqCst), 1);
         assert!(actor.is_uninitialized());
     }
 
     #[test]
-    fn duplicate_reserve_is_rejected_without_replacing_reservation() {
+    fn missing_publication_fields_are_rejected_without_reserving() {
         let mut actor = Assembler::new();
-        assert!(actor.reserve(reserve(128)).is_ok());
+
+        let sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
         assert_eq!(
             actor.reserve(Reserve {
-                model_topology: Topology(9),
-                ..reserve(256)
+                output_out: None,
+                ..reserve(128, &sink)
             }),
-            Err(Error::Internal)
+            Err(Error::InvalidRequest)
         );
-        assert!(actor.is_reserved());
+        assert_eq!(sink.get().graph_topology, TOPOLOGY);
+
+        let sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
         assert_eq!(
-            actor.assemble(assemble(4, 8, 128)),
-            Ok(Outcome::Assembled(AssemblyOutput {
-                graph_topology: TOPOLOGY,
-                node_count: 4,
-                tensor_count: 8,
-                required_buffer_bytes: 128,
-                version: 1,
-                reused_topology: true,
-                lifecycle: LIFECYCLE,
-            }))
+            actor.reserve(Reserve {
+                dispatch_done: None,
+                ..reserve(128, &sink)
+            }),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(sink.get(), AssemblyOutput::default());
+
+        let sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+        assert_eq!(
+            actor.reserve(Reserve {
+                dispatch_error: None,
+                ..reserve(128, &sink)
+            }),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(sink.get(), AssemblyOutput::default());
+        assert!(actor.is_uninitialized());
+    }
+
+    #[test]
+    fn valid_duplicate_reserve_rejects_and_preserves_original_reservation() {
+        let mut actor = Assembler::new();
+        let first_sink = Cell::new(AssemblyOutput::default());
+        let second_sink = Cell::new(AssemblyOutput {
+            graph_topology: OTHER_TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+        DUPLICATE_VALID_ERRORS.store(0, Ordering::SeqCst);
+
+        assert_eq!(
+            actor.reserve(reserve(128, &first_sink)),
+            Ok(Outcome::Reserved(reserved_output()))
+        );
+        assert_eq!(
+            actor.reserve(Reserve {
+                model_topology: OTHER_TOPOLOGY,
+                lifecycle: OTHER_LIFECYCLE,
+                dispatch_error: Some(duplicate_valid_error),
+                ..reserve(256, &second_sink)
+            }),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(second_sink.get(), AssemblyOutput::default());
+        assert_eq!(DUPLICATE_VALID_ERRORS.load(Ordering::SeqCst), 1);
+        assert!(actor.is_reserved());
+
+        let reuse_sink = Cell::new(AssemblyOutput::default());
+        assert_eq!(
+            actor.assemble(assemble(4, 8, 128, &reuse_sink)),
+            Ok(Outcome::Assembled(reused_output()))
+        );
+        assert_eq!(reuse_sink.get(), reused_output());
+    }
+
+    #[test]
+    fn invalid_duplicate_reserve_rejects_and_preserves_original_reservation() {
+        let mut actor = Assembler::new();
+        let first_sink = Cell::new(AssemblyOutput::default());
+        let second_sink = Cell::new(AssemblyOutput {
+            graph_topology: OTHER_TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+        DUPLICATE_INVALID_ERRORS.store(0, Ordering::SeqCst);
+
+        assert!(actor.reserve(reserve(128, &first_sink)).is_ok());
+        assert_eq!(
+            actor.reserve(Reserve {
+                model_topology: Topology(0),
+                dispatch_error: Some(duplicate_invalid_error),
+                ..reserve(128, &second_sink)
+            }),
+            Err(Error::InvalidRequest)
+        );
+        assert_eq!(second_sink.get(), AssemblyOutput::default());
+        assert_eq!(DUPLICATE_INVALID_ERRORS.load(Ordering::SeqCst), 1);
+        assert!(actor.is_reserved());
+
+        let reuse_sink = Cell::new(AssemblyOutput::default());
+        assert_eq!(
+            actor.assemble(assemble(4, 8, 128, &reuse_sink)),
+            Ok(Outcome::Assembled(reused_output()))
         );
     }
 
     #[test]
     fn assemble_reuses_matching_reservation() {
         let mut actor = Assembler::new();
-        assert!(actor.reserve(reserve(128)).is_ok());
-        let result = actor.assemble(assemble(4, 8, 128));
+        let reserve_sink = Cell::new(AssemblyOutput::default());
+        let assemble_sink = Cell::new(AssemblyOutput::default());
+
+        assert!(actor.reserve(reserve(128, &reserve_sink)).is_ok());
         assert_eq!(
-            result,
-            Ok(Outcome::Assembled(AssemblyOutput {
-                graph_topology: TOPOLOGY,
-                node_count: 4,
-                tensor_count: 8,
-                required_buffer_bytes: 128,
-                version: 1,
-                reused_topology: true,
-                lifecycle: LIFECYCLE,
-            }))
+            actor.assemble(assemble(4, 8, 128, &assemble_sink)),
+            Ok(Outcome::Assembled(reused_output()))
         );
+        assert_eq!(assemble_sink.get(), reused_output());
     }
 
     #[test]
     fn assemble_rebuilds_with_new_shape_and_updates_reservation() {
         let mut actor = Assembler::new();
-        assert!(actor.reserve(reserve(128)).is_ok());
-        let result = actor.assemble(assemble(2, 4, 64));
+        let reserve_sink = Cell::new(AssemblyOutput::default());
+        let assemble_sink = Cell::new(AssemblyOutput::default());
+        REBUILD_DONE_CALLS.store(0, Ordering::SeqCst);
+
+        assert!(actor.reserve(reserve(128, &reserve_sink)).is_ok());
         assert_eq!(
-            result,
+            actor.assemble(Assemble {
+                dispatch_done: Some(rebuild_done),
+                ..assemble(2, 4, 64, &assemble_sink)
+            }),
             Ok(Outcome::Assembled(AssemblyOutput {
                 graph_topology: PLAN,
                 node_count: 2,
@@ -967,47 +1361,143 @@ mod tests {
                 lifecycle: LIFECYCLE,
             }))
         );
+        assert_eq!(REBUILD_DONE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(assemble_sink.get().graph_topology, PLAN);
         assert!(actor.is_reserved());
     }
 
     #[test]
-    fn assemble_rebuild_capacity_failure_preserves_previous_reservation() {
+    fn assemble_capacity_failure_preserves_old_reservation() {
         let mut actor = Assembler::new();
-        assert!(actor.reserve(reserve(128)).is_ok());
-        assert_eq!(actor.assemble(assemble(2, 4, 63)), Err(Error::Capacity));
+        let reserve_sink = Cell::new(AssemblyOutput::default());
+        let failed_sink = Cell::new(AssemblyOutput {
+            graph_topology: OTHER_TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+        let reuse_sink = Cell::new(AssemblyOutput::default());
+        REBUILD_CAPACITY_ERRORS.store(0, Ordering::SeqCst);
+
+        assert!(actor.reserve(reserve(128, &reserve_sink)).is_ok());
+        assert_eq!(
+            actor.assemble(Assemble {
+                dispatch_error: Some(rebuild_capacity_error),
+                ..assemble(2, 4, 63, &failed_sink)
+            }),
+            Err(Error::Capacity)
+        );
+        assert_eq!(failed_sink.get(), AssemblyOutput::default());
+        assert_eq!(REBUILD_CAPACITY_ERRORS.load(Ordering::SeqCst), 1);
         assert!(actor.is_reserved());
+        assert_eq!(
+            actor.assemble(assemble(4, 8, 128, &reuse_sink)),
+            Ok(Outcome::Assembled(reused_output()))
+        );
     }
 
     #[test]
     fn invalid_requests_are_rejected_explicitly() {
         let mut actor = Assembler::new();
+        let reserve_sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+        INVALID_ERRORS.store(0, Ordering::SeqCst);
+
         assert_eq!(
             actor.reserve(Reserve {
                 model_topology: Topology(0),
-                ..reserve(128)
+                dispatch_error: Some(invalid_error),
+                ..reserve(128, &reserve_sink)
             }),
             Err(Error::InvalidRequest)
         );
+        assert_eq!(reserve_sink.get(), AssemblyOutput::default());
+
+        let assemble_sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
         assert_eq!(
-            actor.assemble(assemble(0, 0, 128)),
+            actor.assemble(Assemble {
+                dispatch_error: Some(invalid_error),
+                ..assemble(0, 0, 128, &assemble_sink)
+            }),
             Err(Error::InvalidRequest)
         );
+        assert_eq!(assemble_sink.get(), AssemblyOutput::default());
+        assert_eq!(INVALID_ERRORS.load(Ordering::SeqCst), 2);
         assert!(actor.is_uninitialized());
     }
 
     #[test]
-    fn unexpected_event_is_typed_and_recovers_to_public_state() {
+    fn unexpected_event_returns_error_and_recovers_to_public_state() {
         let mut actor = Assembler::new();
         assert_eq!(
             actor.process_unexpected(UnexpectedEvent),
             Err(Error::UnexpectedEvent)
         );
         assert!(actor.is_uninitialized());
-        assert!(actor.reserve(reserve(128)).is_ok());
+
+        let reserve_sink = Cell::new(AssemblyOutput::default());
+        assert!(actor.reserve(reserve(128, &reserve_sink)).is_ok());
         assert_eq!(
             actor.process_unexpected(UnexpectedEvent),
             Err(Error::UnexpectedEvent)
         );
         assert!(actor.is_reserved());
+    }
+
+    #[test]
+    fn callbacks_are_synchronous_sink_first_observers() {
+        let mut actor = Assembler::new();
+        let sink = Cell::new(AssemblyOutput::default());
+        ORDER_DONE_CALLS.store(0, Ordering::SeqCst);
+
+        let result = actor.reserve(Reserve {
+            dispatch_done: Some(ordering_done),
+            ..reserve(128, &sink)
+        });
+
+        assert_eq!(result, Ok(Outcome::Reserved(reserved_output())));
+        assert_eq!(sink.get(), reserved_output());
+        assert_eq!(ORDER_DONE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn error_callback_observes_default_output_and_cannot_change_result() {
+        let mut actor = Assembler::new();
+        let sink = Cell::new(AssemblyOutput {
+            graph_topology: TOPOLOGY,
+            ..AssemblyOutput::default()
+        });
+
+        let result = actor.reserve(Reserve {
+            model_topology: Topology(0),
+            dispatch_error: Some(error_callback_false),
+            ..reserve(128, &sink)
+        });
+
+        assert_eq!(result, Err(Error::InvalidRequest));
+        assert_eq!(sink.get(), AssemblyOutput::default());
+    }
+
+    #[test]
+    fn same_shape_different_lifecycle_reuses_reserved_lifecycle() {
+        let mut actor = Assembler::new();
+        let reserve_sink = Cell::new(AssemblyOutput::default());
+        let assemble_sink = Cell::new(AssemblyOutput::default());
+        LIFECYCLE_DONE_CALLS.store(0, Ordering::SeqCst);
+
+        assert!(actor.reserve(reserve(128, &reserve_sink)).is_ok());
+        assert_eq!(
+            actor.assemble(Assemble {
+                lifecycle: OTHER_LIFECYCLE,
+                dispatch_done: Some(lifecycle_done),
+                ..assemble(4, 8, 128, &assemble_sink)
+            }),
+            Ok(Outcome::Assembled(reused_output()))
+        );
+        assert_eq!(assemble_sink.get().lifecycle, LIFECYCLE);
+        assert_eq!(LIFECYCLE_DONE_CALLS.load(Ordering::SeqCst), 1);
     }
 }

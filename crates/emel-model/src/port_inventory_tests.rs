@@ -127,6 +127,7 @@ fn loader_event_contract_classifies_request_and_status_values() {
     };
     assert!(request.is_valid());
     request.source.file_image = Some(&[]);
+    request.source.model_path = "";
     assert!(!request.is_valid());
     request.source.model_path = "fixture.gguf";
     assert!(request.tensor_capacity_valid());

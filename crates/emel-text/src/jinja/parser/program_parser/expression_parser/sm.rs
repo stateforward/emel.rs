@@ -7,6 +7,13 @@
 //! generic string-literal node.
 
 #![allow(
+    clippy::cast_possible_truncation,
+    clippy::derivable_impls,
+    clippy::large_types_passed_by_value,
+    clippy::large_stack_frames,
+    clippy::large_stack_arrays,
+    clippy::needless_lifetimes,
+    clippy::elidable_lifetime_names,
     clippy::derive_partial_eq_without_eq,
     clippy::module_name_repetitions,
     clippy::missing_errors_doc,
@@ -48,7 +55,12 @@ pub struct Token {
 
 impl Default for Token {
     fn default() -> Self {
-        Self { kind: TokenType::Eof, value: [0; MAX_TOKEN_VALUE], value_len: 0, pos: 0 }
+        Self {
+            kind: TokenType::Eof,
+            value: [0; MAX_TOKEN_VALUE],
+            value_len: 0,
+            pos: 0,
+        }
     }
 }
 
@@ -56,7 +68,11 @@ impl Token {
     /// Constructs a token, truncating a value that exceeds the bounded copy size.
     #[must_use]
     pub fn new(kind: TokenType, value: &[u8], pos: usize) -> Self {
-        let mut token = Self { kind, pos: pos.min(u32::MAX as usize) as u32, ..Self::default() };
+        let mut token = Self {
+            kind,
+            pos: pos.min(u32::MAX as usize) as u32,
+            ..Self::default()
+        };
         let count = value.len().min(MAX_TOKEN_VALUE);
         token.value[..count].copy_from_slice(&value[..count]);
         token.value_len = count as u16;
@@ -65,7 +81,9 @@ impl Token {
 
     /// Returns the initialized copied value.
     #[must_use]
-    pub fn value(&self) -> &[u8] { &self.value[..self.value_len as usize] }
+    pub fn value(&self) -> &[u8] {
+        &self.value[..self.value_len as usize]
+    }
 }
 
 /// Expression kind tracked by the source parser context.
@@ -95,6 +113,12 @@ pub enum ExpressionParserError {
 /// Owned bounded result from one expression-parser dispatch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ExpressionParseResult {
+    /// Whether parsing reached the source `parsed` terminal state.
+    pub parsed: bool,
+    /// Whether the request or expression syntax was rejected.
+    pub failed: bool,
+    /// Whether an explicit unexpected event was observed.
+    pub unexpected: bool,
     /// Classification of the leading expression token.
     pub expression: ExpressionKind,
     /// Token emitted by the source parser's emit action.
@@ -116,10 +140,18 @@ pub struct ExpressionParserInput {
     pub tokens: [Token; MAX_EXPRESSION_TOKENS],
     /// Number of initialized entries in [`Self::tokens`].
     pub token_count: u16,
+    /// Whether the caller supplied more tokens than bounded storage allows.
+    pub truncated: bool,
 }
 
 impl Default for ExpressionParserInput {
-    fn default() -> Self { Self { tokens: [Token::default(); MAX_EXPRESSION_TOKENS], token_count: 0 } }
+    fn default() -> Self {
+        Self {
+            tokens: [Token::default(); MAX_EXPRESSION_TOKENS],
+            token_count: 0,
+            truncated: false,
+        }
+    }
 }
 
 impl ExpressionParserInput {
@@ -130,12 +162,24 @@ impl ExpressionParserInput {
         let count = tokens.len().min(MAX_EXPRESSION_TOKENS);
         input.tokens[..count].copy_from_slice(&tokens[..count]);
         input.token_count = count as u16;
+        input.truncated = tokens.len() > MAX_EXPRESSION_TOKENS;
         input
     }
 
     /// Creates an empty input, which follows the source EOF failure path.
     #[must_use]
-    pub const fn empty() -> Self { Self { tokens: [Token { kind: TokenType::Eof, value: [0; MAX_TOKEN_VALUE], value_len: 0, pos: 0 }; MAX_EXPRESSION_TOKENS], token_count: 0 } }
+    pub const fn empty() -> Self {
+        Self {
+            tokens: [Token {
+                kind: TokenType::Eof,
+                value: [0; MAX_TOKEN_VALUE],
+                value_len: 0,
+                pos: 0,
+            }; MAX_EXPRESSION_TOKENS],
+            token_count: 0,
+            truncated: false,
+        }
+    }
 }
 
 /// Runtime event carrying bounded copied input and result fields.
@@ -149,27 +193,31 @@ pub struct EventParseRuntime {
 
 impl From<ExpressionParserInput> for EventParseRuntime {
     fn from(input: ExpressionParserInput) -> Self {
-        Self { input, result: ExpressionParseResult::default() }
+        Self {
+            input,
+            result: ExpressionParseResult::default(),
+        }
     }
 }
 
 sml! {
     TextJinjaParserProgramParserExpressionParser {
-        "expression_first_decision"_s <= *"deciding"_s + completion<EventParseRuntime> / begin_expression_parse,
-        "parse_failed"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_scan_eof] / fail_expression_start_token_from_expression_first_decision,
-        "parse_failed"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_first_is_close] / fail_expression_close_token,
-        "parsed"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_first_identifier_followed_by_close] / consume_expression_identifier_and_close,
-        "expression_scan"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_first_is_identifier] / consume_expression_identifier,
-        "expression_scan"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_first_is_literal] / consume_expression_literal,
-        "expression_scan"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_first_is_unary] / consume_expression_unary,
-        "expression_scan"_s <= "expression_first_decision"_s + completion<EventParseRuntime> [expr_first_is_other_content] / consume_expression_compound,
-        "expression_emit_decision"_s <= "expression_scan"_s + completion<EventParseRuntime> [expr_scan_at_close],
-        "expression_scan"_s <= "expression_scan"_s + completion<EventParseRuntime> [expr_scan_continue] / consume_expression_token,
-        "parse_failed"_s <= "expression_scan"_s + completion<EventParseRuntime> [expr_scan_eof] / fail_expression_start_token_from_expression_scan,
-        "expression_close"_s <= "expression_emit_decision"_s + completion<EventParseRuntime> [expression_identifier] / emit_expression_identifier,
-        "expression_close"_s <= "expression_emit_decision"_s + completion<EventParseRuntime> [expression_non_identifier] / emit_expression_generic,
-        "parsed"_s <= "expression_close"_s + completion<EventParseRuntime> [expr_scan_at_close] / consume_expression_close,
-        "parse_failed"_s <= "expression_close"_s + completion<EventParseRuntime> [expr_scan_eof] / fail_expression_start_token_from_expression_close,
+        "expression_first_decision"_s <= *"deciding"_s + event<EventParseRuntime> / begin_expression_parse,
+        "parse_failed"_s <= "expression_first_decision"_s + completion<_> [request_invalid] / fail_invalid_request,
+        "parse_failed"_s <= "expression_first_decision"_s + completion<_> [expr_scan_eof] / fail_expression_start_token_from_expression_first_decision,
+        "parse_failed"_s <= "expression_first_decision"_s + completion<_> [expr_first_is_close] / fail_expression_close_token,
+        "parsed"_s <= "expression_first_decision"_s + completion<_> [expr_first_identifier_followed_by_close] / consume_expression_identifier_and_close,
+        "expression_scan"_s <= "expression_first_decision"_s + completion<_> [expr_first_is_identifier] / consume_expression_identifier,
+        "expression_scan"_s <= "expression_first_decision"_s + completion<_> [expr_first_is_literal] / consume_expression_literal,
+        "expression_scan"_s <= "expression_first_decision"_s + completion<_> [expr_first_is_unary] / consume_expression_unary,
+        "expression_scan"_s <= "expression_first_decision"_s + completion<_> [expr_first_is_other_content] / consume_expression_compound,
+        "expression_emit_decision"_s <= "expression_scan"_s + completion<_> [expr_scan_at_close],
+        "expression_scan"_s <= "expression_scan"_s + completion<_> [expr_scan_continue] / consume_expression_token,
+        "parse_failed"_s <= "expression_scan"_s + completion<_> [expr_scan_eof] / fail_expression_start_token_from_expression_scan,
+        "expression_close"_s <= "expression_emit_decision"_s + completion<_> [expression_identifier] / emit_expression_identifier,
+        "expression_close"_s <= "expression_emit_decision"_s + completion<_> [expression_non_identifier] / emit_expression_generic,
+        "parsed"_s <= "expression_close"_s + completion<_> [expr_scan_at_close] / consume_expression_close,
+        "parse_failed"_s <= "expression_close"_s + completion<_> [expr_scan_eof] / fail_expression_start_token_from_expression_close,
         "unexpected_event"_s <= "deciding"_s + unexpected_event<_> / on_unexpected_from_deciding,
         "unexpected_event"_s <= "expression_first_decision"_s + unexpected_event<_> / on_unexpected_from_expression_first_decision,
         "unexpected_event"_s <= "expression_scan"_s + unexpected_event<_> / on_unexpected_from_expression_scan,
@@ -222,19 +270,38 @@ impl TextJinjaParserProgramParserExpressionParserContext {
     }
 
     fn token(&self, offset: u16) -> TokenType {
-        if self.has_token(offset) { self.input.tokens[(self.token_index + offset) as usize].kind } else { TokenType::Eof }
+        if self.has_token(offset) {
+            self.input.tokens[(self.token_index + offset) as usize].kind
+        } else {
+            TokenType::Eof
+        }
+    }
+    fn current(&self) -> Token {
+        self.input
+            .tokens
+            .get(self.token_index as usize)
+            .copied()
+            .unwrap_or_default()
     }
 
-    fn current(&self) -> Token { self.input.tokens[self.token_index as usize] }
-
     fn fail(&mut self, pos: u32) {
+        self.result.failed = true;
         self.result.error = ExpressionParserError::ParseFailed;
         self.result.error_pos = pos;
         self.result.expression = self.expression;
         self.result.consumed = self.token_index;
     }
 
+    fn invalid_request(&mut self, pos: u32) {
+        self.result.failed = true;
+        self.result.error = ExpressionParserError::InvalidRequest;
+        self.result.error_pos = pos;
+        self.result.consumed = self.token_index;
+    }
+
     fn unexpected(&mut self) {
+        self.result.failed = true;
+        self.result.unexpected = true;
         self.result.error = ExpressionParserError::InternalError;
         self.result.error_pos = self.current().pos;
     }
@@ -243,140 +310,224 @@ impl TextJinjaParserProgramParserExpressionParserContext {
 impl TextJinjaParserProgramParserExpressionParserStateMachineContext
     for TextJinjaParserProgramParserExpressionParserContext
 {
-    fn begin_expression_parse(&mut self) -> Result<(), ()> {
+    fn begin_expression_parse(&mut self, _event: &EventParseRuntime) -> Result<(), ()> {
+        self.result = ExpressionParseResult::default();
+        if self.input.truncated || self.input.token_count == 0 {
+            self.invalid_request(self.input.tokens[0].pos);
+            return Ok(());
+        }
+        if self.input.tokens[0].kind != TokenType::OpenExpression {
+            self.invalid_request(self.input.tokens[0].pos);
+            return Ok(());
+        }
         self.statement_is_expression = true;
         self.expression = ExpressionKind::Unknown;
         self.expression_start = self.token_index;
         self.expression_value_index = self.token_index;
-        self.result = ExpressionParseResult::default();
         self.token_index = self.token_index.saturating_add(1);
         Ok(())
     }
 
     fn consume_expression_close(&mut self) -> Result<(), ()> {
         self.token_index = self.token_index.saturating_add(1);
+        self.result.parsed = true;
         self.result.expression = self.expression;
         self.result.consumed = self.token_index;
         Ok(())
     }
-
     fn consume_expression_compound(&mut self) -> Result<(), ()> {
         self.expression = ExpressionKind::Compound;
         self.expression_value_index = self.token_index;
         self.token_index = self.token_index.saturating_add(1);
         Ok(())
     }
-
     fn consume_expression_identifier(&mut self) -> Result<(), ()> {
         self.expression = ExpressionKind::Identifier;
         self.expression_value_index = self.token_index;
         self.token_index = self.token_index.saturating_add(1);
         Ok(())
     }
-
     fn consume_expression_identifier_and_close(&mut self) -> Result<(), ()> {
         self.expression = ExpressionKind::Identifier;
         self.expression_value_index = self.token_index;
         self.result.emitted = self.current();
         self.result.emitted_present = true;
         self.token_index = self.token_index.saturating_add(2);
+        self.result.parsed = true;
         self.result.expression = self.expression;
         self.result.consumed = self.token_index;
         Ok(())
     }
-
     fn consume_expression_literal(&mut self) -> Result<(), ()> {
         self.expression = ExpressionKind::Literal;
         self.expression_value_index = self.token_index;
         self.token_index = self.token_index.saturating_add(1);
         Ok(())
     }
-
     fn consume_expression_token(&mut self) -> Result<(), ()> {
         self.token_index = self.token_index.saturating_add(1);
         Ok(())
     }
-
     fn consume_expression_unary(&mut self) -> Result<(), ()> {
         self.expression = ExpressionKind::Unary;
         self.expression_value_index = self.token_index;
         self.token_index = self.token_index.saturating_add(1);
         Ok(())
     }
-
     fn emit_expression_generic(&mut self) -> Result<(), ()> {
         self.result.emitted = self.input.tokens[self.expression_value_index as usize];
         self.result.emitted_present = true;
         Ok(())
     }
-
     fn emit_expression_identifier(&mut self) -> Result<(), ()> {
         self.result.emitted = self.input.tokens[self.expression_value_index as usize];
         self.result.emitted_present = true;
         Ok(())
     }
-
     fn expr_first_identifier_followed_by_close(&self) -> Result<bool, ()> {
         Ok(self.token(0) == TokenType::Identifier && self.token(1) == TokenType::CloseExpression)
     }
-
-    fn expr_first_is_close(&self) -> Result<bool, ()> { Ok(self.token(0) == TokenType::CloseExpression) }
-    fn expr_first_is_identifier(&self) -> Result<bool, ()> { Ok(self.token(0) == TokenType::Identifier) }
+    fn expr_first_is_close(&self) -> Result<bool, ()> {
+        Ok(self.token(0) == TokenType::CloseExpression)
+    }
+    fn expr_first_is_identifier(&self) -> Result<bool, ()> {
+        Ok(self.token(0) == TokenType::Identifier)
+    }
     fn expr_first_is_literal(&self) -> Result<bool, ()> {
-        Ok(matches!(self.token(0), TokenType::NumericLiteral | TokenType::StringLiteral | TokenType::OpenSquareBracket | TokenType::OpenCurlyBracket))
+        Ok(matches!(
+            self.token(0),
+            TokenType::NumericLiteral
+                | TokenType::StringLiteral
+                | TokenType::OpenSquareBracket
+                | TokenType::OpenCurlyBracket
+        ))
     }
     fn expr_first_is_other_content(&self) -> Result<bool, ()> {
-        Ok(self.has_token(0) && !self.expr_first_is_close()? && !self.expr_first_is_identifier()? && !self.expr_first_is_literal()? && !self.expr_first_is_unary()?)
+        Ok(self.has_token(0)
+            && !self.expr_first_is_close()?
+            && !self.expr_first_is_identifier()?
+            && !self.expr_first_is_literal()?
+            && !self.expr_first_is_unary()?)
+    }
+    fn request_invalid(&self) -> Result<bool, ()> {
+        Ok(self.input.truncated
+            || self.input.token_count == 0
+            || self.input.tokens[0].kind != TokenType::OpenExpression)
+    }
+    fn fail_invalid_request(&mut self) -> Result<(), ()> {
+        self.invalid_request(self.input.tokens.first().map_or(0, |token| token.pos));
+        Ok(())
     }
     fn expr_first_is_unary(&self) -> Result<bool, ()> {
-        Ok(matches!(self.token(0), TokenType::AdditiveBinaryOperator | TokenType::UnaryOperator))
+        Ok(matches!(
+            self.token(0),
+            TokenType::AdditiveBinaryOperator | TokenType::UnaryOperator
+        ))
     }
-    fn expr_scan_at_close(&self) -> Result<bool, ()> { Ok(self.token(0) == TokenType::CloseExpression) }
-    fn expr_scan_continue(&self) -> Result<bool, ()> { Ok(self.has_token(0) && !self.expr_scan_at_close()?) }
-    fn expr_scan_eof(&self) -> Result<bool, ()> { Ok(!self.has_token(0)) }
-    fn expression_identifier(&self) -> Result<bool, ()> { Ok(self.expression == ExpressionKind::Identifier) }
-    fn expression_non_identifier(&self) -> Result<bool, ()> { Ok(self.expression != ExpressionKind::Identifier) }
-
-    fn fail_expression_close_token(&mut self) -> Result<(), ()> { self.fail(self.current().pos); Ok(()) }
-    fn fail_expression_start_token_from_expression_close(&mut self) -> Result<(), ()> { self.fail(self.input.tokens[self.expression_start as usize].pos); Ok(()) }
-    fn fail_expression_start_token_from_expression_first_decision(&mut self) -> Result<(), ()> { self.fail(self.input.tokens[self.expression_start as usize].pos); Ok(()) }
-    fn fail_expression_start_token_from_expression_scan(&mut self) -> Result<(), ()> { self.fail(self.input.tokens[self.expression_start as usize].pos); Ok(()) }
-
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_expression_close(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_expression_emit_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_expression_first_decision(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_expression_scan(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected(); Ok(()) }
+    fn expr_scan_at_close(&self) -> Result<bool, ()> {
+        Ok(self.token(0) == TokenType::CloseExpression)
+    }
+    fn expr_scan_continue(&self) -> Result<bool, ()> {
+        Ok(self.has_token(0) && !self.expr_scan_at_close()?)
+    }
+    fn expr_scan_eof(&self) -> Result<bool, ()> {
+        Ok(!self.has_token(0))
+    }
+    fn expression_identifier(&self) -> Result<bool, ()> {
+        Ok(self.expression == ExpressionKind::Identifier)
+    }
+    fn expression_non_identifier(&self) -> Result<bool, ()> {
+        Ok(self.expression != ExpressionKind::Identifier)
+    }
+    fn fail_expression_close_token(&mut self) -> Result<(), ()> {
+        self.fail(self.current().pos);
+        Ok(())
+    }
+    fn fail_expression_start_token_from_expression_close(&mut self) -> Result<(), ()> {
+        self.fail(self.input.tokens[self.expression_start as usize].pos);
+        Ok(())
+    }
+    fn fail_expression_start_token_from_expression_first_decision(&mut self) -> Result<(), ()> {
+        self.fail(self.input.tokens[self.expression_start as usize].pos);
+        Ok(())
+    }
+    fn fail_expression_start_token_from_expression_scan(&mut self) -> Result<(), ()> {
+        self.fail(self.input.tokens[self.expression_start as usize].pos);
+        Ok(())
+    }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_expression_first_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_expression_emit_decision(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_expression_close(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_expression_scan(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
 }
 
 /// Synchronous bounded actor around the generated expression parser machine.
 pub struct TextJinjaParserProgramParserExpressionParserActor {
-    machine: TextJinjaParserProgramParserExpressionParserStateMachine<TextJinjaParserProgramParserExpressionParserContext>,
+    machine: TextJinjaParserProgramParserExpressionParserStateMachine<
+        TextJinjaParserProgramParserExpressionParserContext,
+    >,
 }
 
 impl Default for TextJinjaParserProgramParserExpressionParserActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TextJinjaParserProgramParserExpressionParserActor {
     /// Creates an actor in the generated initial state.
     #[must_use]
-    pub fn new() -> Self { Self { machine: TextJinjaParserProgramParserExpressionParserStateMachine::new(Default::default()) } }
+    pub fn new() -> Self {
+        Self {
+            machine: TextJinjaParserProgramParserExpressionParserStateMachine::new(
+                TextJinjaParserProgramParserExpressionParserContext::default(),
+            ),
+        }
+    }
 
     /// Processes one copied input to run-to-completion.
     pub fn process_event(&mut self, input: ExpressionParserInput) -> ExpressionParseResult {
-        if !self.machine.is(&TextJinjaParserProgramParserExpressionParserStates::Deciding) {
+        if !self
+            .machine
+            .is(&TextJinjaParserProgramParserExpressionParserStates::Deciding)
+        {
             let _ = self.process_unexpected();
             return self.machine.context().result;
         }
         self.machine.context_mut().input = input;
         self.machine.context_mut().token_index = 0;
-        let event = EventParseRuntime::from(input);
         let _ = self.machine.process_event(
-            TextJinjaParserProgramParserExpressionParserEvents::EventParseRuntime(event),
+            TextJinjaParserProgramParserExpressionParserEvents::EventParseRuntime(
+                EventParseRuntime::from(input),
+            ),
         );
         self.machine.context().result
     }
@@ -384,21 +535,28 @@ impl TextJinjaParserProgramParserExpressionParserActor {
     /// Records an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> ExpressionParseResult {
         self.machine.context_mut().unexpected();
-        self.machine.set_state(TextJinjaParserProgramParserExpressionParserStates::UnexpectedEvent);
+        self.machine
+            .set_state(TextJinjaParserProgramParserExpressionParserStates::UnexpectedEvent);
         self.machine.context().result
     }
 
     /// Returns the generated state inspection value.
     #[must_use]
-    pub fn state(&self) -> &TextJinjaParserProgramParserExpressionParserStates { self.machine.state() }
+    pub fn state(&self) -> &TextJinjaParserProgramParserExpressionParserStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: &TextJinjaParserProgramParserExpressionParserStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &TextJinjaParserProgramParserExpressionParserStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns the current bounded context snapshot.
     #[must_use]
-    pub fn context(&self) -> &TextJinjaParserProgramParserExpressionParserContext { self.machine.context() }
+    pub fn context(&self) -> &TextJinjaParserProgramParserExpressionParserContext {
+        self.machine.context()
+    }
 }
 
 /// Short expression-parser actor alias.
@@ -407,3 +565,93 @@ pub type ExpressionParser = TextJinjaParserProgramParserExpressionParserActor;
 pub type ExpressionInput = ExpressionParserInput;
 /// Short result alias.
 pub type ExpressionResult = ExpressionParseResult;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token(kind: TokenType, pos: usize) -> Token {
+        Token::new(kind, &[], pos)
+    }
+
+    #[test]
+    fn parses_identifier_expression_and_marks_terminal_success() {
+        let input = ExpressionParserInput::new(&[
+            token(TokenType::OpenExpression, 3),
+            Token::new(TokenType::Identifier, b"name", 6),
+            token(TokenType::CloseExpression, 10),
+        ]);
+        let mut parser = ExpressionParser::new();
+        let result = parser.process_event(input);
+
+        assert!(result.parsed);
+        assert!(!result.failed);
+        assert!(!result.unexpected);
+        assert_eq!(result.expression, ExpressionKind::Identifier);
+        assert!(result.emitted_present);
+        assert_eq!(result.emitted.value(), b"name");
+        assert_eq!(result.consumed, 3);
+        assert!(parser.is(&TextJinjaParserProgramParserExpressionParserStates::X));
+    }
+
+    #[test]
+    fn parses_literal_expression_as_generic_emission() {
+        let input = ExpressionParserInput::new(&[
+            token(TokenType::OpenExpression, 0),
+            Token::new(TokenType::NumericLiteral, b"42", 3),
+            token(TokenType::CloseExpression, 6),
+        ]);
+        let result = ExpressionParser::new().process_event(input);
+
+        assert!(result.parsed);
+        assert_eq!(result.expression, ExpressionKind::Literal);
+        assert!(result.emitted_present);
+        assert_eq!(result.emitted.value(), b"42");
+    }
+
+    #[test]
+    fn rejects_empty_or_malformed_requests_with_typed_error() {
+        let mut parser = ExpressionParser::new();
+        let empty = parser.process_event(ExpressionParserInput::empty());
+        assert!(empty.failed);
+        assert_eq!(empty.error, ExpressionParserError::InvalidRequest);
+
+        let malformed = ExpressionParserInput::new(&[token(TokenType::Text, 9)]);
+        let mut parser = ExpressionParser::new();
+        let result = parser.process_event(malformed);
+        assert!(result.failed);
+        assert_eq!(result.error, ExpressionParserError::InvalidRequest);
+        assert_eq!(result.error_pos, 9);
+    }
+
+    #[test]
+    fn missing_close_is_parse_failure_at_expression_start() {
+        let input = ExpressionParserInput::new(&[
+            token(TokenType::OpenExpression, 12),
+            Token::new(TokenType::Identifier, b"name", 15),
+        ]);
+        let result = ExpressionParser::new().process_event(input);
+
+        assert!(result.failed);
+        assert!(!result.parsed);
+        assert_eq!(result.error, ExpressionParserError::ParseFailed);
+        assert_eq!(result.error_pos, 12);
+    }
+
+    #[test]
+    fn second_event_is_reported_as_unexpected() {
+        let input = ExpressionParserInput::new(&[
+            token(TokenType::OpenExpression, 0),
+            Token::new(TokenType::Identifier, b"name", 3),
+            token(TokenType::CloseExpression, 7),
+        ]);
+        let mut parser = ExpressionParser::new();
+        assert!(parser.process_event(input).parsed);
+        let result = parser.process_event(input);
+
+        assert!(result.failed);
+        assert!(result.unexpected);
+        assert_eq!(result.error, ExpressionParserError::InternalError);
+        assert!(parser.is(&TextJinjaParserProgramParserExpressionParserStates::UnexpectedEvent));
+    }
+}

@@ -27,14 +27,14 @@ pub enum TokenParserError {
     /// No error was reported by the preceding sampler stage.
     #[default]
     None = 0,
-    /// The candidate could not be classified as text or empty.
-    ParseFailed = 1,
-    /// An event was delivered outside the supported machine contract.
-    InternalError = 2,
     /// The caller supplied an invalid request.
-    InvalidRequest = 4,
+    InvalidRequest = 1,
+    /// The candidate could not be classified as text or empty.
+    ParseFailed = 1 << 1,
+    /// An event was delivered outside the supported machine contract.
+    InternalError = 1 << 2,
     /// The source pipeline reported an untracked error.
-    Untracked = 8,
+    Untracked = 1 << 3,
 }
 
 /// Candidate classification consumed by the pinned token-parser guards.
@@ -76,18 +76,26 @@ impl TokenParserInput {
     /// Creates an error-free input from a candidate classification.
     #[must_use]
     pub const fn new(candidate_kind: CandidateKind) -> Self {
-        Self { candidate_kind, error: TokenParserError::None }
+        Self {
+            candidate_kind,
+            error: TokenParserError::None,
+        }
     }
 
     /// Creates an input carrying a preceding sampler error.
     #[must_use]
     pub const fn failed(error: TokenParserError) -> Self {
-        Self { candidate_kind: CandidateKind::Unknown, error }
+        Self {
+            candidate_kind: CandidateKind::Unknown,
+            error,
+        }
     }
 
     /// Creates an explicitly invalid request input.
     #[must_use]
-    pub const fn invalid() -> Self { Self::failed(TokenParserError::InvalidRequest) }
+    pub const fn invalid() -> Self {
+        Self::failed(TokenParserError::InvalidRequest)
+    }
 }
 
 /// Copied runtime event corresponding to `sampler::event::sample_runtime`.
@@ -98,7 +106,9 @@ pub struct SamplerEventSampleRuntime {
 }
 
 impl From<TokenParserInput> for SamplerEventSampleRuntime {
-    fn from(input: TokenParserInput) -> Self { Self { input } }
+    fn from(input: TokenParserInput) -> Self {
+        Self { input }
+    }
 }
 
 // Source mapping: token_parser/sm.hpp's deciding -> parsed, deciding ->
@@ -146,10 +156,9 @@ impl GbnfSamplerTokenParserContext {
         self.token_kind = TokenKind::Unknown;
     }
 
-    fn unexpected(&mut self) -> Result<(), ()> {
+    fn unexpected(&mut self) {
         self.error = TokenParserError::InternalError;
         self.token_kind = TokenKind::Unknown;
-        Ok(())
     }
 }
 
@@ -176,10 +185,22 @@ impl GbnfSamplerTokenParserStateMachineContext for GbnfSamplerTokenParserContext
     }
 
     // Source mapping: actions.hpp::on_unexpected, origin-explicit per row.
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.unexpected();
+        Ok(())
+    }
 
     // Source mapping: guards.hpp::candidate_text.
     fn candidate_text(&self, event_data: &SamplerEventSampleRuntime) -> Result<bool, ()> {
@@ -202,44 +223,62 @@ impl GbnfSamplerTokenParserStateMachineContext for GbnfSamplerTokenParserContext
 }
 
 /// Synchronous bounded actor around the generated token-parser machine.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
 pub struct GbnfSamplerTokenParserActor {
     machine: GbnfSamplerTokenParserStateMachine<GbnfSamplerTokenParserContext>,
 }
 
 impl Default for GbnfSamplerTokenParserActor {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GbnfSamplerTokenParserActor {
-    /// Creates an actor in generated `deciding` state.
-    #[must_use]
     pub fn new() -> Self {
-        Self { machine: GbnfSamplerTokenParserStateMachine::new(Default::default()) }
+        Self {
+            machine: GbnfSamplerTokenParserStateMachine::new(
+                GbnfSamplerTokenParserContext::default(),
+            ),
+        }
     }
 
     /// Dispatches one copied runtime event to completion.
-    pub fn process_event(&mut self, input: TokenParserInput) -> Result<TokenKind, TokenParserError> {
+    pub fn process_event(
+        &mut self,
+        input: TokenParserInput,
+    ) -> Result<TokenKind, TokenParserError> {
         if input.error != TokenParserError::None {
             self.machine.context_mut().set_input(input);
-            self.machine.context_mut().error = TokenParserError::InternalError;
-            self.machine.context_mut().token_kind = TokenKind::Unknown;
+            self.machine.context_mut().unexpected();
+            self.machine
+                .set_state(GbnfSamplerTokenParserStates::UnexpectedEvent);
             return self.outcome();
         }
         self.machine.context_mut().set_input(input);
-        if self.machine.process_event(GbnfSamplerTokenParserEvents::SamplerEventSampleRuntime(input.into())).is_err() {
+        let process_failed = self
+            .machine
+            .process_event(GbnfSamplerTokenParserEvents::SamplerEventSampleRuntime(
+                input.into(),
+            ))
+            .is_err();
+        if process_failed || self.machine.initialize().is_err() {
             self.machine.context_mut().error = TokenParserError::InternalError;
             self.machine.context_mut().token_kind = TokenKind::Unknown;
-        } else if self.machine.initialize().is_err() {
-            self.machine.context_mut().error = TokenParserError::InternalError;
-            self.machine.context_mut().token_kind = TokenKind::Unknown;
+            self.machine
+                .set_state(GbnfSamplerTokenParserStates::UnexpectedEvent);
         }
         self.outcome()
     }
 
     /// Dispatches an explicit unexpected event.
     pub fn process_unexpected(&mut self) -> Result<TokenKind, TokenParserError> {
-        let _ = self.machine.context_mut().unexpected();
-        self.machine.set_state(GbnfSamplerTokenParserStates::UnexpectedEvent);
+        self.machine.context_mut().unexpected();
+        self.machine
+            .set_state(GbnfSamplerTokenParserStates::UnexpectedEvent);
         self.outcome()
     }
 
@@ -253,19 +292,22 @@ impl GbnfSamplerTokenParserActor {
 
     /// Returns generated state inspection data.
     #[must_use]
-    pub fn state(&self) -> &GbnfSamplerTokenParserStates { self.machine.state() }
+    pub fn state(&self) -> &GbnfSamplerTokenParserStates {
+        self.machine.state()
+    }
 
     /// Reports whether the generated machine is in `state`.
     #[must_use]
-    pub fn is(&self, state: &GbnfSamplerTokenParserStates) -> bool { self.machine.is(state) }
+    pub fn is(&self, state: &GbnfSamplerTokenParserStates) -> bool {
+        self.machine.is(state)
+    }
 
     /// Returns the actor context for result inspection.
     #[must_use]
-    pub fn context(&self) -> &GbnfSamplerTokenParserContext { self.machine.context() }
+    pub fn context(&self) -> &GbnfSamplerTokenParserContext {
+        self.machine.context()
+    }
 }
-
-/// Short actor alias for token-parser callers.
-pub type TokenParser = GbnfSamplerTokenParserActor;
 
 #[cfg(test)]
 mod tests {
@@ -273,17 +315,23 @@ mod tests {
 
     #[test]
     fn classifies_text_and_empty_candidates() {
-        let mut parser = TokenParser::new();
-        assert_eq!(parser.process_event(TokenParserInput::new(CandidateKind::Text)), Ok(TokenKind::TextToken));
+        let mut parser = GbnfSamplerTokenParserActor::new();
+        assert_eq!(
+            parser.process_event(TokenParserInput::new(CandidateKind::Text)),
+            Ok(TokenKind::TextToken)
+        );
         assert!(parser.is(&GbnfSamplerTokenParserStates::X));
 
-        let mut parser = TokenParser::new();
-        assert_eq!(parser.process_event(TokenParserInput::new(CandidateKind::Empty)), Ok(TokenKind::EmptyToken));
+        let mut parser = GbnfSamplerTokenParserActor::new();
+        assert_eq!(
+            parser.process_event(TokenParserInput::new(CandidateKind::Empty)),
+            Ok(TokenKind::EmptyToken)
+        );
         assert!(parser.is(&GbnfSamplerTokenParserStates::X));
     }
     #[test]
     fn unknown_candidate_is_parse_failed() {
-        let mut parser = TokenParser::new();
+        let mut parser = GbnfSamplerTokenParserActor::new();
         assert_eq!(
             parser.process_event(TokenParserInput::new(CandidateKind::Unknown)),
             Err(TokenParserError::ParseFailed)
@@ -293,22 +341,28 @@ mod tests {
     }
 
     #[test]
-    fn prior_errors_are_rejected_without_parse_failed_transition() {
+    fn prior_errors_are_unexpected_events() {
         for input in [
             TokenParserInput::failed(TokenParserError::ParseFailed),
             TokenParserInput::invalid(),
         ] {
-            let mut parser = TokenParser::new();
-            assert_eq!(parser.process_event(input), Err(TokenParserError::InternalError));
-            assert!(parser.is(&GbnfSamplerTokenParserStates::Deciding));
+            let mut parser = GbnfSamplerTokenParserActor::new();
+            assert_eq!(
+                parser.process_event(input),
+                Err(TokenParserError::InternalError)
+            );
+            assert!(parser.is(&GbnfSamplerTokenParserStates::UnexpectedEvent));
             assert_eq!(parser.context().token_kind, TokenKind::Unknown);
         }
     }
 
     #[test]
     fn explicit_unexpected_event_is_internal_error() {
-        let mut parser = TokenParser::new();
-        assert_eq!(parser.process_unexpected(), Err(TokenParserError::InternalError));
+        let mut parser = GbnfSamplerTokenParserActor::new();
+        assert_eq!(
+            parser.process_unexpected(),
+            Err(TokenParserError::InternalError)
+        );
         assert!(parser.is(&GbnfSamplerTokenParserStates::UnexpectedEvent));
     }
 }

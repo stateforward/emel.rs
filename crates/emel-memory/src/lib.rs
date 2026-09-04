@@ -6,7 +6,13 @@
 /// The number of tokens currently retained by a memory strategy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RetainedTokens(pub usize);
-pub(crate) mod hybrid;
-pub(crate) mod kv;
-pub(crate) mod recurrent;
-pub(crate) mod streaming;
+/// Hybrid KV/recurrent memory state machine and actor binding boundary.
+pub mod hybrid;
+/// KV-cache memory state machine and ownership-safe actor boundary.
+pub mod kv;
+/// Recurrent memory state machine and ownership-safe actor boundary.
+pub mod recurrent;
+pub mod streaming;
+/// Streaming memory state machine and ownership-safe actor boundary.
+/// Source-aligned bounded geometry helpers and owned memory snapshots.
+pub mod view;

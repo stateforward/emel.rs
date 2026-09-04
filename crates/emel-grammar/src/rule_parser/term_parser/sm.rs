@@ -8,10 +8,13 @@
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_wraps,
     dead_code,
     unused_imports,
     missing_docs,
-    private_interfaces,
+    private_interfaces
 )]
 
 use super::super::lexer::TokenKind;
@@ -54,11 +57,21 @@ pub struct TermInput {
 impl TermInput {
     /// Constructs an input containing one lexer token.
     #[must_use]
-    pub const fn new(token: TokenKind) -> Self { Self { token, has_token: true } }
+    pub const fn new(token: TokenKind) -> Self {
+        Self {
+            token,
+            has_token: true,
+        }
+    }
 
     /// Constructs the no-token input used by an exhausted lexer.
     #[must_use]
-    pub const fn empty() -> Self { Self { token: TokenKind::Unknown, has_token: false } }
+    pub const fn empty() -> Self {
+        Self {
+            token: TokenKind::Unknown,
+            has_token: false,
+        }
+    }
 }
 
 /// Private completion event corresponding to pinned `parse_rules`.
@@ -101,7 +114,12 @@ pub struct GbnfRuleParserTermParserContext {
 
 impl Default for GbnfRuleParserTermParserContext {
     fn default() -> Self {
-        Self { token: TokenKind::Unknown, has_token: false, result: TermKind::Unknown, error: None }
+        Self {
+            token: TokenKind::Unknown,
+            has_token: false,
+            result: TermKind::Unknown,
+            error: None,
+        }
     }
 }
 
@@ -133,15 +151,42 @@ impl GbnfRuleParserTermParserContext {
 impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserContext {
     // Source mapping: actions.hpp::consume_kind<term_kind::...>; actions only
     // write the selected result.
-    fn consume_alternation(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Alternation) }
-    fn consume_character_class(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::CharacterClass) }
-    fn consume_close_group(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::CloseGroup) }
-    fn consume_dot(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Dot) }
-    fn consume_newline(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Newline) }
-    fn consume_open_group(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::OpenGroup) }
-    fn consume_quantifier(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::Quantifier) }
-    fn consume_rule_reference(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::RuleReference) }
-    fn consume_string_literal(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> { self.consume(TermKind::StringLiteral) }
+    fn consume_alternation(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
+        self.consume(TermKind::Alternation)
+    }
+    fn consume_character_class(
+        &mut self,
+        _event_data: &RuleParserEventParseRules,
+    ) -> Result<(), ()> {
+        self.consume(TermKind::CharacterClass)
+    }
+    fn consume_close_group(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
+        self.consume(TermKind::CloseGroup)
+    }
+    fn consume_dot(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
+        self.consume(TermKind::Dot)
+    }
+    fn consume_newline(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
+        self.consume(TermKind::Newline)
+    }
+    fn consume_open_group(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
+        self.consume(TermKind::OpenGroup)
+    }
+    fn consume_quantifier(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
+        self.consume(TermKind::Quantifier)
+    }
+    fn consume_rule_reference(
+        &mut self,
+        _event_data: &RuleParserEventParseRules,
+    ) -> Result<(), ()> {
+        self.consume(TermKind::RuleReference)
+    }
+    fn consume_string_literal(
+        &mut self,
+        _event_data: &RuleParserEventParseRules,
+    ) -> Result<(), ()> {
+        self.consume(TermKind::StringLiteral)
+    }
 
     // Source mapping: actions.hpp::dispatch_parse_failed.
     fn dispatch_parse_failed(&mut self, _event_data: &RuleParserEventParseRules) -> Result<(), ()> {
@@ -152,10 +197,18 @@ impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserCon
 
     // Source mapping: actions.hpp::on_unexpected; wildcard unexpected events
     // carry no payload in the generated callback API.
-    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> { self.unexpected() }
+    fn on_unexpected_from_deciding(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_parse_failed(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_parsed(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn on_unexpected_from_unexpected_event(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
 
     // Source mapping: guards.hpp::token_is and guards.hpp::parse_failed.
     fn parse_failed(&self, event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
@@ -169,31 +222,60 @@ impl GbnfRuleParserTermParserStateMachineContext for GbnfRuleParserTermParserCon
             && !self.token_alternation(event_data)?
             && !self.token_newline(event_data)?)
     }
-    fn token_alternation(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Alternation)) }
-    fn token_character_class(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CharacterClass)) }
-    fn token_close_group(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::CloseGroup)) }
-    fn token_dot(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Dot)) }
-    fn token_newline(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Newline)) }
-    fn token_open_group(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::OpenGroup)) }
-    fn token_quantifier(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::Quantifier)) }
-    fn token_rule_reference(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::RuleReference)) }
-    fn token_string_literal(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> { Ok(self.token_is(TokenKind::StringLiteral)) }
+    fn token_alternation(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::Alternation))
+    }
+    fn token_character_class(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::CharacterClass))
+    }
+    fn token_close_group(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::CloseGroup))
+    }
+    fn token_dot(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::Dot))
+    }
+    fn token_newline(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::Newline))
+    }
+    fn token_open_group(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::OpenGroup))
+    }
+    fn token_quantifier(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::Quantifier))
+    }
+    fn token_rule_reference(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::RuleReference))
+    }
+    fn token_string_literal(&self, _event_data: &RuleParserEventParseRules) -> Result<bool, ()> {
+        Ok(self.token_is(TokenKind::StringLiteral))
+    }
 }
 
-
 /// Synchronous bounded term-token classifier actor.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
 pub struct TermParser {
     machine: GbnfRuleParserTermParserStateMachine<GbnfRuleParserTermParserContext>,
 }
 
 impl Default for TermParser {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TermParser {
     /// Creates a classifier in generated `deciding` state.
     #[must_use]
-    pub fn new() -> Self { Self { machine: GbnfRuleParserTermParserStateMachine::new(Default::default()) } }
+    pub fn new() -> Self {
+        Self {
+            machine: GbnfRuleParserTermParserStateMachine::new(
+                GbnfRuleParserTermParserContext::default(),
+            ),
+        }
+    }
 
     pub fn process_event(&mut self, input: TermInput) -> Result<TermKind, TermParserError> {
         if !self.machine.is(&GbnfRuleParserTermParserStates::Deciding) {
@@ -201,52 +283,76 @@ impl TermParser {
             return Err(TermParserError::InternalError);
         }
         self.machine.context_mut().set_input(input);
-        if self.machine.process_event(GbnfRuleParserTermParserEvents::RuleParserEventParseRules(RuleParserEventParseRules {})).is_err() {
+        if self
+            .machine
+            .process_event(GbnfRuleParserTermParserEvents::RuleParserEventParseRules(
+                RuleParserEventParseRules {},
+            ))
+            .is_err()
+        {
             self.machine.context_mut().error = Some(TermParserError::InternalError);
             self.machine.context_mut().result = TermKind::Unknown;
-            self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
+            self.machine
+                .set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
             return Err(TermParserError::InternalError);
         }
         if self.machine.initialize().is_err() {
             self.machine.context_mut().error = Some(TermParserError::InternalError);
             self.machine.context_mut().result = TermKind::Unknown;
-            self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
+            self.machine
+                .set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
             return Err(TermParserError::InternalError);
         }
-        let context = self.machine.context();
-        match context.error { Some(error) => Err(error), None => Ok(context.result) }
+        self.machine
+            .context()
+            .error
+            .map_or_else(|| Ok(self.machine.context().result), Err)
     }
 
     /// Records an unsupported event as an explicit internal error.
     pub fn process_unexpected_event(&mut self) -> Result<TermKind, TermParserError> {
         let _ = self.machine.context_mut().unexpected();
-        self.machine.set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
+        self.machine
+            .set_state(GbnfRuleParserTermParserStates::UnexpectedEvent);
         Err(TermParserError::InternalError)
     }
 
     /// Returns generated state inspection.
     #[must_use]
-    pub fn state(&self) -> &GbnfRuleParserTermParserStates { self.machine.state() }
+    pub fn state(&self) -> &GbnfRuleParserTermParserStates {
+        self.machine.state()
+    }
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GbnfRuleParserTermParserStates) -> bool { self.machine.is(&state) }
+    pub fn is(&self, state: GbnfRuleParserTermParserStates) -> bool {
+        self.machine.is(&state)
+    }
 
     /// Returns the result context for caller inspection.
     #[must_use]
-    pub fn context(&self) -> &GbnfRuleParserTermParserContext { self.machine.context() }
+    pub fn context(&self) -> &GbnfRuleParserTermParserContext {
+        self.machine.context()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn classify(token: TokenKind) -> TermKind { TermParser::new().process_event(TermInput::new(token)).expect("supported token") }
+    fn classify(token: TokenKind) -> TermKind {
+        TermParser::new()
+            .process_event(TermInput::new(token))
+            .expect("supported token")
+    }
 
     #[test]
     fn classifies_each_supported_term_kind() {
         assert_eq!(classify(TokenKind::StringLiteral), TermKind::StringLiteral);
-        assert_eq!(classify(TokenKind::CharacterClass), TermKind::CharacterClass);
+        assert_eq!(
+            classify(TokenKind::CharacterClass),
+            TermKind::CharacterClass
+        );
         assert_eq!(classify(TokenKind::RuleReference), TermKind::RuleReference);
         assert_eq!(classify(TokenKind::Dot), TermKind::Dot);
         assert_eq!(classify(TokenKind::OpenGroup), TermKind::OpenGroup);
@@ -259,20 +365,29 @@ mod tests {
     #[test]
     fn unsupported_token_is_parse_failed() {
         let mut parser = TermParser::new();
-        assert_eq!(parser.process_event(TermInput::new(TokenKind::Unknown)), Err(TermParserError::ParseFailed));
+        assert_eq!(
+            parser.process_event(TermInput::new(TokenKind::Unknown)),
+            Err(TermParserError::ParseFailed)
+        );
         assert!(parser.is(GbnfRuleParserTermParserStates::X));
         assert_eq!(parser.context().result, TermKind::Unknown);
     }
 
     #[test]
     fn no_token_is_parse_failed() {
-        assert_eq!(TermParser::new().process_event(TermInput::empty()), Err(TermParserError::ParseFailed));
+        assert_eq!(
+            TermParser::new().process_event(TermInput::empty()),
+            Err(TermParserError::ParseFailed)
+        );
     }
 
     #[test]
     fn unexpected_event_is_explicit_internal_error() {
         let mut parser = TermParser::new();
-        assert_eq!(parser.process_unexpected_event(), Err(TermParserError::InternalError));
+        assert_eq!(
+            parser.process_unexpected_event(),
+            Err(TermParserError::InternalError)
+        );
         assert_eq!(parser.context().error, Some(TermParserError::InternalError));
     }
 }

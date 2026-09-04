@@ -3,8 +3,8 @@
 use emel_gguf::Loader;
 
 use crate::data::{
-    MoshiLmHParams, MoshiLmHParamsError, MoshiLmHParamsInput, MAX_DEPFORMER_WEIGHT_SCHEDULE,
-    MAX_INFERENCE_PROMPT_TOKENS, MAX_MOSHI_DELAYS,
+    MAX_DEPFORMER_WEIGHT_SCHEDULE, MAX_INFERENCE_PROMPT_TOKENS, MAX_MOSHI_DELAYS, MoshiLmHParams,
+    MoshiLmHParamsError, MoshiLmHParamsInput,
 };
 use crate::loader::hparams::{Accessor, Error as AccessorError};
 
@@ -35,6 +35,7 @@ pub enum Error {
 /// Returns [`Error::Metadata`] for missing, malformed, wrong-kind, or
 /// over-capacity metadata. Returns [`Error::Validation`] for semantic Moshi
 /// contract violations.
+#[allow(clippy::too_many_lines)]
 pub fn load_hparams(loader: &mut Loader) -> Result<MoshiLmHParams, Error> {
     Accessor::require_string(loader, b"general.architecture", ARCHITECTURE_NAME)
         .map_err(Error::Metadata)?;
@@ -80,34 +81,86 @@ pub fn load_hparams(loader: &mut Loader) -> Result<MoshiLmHParams, Error> {
     require_i32(loader, b"moshi.lm.n_q", &mut input.n_q)?;
     require_i32(loader, b"moshi.lm.dep_q", &mut input.dep_q)?;
     require_i32(loader, b"moshi.lm.text_card", &mut input.text_card)?;
-    require_i32(loader, b"moshi.lm.existing_text_padding_id", &mut input.text_padding_id)?;
+    require_i32(
+        loader,
+        b"moshi.lm.existing_text_padding_id",
+        &mut input.text_padding_id,
+    )?;
     input.inference_dep_q = input.dep_q;
     require_i32(loader, b"moshi.lm.dim", &mut input.dim)?;
     require_i32(loader, b"moshi.lm.num_layers", &mut input.num_layers)?;
     require_i32(loader, b"moshi.lm.num_heads", &mut input.num_heads)?;
     require_i32(loader, b"moshi.lm.context", &mut input.context)?;
     require_i32(loader, b"moshi.lm.max_period", &mut input.max_period)?;
-    require_i32(loader, b"moshi.lm.dim_feedforward", &mut input.dim_feedforward)?;
+    require_i32(
+        loader,
+        b"moshi.lm.dim_feedforward",
+        &mut input.dim_feedforward,
+    )?;
     require_bool(loader, b"moshi.lm.causal", &mut input.causal)?;
-    require_bool(loader, b"moshi.lm.cross_attention", &mut input.cross_attention)?;
-    require_bool(loader, b"moshi.lm.demux_second_stream", &mut input.demux_second_stream)?;
+    require_bool(
+        loader,
+        b"moshi.lm.cross_attention",
+        &mut input.cross_attention,
+    )?;
+    require_bool(
+        loader,
+        b"moshi.lm.demux_second_stream",
+        &mut input.demux_second_stream,
+    )?;
     input.delay_count = copy_required_array(loader, b"moshi.lm.delays", &mut input.delays)?;
     require_string(loader, b"moshi.lm.gating", b"silu")?;
     require_string(loader, b"moshi.lm.norm", b"rms_norm_f32")?;
     require_string(loader, b"moshi.lm.positional_embedding", b"rope")?;
-    assign_i32(loader, b"moshi.lm.extra_heads.num_heads", &mut input.extra_heads_num_heads)?;
+    assign_i32(
+        loader,
+        b"moshi.lm.extra_heads.num_heads",
+        &mut input.extra_heads_num_heads,
+    )?;
 
     require_i32(loader, b"moshi.lm.depformer.dim", &mut input.depformer_dim)?;
-    require_i32(loader, b"moshi.lm.depformer.num_heads", &mut input.depformer_num_heads)?;
-    require_i32(loader, b"moshi.lm.depformer.num_layers", &mut input.depformer_num_layers)?;
-    require_i32(loader, b"moshi.lm.depformer.dim_feedforward", &mut input.depformer_dim_feedforward)?;
-    require_i32(loader, b"moshi.lm.depformer.context", &mut input.depformer_context)?;
-    require_i32(loader, b"moshi.lm.depformer.max_period", &mut input.depformer_max_period)?;
-    require_bool(loader, b"moshi.lm.depformer.multi_linear", &mut input.depformer_multi_linear)?;
-    require_bool(loader, b"moshi.lm.depformer.weights_per_step", &mut input.depformer_weights_per_step)?;
+    require_i32(
+        loader,
+        b"moshi.lm.depformer.num_heads",
+        &mut input.depformer_num_heads,
+    )?;
+    require_i32(
+        loader,
+        b"moshi.lm.depformer.num_layers",
+        &mut input.depformer_num_layers,
+    )?;
+    require_i32(
+        loader,
+        b"moshi.lm.depformer.dim_feedforward",
+        &mut input.depformer_dim_feedforward,
+    )?;
+    require_i32(
+        loader,
+        b"moshi.lm.depformer.context",
+        &mut input.depformer_context,
+    )?;
+    require_i32(
+        loader,
+        b"moshi.lm.depformer.max_period",
+        &mut input.depformer_max_period,
+    )?;
+    require_bool(
+        loader,
+        b"moshi.lm.depformer.multi_linear",
+        &mut input.depformer_multi_linear,
+    )?;
+    require_bool(
+        loader,
+        b"moshi.lm.depformer.weights_per_step",
+        &mut input.depformer_weights_per_step,
+    )?;
     require_string(loader, b"moshi.lm.depformer.gating", b"silu")?;
     require_string(loader, b"moshi.lm.depformer.pos_emb", b"none")?;
-    assign_i32(loader, b"moshi.lm.depformer.low_rank_embeddings", &mut input.depformer_low_rank_embeddings)?;
+    assign_i32(
+        loader,
+        b"moshi.lm.depformer.low_rank_embeddings",
+        &mut input.depformer_low_rank_embeddings,
+    )?;
     input.depformer_weight_schedule_count = copy_optional_array(
         loader,
         b"moshi.lm.depformer.weights_per_step_schedule",
@@ -115,9 +168,21 @@ pub fn load_hparams(loader: &mut Loader) -> Result<MoshiLmHParams, Error> {
     )?;
 
     if input.depformer_weights_per_step {
-        require_i32(loader, b"moshi.lm.inference.dep_q", &mut input.inference_dep_q)?;
-        require_i32(loader, b"moshi.lm.inference.pre_text_silence_frames", &mut input.inference_pre_text_silence_frames)?;
-        require_i32(loader, b"moshi.lm.inference.post_text_silence_frames", &mut input.inference_post_text_silence_frames)?;
+        require_i32(
+            loader,
+            b"moshi.lm.inference.dep_q",
+            &mut input.inference_dep_q,
+        )?;
+        require_i32(
+            loader,
+            b"moshi.lm.inference.pre_text_silence_frames",
+            &mut input.inference_pre_text_silence_frames,
+        )?;
+        require_i32(
+            loader,
+            b"moshi.lm.inference.post_text_silence_frames",
+            &mut input.inference_post_text_silence_frames,
+        )?;
         input.inference_prompt_token_count = copy_required_array(
             loader,
             b"moshi.lm.inference.prompt_tokens",
@@ -133,7 +198,9 @@ fn require_i32(loader: &mut Loader, key: &[u8], field: &mut i32) -> Result<(), E
 
 fn assign_i32(loader: &mut Loader, key: &[u8], field: &mut i32) -> Result<(), Error> {
     let mut accessor = Accessor::new();
-    accessor.assign_i32(loader, key, field).map_err(Error::Metadata)
+    accessor
+        .assign_i32(loader, key, field)
+        .map_err(Error::Metadata)
 }
 
 fn require_bool(loader: &mut Loader, key: &[u8], field: &mut bool) -> Result<(), Error> {
@@ -144,11 +211,19 @@ fn require_string(loader: &mut Loader, key: &[u8], expected: &[u8]) -> Result<()
     Accessor::require_string(loader, key, expected).map_err(Error::Metadata)
 }
 
-fn copy_required_array(loader: &mut Loader, key: &[u8], destination: &mut [i32]) -> Result<u32, Error> {
+fn copy_required_array(
+    loader: &mut Loader,
+    key: &[u8],
+    destination: &mut [i32],
+) -> Result<u32, Error> {
     Accessor::copy_i32_array(loader, key, destination).map_err(Error::Metadata)
 }
 
-fn copy_optional_array(loader: &mut Loader, key: &[u8], destination: &mut [i32]) -> Result<u32, Error> {
+fn copy_optional_array(
+    loader: &mut Loader,
+    key: &[u8],
+    destination: &mut [i32],
+) -> Result<u32, Error> {
     Accessor::copy_optional_i32_array(loader, key, destination).map_err(Error::Metadata)
 }
 
@@ -176,10 +251,13 @@ impl Detail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loader::test_gguf::{Fixture, BOOL, I32, U32};
+    use crate::loader::test_gguf::{BOOL, Fixture, I32, U32};
 
     fn array_i32(values: &[i32]) -> Vec<u8> {
-        values.iter().flat_map(|value| (*value as u32).to_le_bytes()).collect()
+        values
+            .iter()
+            .flat_map(|value| (*value).cast_unsigned().to_le_bytes())
+            .collect()
     }
 
     fn valid_fixture() -> Vec<u8> {
@@ -190,7 +268,11 @@ mod tests {
             .scalar(b"moshi.lm.n_q", U32, 2u32.to_le_bytes())
             .scalar(b"moshi.lm.dep_q", U32, 2u32.to_le_bytes())
             .scalar(b"moshi.lm.text_card", U32, 16u32.to_le_bytes())
-            .scalar(b"moshi.lm.existing_text_padding_id", U32, 0u32.to_le_bytes())
+            .scalar(
+                b"moshi.lm.existing_text_padding_id",
+                U32,
+                0u32.to_le_bytes(),
+            )
             .scalar(b"moshi.lm.dim", U32, 8u32.to_le_bytes())
             .scalar(b"moshi.lm.num_layers", U32, 2u32.to_le_bytes())
             .scalar(b"moshi.lm.num_heads", U32, 2u32.to_le_bytes())
@@ -208,14 +290,22 @@ mod tests {
             .scalar(b"moshi.lm.depformer.dim", U32, 8u32.to_le_bytes())
             .scalar(b"moshi.lm.depformer.num_heads", U32, 2u32.to_le_bytes())
             .scalar(b"moshi.lm.depformer.num_layers", U32, 2u32.to_le_bytes())
-            .scalar(b"moshi.lm.depformer.dim_feedforward", U32, 16u32.to_le_bytes())
+            .scalar(
+                b"moshi.lm.depformer.dim_feedforward",
+                U32,
+                16u32.to_le_bytes(),
+            )
             .scalar(b"moshi.lm.depformer.context", U32, 16u32.to_le_bytes())
             .scalar(b"moshi.lm.depformer.max_period", U32, 16u32.to_le_bytes())
             .scalar(b"moshi.lm.depformer.multi_linear", BOOL, [1])
             .scalar(b"moshi.lm.depformer.weights_per_step", BOOL, [0])
             .string(b"moshi.lm.depformer.gating", b"silu")
             .string(b"moshi.lm.depformer.pos_emb", b"none")
-            .scalar(b"moshi.lm.depformer.low_rank_embeddings", U32, 0u32.to_le_bytes())
+            .scalar(
+                b"moshi.lm.depformer.low_rank_embeddings",
+                U32,
+                0u32.to_le_bytes(),
+            )
             .build()
     }
 
@@ -232,9 +322,14 @@ mod tests {
     #[test]
     fn missing_or_wrong_component_is_rejected() {
         let mut missing = crate::loader::test_gguf::load(
-            Fixture::new().string(b"general.architecture", b"moshi").build(),
+            Fixture::new()
+                .string(b"general.architecture", b"moshi")
+                .build(),
         );
-        assert!(matches!(load_hparams(&mut missing), Err(Error::Metadata(_))));
+        assert!(matches!(
+            load_hparams(&mut missing),
+            Err(Error::Metadata(_))
+        ));
         let mut wrong = crate::loader::test_gguf::load(
             Fixture::new()
                 .string(b"general.architecture", b"moshi")
@@ -253,19 +348,33 @@ mod tests {
                 .string(b"moshi.lm.card", b"wrong")
                 .build(),
         );
-        assert!(matches!(load_hparams(&mut wrong_kind), Err(Error::Metadata(_))));
+        assert!(matches!(
+            load_hparams(&mut wrong_kind),
+            Err(Error::Metadata(_))
+        ));
         let values = vec![0u32; MAX_MOSHI_DELAYS + 1];
-        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let bytes: Vec<u8> = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
         let mut oversized = crate::loader::test_gguf::load(
             Fixture::new()
                 .string(b"general.architecture", b"moshi")
                 .string(b"moshi.component", b"lm")
                 .scalar(b"moshi.lm.card", U32, 32u32.to_le_bytes())
                 .scalar(b"moshi.lm.n_q", U32, 2u32.to_le_bytes())
-                .array(b"moshi.lm.delays", U32, &bytes, (MAX_MOSHI_DELAYS + 1) as u64)
+                .array(
+                    b"moshi.lm.delays",
+                    U32,
+                    &bytes,
+                    (MAX_MOSHI_DELAYS + 1) as u64,
+                )
                 .build(),
         );
-        assert!(matches!(load_hparams(&mut oversized), Err(Error::Metadata(_))));
+        assert!(matches!(
+            load_hparams(&mut oversized),
+            Err(Error::Metadata(_))
+        ));
     }
 
     #[test]
@@ -306,6 +415,9 @@ mod tests {
             depformer_weights_per_step: false,
         };
         input.delays[0] = -1;
-        assert_eq!(MoshiLmHParams::try_new(&input), Err(MoshiLmHParamsError::InvalidDelays));
+        assert_eq!(
+            MoshiLmHParams::try_new(&input),
+            Err(MoshiLmHParamsError::InvalidDelays)
+        );
     }
 }

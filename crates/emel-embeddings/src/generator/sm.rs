@@ -16,7 +16,7 @@
     reason = "SML-generated names and fixed-capacity event/context layouts are contract-stable and allocation-free"
 )]
 
-use emel_text::{ChatMessage, Conditioner, ConditionerError};
+use emel_text::{ChatMessage, Conditioner, ConditionerError, ConditioningDone};
 use sml::sml;
 
 /// Maximum copied text messages retained by one dispatch.
@@ -165,7 +165,7 @@ impl EventInitializeRun {
         }
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EventEmbedTextRun {
     pub messages: [CopiedMessage; MAX_MESSAGES],
     pub message_count: usize,
@@ -346,6 +346,7 @@ sml! {
         "state_embed_publish_error"_s <= "state_conditioning_decision"_s + completion<EventEmbedTextRun> [guard_prepare_invalid_request] / effect_set_embed_invalid_request,
         "state_embed_publish_error"_s <= "state_conditioning_decision"_s + completion<EventEmbedTextRun> [guard_prepare_model_invalid] / effect_set_embed_model_invalid,
         "state_embed_publish_error"_s <= "state_conditioning_decision"_s + completion<EventEmbedTextRun> [guard_prepare_backend_error] / effect_set_embed_backend_error_event_embed_text_run,
+        "state_embed_publish_error"_s <= "state_conditioning_decision"_s + completion<EventEmbedTextRun> [guard_prepare_untracked_error] / effect_set_embed_backend_error_event_embed_text_run,
         "state_encoding"_s <= "state_conditioning_decision"_s + completion<EventEmbedTextRun> [guard_prepare_success],
         "state_embed_publish_error"_s <= "state_encoding"_s + completion<EventEmbedTextRun> [guard_text_route_unsupported] / effect_set_embed_backend_error_event_embed_text_run,
         "state_embed_publish_error"_s <= "state_encoding"_s + completion<EventEmbedTextRun> [guard_text_encode_unready] / effect_set_embed_backend_error_event_embed_text_run,
@@ -431,11 +432,16 @@ pub struct EmbeddingsGeneratorContext {
     pub error: EmbeddingsGeneratorStatus,
     pub bind_accepted: bool,
     pub bind_err_code: i32,
-    pub prepare_accepted: bool,
-    pub prepare_err_code: i32,
+    /// Typed conditioner completion retained until the payload-less SML completion
+    /// event is consumed by guard-selected transitions.
+    pub prepare_result: Result<ConditioningDone, ConditionerError>,
+    /// Whether a native binding is available for the owned context.
+    ///
+    /// Native tensor borrows are caller-owned and are consumed by the explicit
+    /// synchronous handoff rather than retained here.
+    native_execution_available: bool,
     pub token_count: usize,
     pub output_dimension: usize,
-    /// Owned text conditioner child; dispatch never stores caller borrows.
     pub conditioner: Conditioner,
 }
 impl Default for EmbeddingsGeneratorContext {
@@ -464,8 +470,8 @@ impl Default for EmbeddingsGeneratorContext {
             error: EmbeddingsGeneratorStatus::None,
             bind_accepted: false,
             bind_err_code: 0,
-            prepare_accepted: false,
-            prepare_err_code: 0,
+            prepare_result: Err(ConditionerError::None),
+            native_execution_available: false,
             token_count: 0,
             output_dimension: 0,
             conditioner,
@@ -477,9 +483,8 @@ impl EmbeddingsGeneratorContext {
         self.embedding_length = embedding_length.min(MAX_EMBEDDING_DIMENSION);
         self.max_positions = max_positions.min(MAX_TOKEN_POSITIONS);
         self.model_ready = embedding_length > 0 && embedding_length <= MAX_EMBEDDING_DIMENSION;
-        self.scratch_ready = self.model_ready
-            && max_positions > 0
-            && max_positions <= MAX_TOKEN_POSITIONS;
+        self.scratch_ready =
+            self.model_ready && max_positions > 0 && max_positions <= MAX_TOKEN_POSITIONS;
     }
     pub fn set_routes(
         &mut self,
@@ -498,12 +503,19 @@ impl EmbeddingsGeneratorContext {
     pub fn state_error(&self) -> EmbeddingsGeneratorStatus {
         self.error
     }
+    /// Marks native execution unavailable for this owned generated context.
+    pub fn set_native_execution_unavailable(&mut self) {
+        self.native_execution_available = false;
+    }
+    #[must_use]
+    pub fn native_execution_ready(&self) -> bool {
+        self.native_execution_available
+    }
     fn reset(&mut self) {
         self.error = EmbeddingsGeneratorStatus::None;
         self.bind_accepted = false;
         self.bind_err_code = 0;
-        self.prepare_accepted = false;
-        self.prepare_err_code = 0;
+        self.prepare_result = Err(ConditionerError::None);
         self.token_count = 0;
         self.output_dimension = 0;
     }
@@ -574,8 +586,15 @@ fn unavailable_tokenizer(
 }
 
 impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
-    fn effect_encode_text(&mut self, _event: &EventEmbedTextRun) -> Result<(), ()> {
-        self.error = EmbeddingsGeneratorStatus::Backend;
+    fn effect_encode_text(&mut self, event: &EventEmbedTextRun) -> Result<(), ()> {
+        self.error = if event
+            .encode
+            .is_some_and(|encode| encode(event, &mut self.scratch[..self.embedding_length]))
+        {
+            EmbeddingsGeneratorStatus::None
+        } else {
+            EmbeddingsGeneratorStatus::Backend
+        };
         Ok(())
     }
     fn effect_prepare_image(&mut self, _event: &EventEmbedImageRun) -> Result<(), ()> {
@@ -686,48 +705,43 @@ impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
         Ok(())
     }
     fn effect_dispatch_condition_text(&mut self, event: &EventEmbedTextRun) -> Result<(), ()> {
-        self.prepare_accepted = false;
-        self.prepare_err_code = 0;
         self.token_count = 0;
 
-        let mut messages = [ChatMessage { role: &[], content: &[] }; MAX_MESSAGES];
+        let mut messages = [ChatMessage {
+            role: &[],
+            content: &[],
+        }; MAX_MESSAGES];
         for (destination, source) in messages
             .iter_mut()
             .zip(event.messages[..event.message_count].iter())
         {
             destination.content = source.as_bytes();
         }
-        let result = self.conditioner.prepare(emel_text::conditioner_event::Prepare {
-            messages: &messages[..event.message_count],
-            formatter_available: true,
-            tokenizer_available: self.conditioner_ready,
-            model_valid: self.model_ready,
-            token_capacity: self.max_positions,
-            token_ids: &mut self.token_ids[..self.max_positions],
-            token_count: &mut self.token_count,
-            add_generation_prompt: event.add_generation_prompt,
-            enable_thinking: event.enable_thinking,
-            add_special: true,
-            parse_special: false,
-        });
-        match result {
-            Ok(outcome) if outcome.token_count > 0 => self.prepare_accepted = true,
-            Ok(_) | Err(ConditionerError::InvalidArgument | ConditionerError::Capacity) => {
-                self.prepare_err_code = 1;
-            }
-            Err(ConditionerError::ModelInvalid) => self.prepare_err_code = 2,
-            Err(ConditionerError::Backend | ConditionerError::Untracked | ConditionerError::None) => {
-                self.prepare_err_code = 3;
-            }
-        }
+        self.prepare_result = self
+            .conditioner
+            .prepare(emel_text::conditioner_event::Prepare {
+                messages: &messages[..event.message_count],
+                formatter_available: true,
+                tokenizer_available: self.conditioner_ready,
+                model_valid: self.model_ready,
+                token_capacity: self.max_positions,
+                token_ids: &mut self.token_ids[..self.max_positions],
+                token_count: &mut self.token_count,
+                add_generation_prompt: event.add_generation_prompt,
+                enable_thinking: event.enable_thinking,
+                add_special: true,
+                parse_special: false,
+            });
         Ok(())
     }
     fn effect_dispatch_bind_conditioner(&mut self, _event: &EventInitializeRun) -> Result<(), ()> {
-        let result = self.conditioner.process_event(emel_text::conditioner_event::Bind {
-            tokenizer_available: true,
-            formatter_available: true,
-            model_valid: self.model_ready,
-        });
+        let result = self
+            .conditioner
+            .process_event(emel_text::conditioner_event::Bind {
+                tokenizer_available: true,
+                formatter_available: true,
+                model_valid: self.model_ready,
+            });
         self.bind_accepted = result.is_ok();
         self.conditioner_ready = self.bind_accepted;
         self.bind_err_code = match result {
@@ -761,6 +775,19 @@ impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
         }
         Ok(())
     }
+    fn effect_emit_embed_done_event_embed_audio_run(
+        &mut self,
+        event: &EventEmbedAudioRun,
+    ) -> Result<(), ()> {
+        if let Some(f) = event.on_done {
+            f(
+                &self.scratch[..self.output_dimension],
+                self.output_dimension,
+            );
+        }
+        Ok(())
+    }
+
     fn effect_emit_embed_error_event_embed_audio_run(
         &mut self,
         event: &EventEmbedAudioRun,
@@ -1048,13 +1075,31 @@ impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
         Ok(event.on_error.is_none())
     }
     fn guard_prepare_invalid_request(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> {
-        Ok(self.prepare_err_code == 1)
+        Ok(matches!(
+            self.prepare_result,
+            Err(ConditionerError::InvalidArgument | ConditionerError::Capacity)
+        ) || matches!(self.prepare_result, Ok(outcome) if outcome.token_count == 0))
     }
     fn guard_prepare_model_invalid(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> {
-        Ok(self.prepare_err_code == 2)
+        Ok(matches!(
+            self.prepare_result,
+            Err(ConditionerError::ModelInvalid)
+        ))
     }
     fn guard_prepare_backend_error(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> {
-        Ok(self.prepare_err_code == 3)
+        Ok(matches!(
+            self.prepare_result,
+            Err(ConditionerError::Backend)
+        ))
+    }
+    fn guard_prepare_untracked_error(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> {
+        Ok(matches!(
+            self.prepare_result,
+            Err(ConditionerError::Untracked | ConditionerError::None)
+        ))
+    }
+    fn guard_prepare_success(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> {
+        Ok(matches!(self.prepare_result, Ok(outcome) if outcome.token_count > 0))
     }
     fn effect_reject_unexpected_from_state_audio_encoding(&mut self) -> Result<(), ()> {
         self.set_error(EmbeddingsGeneratorStatus::InvalidRequest);
@@ -1397,44 +1442,68 @@ impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
         Ok(!self.guard_valid_initialize(event)?)
     }
     fn guard_valid_embed_audio_full(&self, event: &EventEmbedAudioRun) -> Result<bool, ()> {
-        Ok(self.initialized && self.audio_ready && event.publish.is_some()
-            && event.sample_rate == 16000 && event.pcm_len == AUDIO_SAMPLE_COUNT
+        Ok(self.initialized
+            && self.audio_ready
+            && event.publish.is_some()
+            && event.sample_rate == 16000
+            && event.pcm_len == AUDIO_SAMPLE_COUNT
             && event.output_capacity >= self.embedding_length
             && (event.truncate_dimension == 0 || event.truncate_dimension == self.embedding_length))
     }
     fn guard_valid_embed_audio_truncate(&self, event: &EventEmbedAudioRun) -> Result<bool, ()> {
         let dimension = self.requested_dimension(event.truncate_dimension);
-        Ok(self.initialized && self.audio_ready && event.publish.is_some()
-            && event.sample_rate == 16000 && event.pcm_len == AUDIO_SAMPLE_COUNT
-            && event.truncate_dimension != 0 && event.truncate_dimension != self.embedding_length
-            && self.valid_dim(dimension) && event.output_capacity >= dimension)
+        Ok(self.initialized
+            && self.audio_ready
+            && event.publish.is_some()
+            && event.sample_rate == 16000
+            && event.pcm_len == AUDIO_SAMPLE_COUNT
+            && event.truncate_dimension != 0
+            && event.truncate_dimension != self.embedding_length
+            && self.valid_dim(dimension)
+            && event.output_capacity >= dimension)
     }
     fn guard_valid_embed_full(&self, event: &EventEmbedTextRun) -> Result<bool, ()> {
-        Ok(self.initialized && self.text_ready && event.publish.is_some()
-            && event.has_messages() && event.output_capacity >= self.embedding_length
+        Ok(self.initialized
+            && self.text_ready
+            && event.publish.is_some()
+            && event.has_messages()
+            && event.output_capacity >= self.embedding_length
             && (event.truncate_dimension == 0 || event.truncate_dimension == self.embedding_length))
     }
     fn guard_valid_embed_image_full(&self, event: &EventEmbedImageRun) -> Result<bool, ()> {
-        Ok(self.initialized && self.image_ready && event.publish.is_some()
-            && Self::valid_image(event) && event.output_capacity >= self.embedding_length
+        Ok(self.initialized
+            && self.image_ready
+            && event.publish.is_some()
+            && Self::valid_image(event)
+            && event.output_capacity >= self.embedding_length
             && (event.truncate_dimension == 0 || event.truncate_dimension == self.embedding_length))
     }
     fn guard_valid_embed_image_truncate(&self, event: &EventEmbedImageRun) -> Result<bool, ()> {
         let dimension = self.requested_dimension(event.truncate_dimension);
-        Ok(self.initialized && self.image_ready && event.publish.is_some()
-            && Self::valid_image(event) && event.truncate_dimension != 0
-            && event.truncate_dimension != self.embedding_length && self.valid_dim(dimension)
+        Ok(self.initialized
+            && self.image_ready
+            && event.publish.is_some()
+            && Self::valid_image(event)
+            && event.truncate_dimension != 0
+            && event.truncate_dimension != self.embedding_length
+            && self.valid_dim(dimension)
             && event.output_capacity >= dimension)
     }
     fn guard_valid_embed_truncate(&self, event: &EventEmbedTextRun) -> Result<bool, ()> {
         let dimension = self.requested_dimension(event.truncate_dimension);
-        Ok(self.initialized && self.text_ready && event.publish.is_some()
-            && event.has_messages() && event.truncate_dimension != 0
-            && event.truncate_dimension != self.embedding_length && self.valid_dim(dimension)
+        Ok(self.initialized
+            && self.text_ready
+            && event.publish.is_some()
+            && event.has_messages()
+            && event.truncate_dimension != 0
+            && event.truncate_dimension != self.embedding_length
+            && self.valid_dim(dimension)
             && event.output_capacity >= dimension)
     }
     fn guard_text_encode_ready(&self, _event: &EventEmbedTextRun) -> Result<bool, ()> {
-        Ok(self.text_ready && self.scratch_ready && self.token_count > 0
+        Ok(self.text_ready
+            && self.scratch_ready
+            && self.token_count > 0
             && self.token_count <= self.max_positions)
     }
     fn guard_text_encode_unready(&self, event: &EventEmbedTextRun) -> Result<bool, ()> {
@@ -1444,12 +1513,19 @@ impl EmbeddingsGeneratorStateMachineContext for EmbeddingsGeneratorContext {
         Ok(self.text_route != TextRouteKind::Encoder)
     }
     fn guard_valid_initialize(&self, event: &EventInitializeRun) -> Result<bool, ()> {
-        Ok(event.tokenizer_sm != 0 && self.model_ready && self.conditioner_ready
-            && event.preprocessor_variant != 0 && event.encoder_variant != 0)
+        Ok(event.tokenizer_sm != 0
+            && self.model_ready
+            && self.conditioner_ready
+            && event.preprocessor_variant != 0
+            && event.encoder_variant != 0)
     }
 }
 
 /// Synchronous bounded actor wrapper.
+#[allow(
+    missing_debug_implementations,
+    reason = "generated state-machine wrapper has no stable Debug contract"
+)]
 pub struct EmbeddingsGeneratorActor {
     machine: EmbeddingsGeneratorStateMachine<EmbeddingsGeneratorContext>,
 }
@@ -1464,6 +1540,15 @@ impl EmbeddingsGeneratorActor {
             machine: EmbeddingsGeneratorStateMachine::new(EmbeddingsGeneratorContext::default()),
         }
     }
+    /// Processes one initialization request through the generated state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbeddingsGeneratorStatus::InvalidRequest`] when the request is
+    /// invalid for its fields or current machine state,
+    /// [`EmbeddingsGeneratorStatus::ModelInvalid`] when model or conditioner
+    /// binding validation fails, or [`EmbeddingsGeneratorStatus::Backend`] when
+    /// initialization reports a backend failure.
     pub fn process_initialize(
         &mut self,
         event: EventInitializeRun,
@@ -1476,6 +1561,15 @@ impl EmbeddingsGeneratorActor {
             error => Err(error),
         }
     }
+    /// Processes one text embedding request through the generated state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbeddingsGeneratorStatus::InvalidRequest`] when the request is
+    /// invalid for its fields or current machine state,
+    /// [`EmbeddingsGeneratorStatus::ModelInvalid`] when text preparation reports
+    /// an invalid model, or [`EmbeddingsGeneratorStatus::Backend`] when the text
+    /// encoder callback, route, or embedding backend fails.
     pub fn process_text(
         &mut self,
         event: EventEmbedTextRun,
@@ -1488,6 +1582,14 @@ impl EmbeddingsGeneratorActor {
             error => Err(error),
         }
     }
+    /// Processes one image embedding request through the generated state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbeddingsGeneratorStatus::InvalidRequest`] when the request is
+    /// invalid for its fields or current machine state, or
+    /// [`EmbeddingsGeneratorStatus::Backend`] when the image route,
+    /// preparation, encoding path, or embedding backend is unavailable or fails.
     #[allow(
         clippy::large_types_passed_by_value,
         reason = "this public consuming wrapper preserves fixed-capacity event ownership and allocation-free dispatch"
@@ -1504,6 +1606,14 @@ impl EmbeddingsGeneratorActor {
             error => Err(error),
         }
     }
+    /// Processes one audio embedding request through the generated state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbeddingsGeneratorStatus::InvalidRequest`] when the request is
+    /// invalid for its fields or current machine state, or
+    /// [`EmbeddingsGeneratorStatus::Backend`] when the audio route,
+    /// preparation, encoding path, or embedding backend is unavailable or fails.
     #[allow(
         clippy::large_types_passed_by_value,
         reason = "this public consuming wrapper preserves fixed-capacity event ownership and allocation-free dispatch"
@@ -1520,6 +1630,39 @@ impl EmbeddingsGeneratorActor {
             error => Err(error),
         }
     }
+    /// Executes the maintained native OmniEmbed text path synchronously.
+    ///
+    /// The model binding and output remain caller-owned; this actor retains no
+    /// borrow and performs no deferred work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EmbeddingsGeneratorStatus::InvalidRequest`] when token or output
+    /// inputs are empty, exceed the fixed capacity, or are rejected by native
+    /// execution. Returns [`EmbeddingsGeneratorStatus::ModelInvalid`] when the
+    /// native model tensors are unsupported, invalid, or exceed model capacity.
+    pub fn process_native_text(
+        &mut self,
+        binding: &crate::generator::omniembed::NativeTensorBinding<'_>,
+        token_ids: &[i32],
+        output: &mut [f32],
+    ) -> Result<usize, EmbeddingsGeneratorStatus> {
+        if token_ids.is_empty() || token_ids.len() > MAX_TOKEN_POSITIONS || output.is_empty() {
+            return Err(EmbeddingsGeneratorStatus::InvalidRequest);
+        }
+        match crate::generator::omniembed::detail::execute_text(binding, token_ids, output) {
+            Ok(embedding_length) => Ok(embedding_length),
+            Err(crate::generator::omniembed::detail::Error::InvalidRequest) => {
+                Err(EmbeddingsGeneratorStatus::InvalidRequest)
+            }
+            Err(
+                crate::generator::omniembed::detail::Error::UnsupportedTensor
+                | crate::generator::omniembed::detail::Error::ModelInvalid
+                | crate::generator::omniembed::detail::Error::Capacity,
+            ) => Err(EmbeddingsGeneratorStatus::ModelInvalid),
+        }
+    }
+
     pub fn is(&self, state: &EmbeddingsGeneratorStates) -> bool {
         self.machine.is(state)
     }

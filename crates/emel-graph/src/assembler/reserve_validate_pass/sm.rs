@@ -188,9 +188,8 @@ impl GraphAssemblerReserveValidatePassStateMachineContext
 
 /// Single-writer synchronous reserve-validation actor.
 pub struct GraphAssemblerReserveValidatePass {
-    machine: GraphAssemblerReserveValidatePassStateMachine<
-        GraphAssemblerReserveValidatePassContext,
-    >,
+    machine:
+        GraphAssemblerReserveValidatePassStateMachine<GraphAssemblerReserveValidatePassContext>,
 }
 
 impl Default for GraphAssemblerReserveValidatePass {
@@ -220,9 +219,11 @@ impl GraphAssemblerReserveValidatePass {
 
     /// Dispatches an explicit unexpected event synchronously.
     pub fn process_unexpected_event(&mut self) -> bool {
+        self.machine.context_mut().validate_outcome = PassOutcome::Failed;
+        self.machine.context_mut().err = AssemblerError::Internal;
         self.machine
-            .process_event(GraphAssemblerReserveValidatePassEvents::UnexpectedEvent)
-            .is_ok()
+            .set_state(GraphAssemblerReserveValidatePassStates::UnexpectedEvent);
+        false
     }
 
     /// Returns generated state inspection.
@@ -233,7 +234,7 @@ impl GraphAssemblerReserveValidatePass {
 
     /// Tests generated state identity.
     #[must_use]
-    pub fn is(&self, state: GraphAssemblerReserveValidatePassStates) -> bool {
+    pub fn is(&self, state: &GraphAssemblerReserveValidatePassStates) -> bool {
         self.machine.is(state)
     }
 

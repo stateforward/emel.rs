@@ -13,6 +13,11 @@
     clippy::return_self_not_must_use,
     clippy::empty_structs_with_brackets,
     clippy::missing_const_for_fn,
+    clippy::cast_possible_truncation,
+    clippy::elidable_lifetime_names,
+    clippy::clone_on_copy,
+    clippy::unnecessary_map_or,
+    clippy::needless_lifetimes,
     dead_code,
     unused_imports,
     missing_docs
@@ -38,17 +43,40 @@ pub enum DecodeWavefrontError {
     /// Multiple lanes did not share one compatibility key.
     IncompatibleLanes = 2,
     /// The lane pool could not submit or join the requested group.
-    Backend = 3,
+    Backend = 8,
     /// A lane callback rejected its compute event.
     LaneRejected = 4,
     /// An event arrived outside the current state-machine contract.
-    Unexpected = 5,
+    Unexpected = 16,
+    /// An accepted lane did not provide the selected-token handoff.
+    MissingSelectedToken = 32,
+    /// The selected-token handoff was explicitly present but invalid.
+    InvalidSelectedToken = 64,
 }
 
 impl DecodeWavefrontError {
     /// Returns the stable numeric error code.
     #[must_use]
-    pub const fn code(self) -> u8 { self as u8 }
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Caller-owned selected-token handoff written by the actual lane callback.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SelectedToken {
+    /// Token selected by the callback.
+    pub token: i32,
+    /// Whether `token` contains a real selected result.
+    pub valid: bool,
+}
+
+impl SelectedToken {
+    /// Creates a valid caller-owned handoff.
+    #[must_use]
+    pub const fn new(token: i32) -> Self {
+        Self { token, valid: true }
+    }
 }
 
 /// Kernel route participating in lane compatibility.
@@ -112,83 +140,229 @@ pub struct DispatchSummary {
     pub dispatched_lanes: i32,
     /// First rejected lane, or [`NO_FAILED_LANE`].
     pub failed_lane: i32,
+    /// Selected token copied from the accepted callback's lane handoff.
+    pub selected_token: i32,
+    /// Whether `selected_token` is a real callback-produced handoff.
+    pub selected_token_valid: bool,
 }
 
-/// Synchronous lane callback.  The key is copied into the callback, and the
-/// boolean result is the lane's accepted/rejected compute outcome.
-pub type LaneCallback = fn(CompatibilityKey) -> bool;
+/// Synchronous lane callback. The callback writes its selected token before
+/// returning `true`; the boolean remains the lane's acceptance outcome.
+pub type LaneCallback = fn(CompatibilityKey, &mut SelectedToken) -> bool;
 
 /// One caller-owned lane in a bounded request.
 #[derive(Clone, Copy, Debug)]
 pub struct Lane {
     /// Identity of the single-writer graph actor represented by this lane.
     pub writer_id: usize,
+    /// Identity of the caller-owned outcome slot.
+    pub outcome_id: usize,
     /// Compatibility metadata for grouping.
     pub key: CompatibilityKey,
     /// Synchronous compute callback.
     pub callback: Option<LaneCallback>,
     /// Outcome populated by the actor.
     pub accepted: bool,
+    /// Callback-owned selected-token result for this lane.
+    pub selected_token: SelectedToken,
 }
 
 impl Lane {
-    /// Creates a lane with an initially clear outcome.
+    /// Creates a lane with initially clear outcomes.
     #[must_use]
-    pub const fn new(writer_id: usize, key: CompatibilityKey, callback: Option<LaneCallback>) -> Self {
-        Self { writer_id, key, callback, accepted: false }
+    pub const fn new(
+        writer_id: usize,
+        key: CompatibilityKey,
+        callback: Option<LaneCallback>,
+    ) -> Self {
+        Self {
+            writer_id,
+            outcome_id: writer_id,
+            key,
+            callback,
+            accepted: false,
+            selected_token: SelectedToken {
+                token: 0,
+                valid: false,
+            },
+        }
     }
 }
 
-/// Caller-owned run event.  The two `RefCell` wrappers make the event Copy for
-/// SML completion dispatch while keeping all storage outside the actor.
-#[derive(Debug)]
+/// Caller-owned run event. The wrappers make the event Copy for SML completion
+/// dispatch while keeping all storage outside the actor. The selected-token
+/// slot is the event-level handoff owned by the caller; lane-local slots remain
+/// only for synchronous pool safety.
+#[derive(Clone, Copy, Debug)]
 pub struct EventRun<'event> {
     /// Bounded lane storage, owned by the caller.
     pub lanes: &'event RefCell<&'event mut [Lane]>,
     /// Caller-owned result storage.
     pub out: &'event RefCell<DispatchSummary>,
-}
-
-impl<'event> Copy for EventRun<'event> {}
-impl<'event> Clone for EventRun<'event> {
-    fn clone(&self) -> Self { *self }
+    /// Caller-owned selected-token handoff for this complete event.
+    pub selected_token: &'event RefCell<SelectedToken>,
+    /// Lane designated by the caller as the selection owner.
+    pub selection_owner: usize,
 }
 
 impl<'event> EventRun<'event> {
-    /// Creates one bounded wavefront request.
+    /// Creates one bounded wavefront request with an explicit selection owner.
     #[must_use]
     pub const fn new(
         lanes: &'event RefCell<&'event mut [Lane]>,
         out: &'event RefCell<DispatchSummary>,
+        selected_token: &'event RefCell<SelectedToken>,
+        selection_owner: usize,
     ) -> Self {
-        Self { lanes, out }
+        Self {
+            lanes,
+            out,
+            selected_token,
+            selection_owner,
+        }
     }
 }
 
-/// Caller-owned scheduler capabilities.  Callbacks still execute
-/// synchronously; these flags represent the source pool's submission/join
-/// outcomes without creating hidden tasks.
+fn commit_done(
+    context: &mut TextGeneratorDecodeWavefrontContext,
+    event: &EventRun<'_>,
+) -> Result<(), ()> {
+    let lanes = event.lanes.borrow();
+    let Some(owner) = lanes.get(event.selection_owner) else {
+        context.err = DecodeWavefrontError::InvalidSelectedToken;
+        let mut out = event.out.borrow_mut();
+        out.err = context.err;
+        out.selected_token_valid = false;
+        return Ok(());
+    };
+    if !owner.accepted {
+        context.err = DecodeWavefrontError::LaneRejected;
+        let mut out = event.out.borrow_mut();
+        out.err = context.err;
+        out.selected_token_valid = false;
+        return Ok(());
+    }
+    if !owner.selected_token.valid {
+        context.err = DecodeWavefrontError::MissingSelectedToken;
+        let mut out = event.out.borrow_mut();
+        out.err = context.err;
+        out.selected_token_valid = false;
+        return Ok(());
+    }
+    if owner.selected_token.token < 0 {
+        context.err = DecodeWavefrontError::InvalidSelectedToken;
+        let mut out = event.out.borrow_mut();
+        out.err = context.err;
+        out.selected_token_valid = false;
+        return Ok(());
+    }
+    let selected = owner.selected_token;
+    *event.selected_token.borrow_mut() = selected;
+    context.err = DecodeWavefrontError::None;
+    let mut out = event.out.borrow_mut();
+    out.err = DecodeWavefrontError::None;
+    out.failed_lane = NO_FAILED_LANE;
+    out.selected_token = selected.token;
+    out.selected_token_valid = true;
+    Ok(())
+}
+
+/// Synchronous submission callback supplied by a caller-owned lane pool.
+///
+/// A successful submission must arrange for `accepted` and `selected_token`
+/// to be written before the enclosing join returns.
+pub type LaneSubmit = fn(
+    context: *mut (),
+    lane_index: usize,
+    key: CompatibilityKey,
+    callback: Option<LaneCallback>,
+    accepted: &mut bool,
+    selected_token: &mut SelectedToken,
+) -> bool;
+
+/// Synchronous join callback supplied by a caller-owned lane pool.
+pub type LaneJoin = fn(context: *mut ()) -> bool;
+
+/// Caller-owned scheduler capabilities. Callbacks still execute synchronously
+#[allow(unpredictable_function_pointer_comparisons)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LanePool {
-    /// Enables the parallel transition for compatible multi-lane groups.
-    pub parallel_enabled: bool,
-    /// Controls whether all lane submissions succeed.
-    pub submission_ok: bool,
-    /// Controls whether the submitted group joins successfully.
-    pub join_ok: bool,
+    /// Opaque caller-owned pool state.
+    pub context: *mut (),
+    /// Submits one bounded lane without retaining borrowed inputs.
+    pub submit: Option<LaneSubmit>,
+    /// Joins all lanes submitted for the current dispatch.
+    pub join: Option<LaneJoin>,
 }
 
 impl LanePool {
-    /// Creates a fully operational synchronous pool capability.
+    /// Creates an inline synchronous pool capability.
     #[must_use]
     pub const fn new() -> Self {
-        Self { parallel_enabled: true, submission_ok: true, join_ok: true }
+        Self::inline()
+    }
+
+    /// Creates an inline synchronous pool capability.
+    #[must_use]
+    pub const fn inline() -> Self {
+        Self {
+            context: core::ptr::null_mut(),
+            submit: Some(inline_lane_submit),
+            join: Some(inline_lane_join),
+        }
+    }
+
+    /// Creates a pool backed by caller-owned synchronous callbacks.
+    #[must_use]
+    pub const fn with_callbacks(context: *mut (), submit: LaneSubmit, join: LaneJoin) -> Self {
+        Self {
+            context,
+            submit: Some(submit),
+            join: Some(join),
+        }
+    }
+
+    fn submit_lane(
+        self,
+        lane_index: usize,
+        key: CompatibilityKey,
+        callback: Option<LaneCallback>,
+        accepted: &mut bool,
+        selected_token: &mut SelectedToken,
+    ) -> bool {
+        self.submit.is_some_and(|submit| {
+            submit(
+                self.context,
+                lane_index,
+                key,
+                callback,
+                accepted,
+                selected_token,
+            )
+        })
+    }
+
+    fn join(self) -> bool {
+        self.join.is_some_and(|join| join(self.context))
     }
 }
 
-/// Source-compatible spelling for integrations naming the lane pool in snake
-/// case.
-pub type lane_pool = LanePool;
+fn inline_lane_submit(
+    _context: *mut (),
+    _lane_index: usize,
+    key: CompatibilityKey,
+    callback: Option<LaneCallback>,
+    accepted: &mut bool,
+    selected_token: &mut SelectedToken,
+) -> bool {
+    *selected_token = SelectedToken::default();
+    *accepted = callback.is_some_and(|callback| callback(key, selected_token));
+    true
+}
+
+fn inline_lane_join(_context: *mut ()) -> bool {
+    true
+}
 
 sml! {
     TextGeneratorDecodeWavefront<'event> {
@@ -261,13 +435,17 @@ pub struct TextGeneratorDecodeWavefrontContext {
 
 impl TextGeneratorDecodeWavefrontContext {
     fn unexpected(&mut self) -> Result<(), ()> {
-        self.err = DecodeWavefrontError::Unexpected;
+        // The pinned action::effect_on_unexpected publishes the backend bit;
+        // retain the Rust-only flag so callers can still inspect the path.
+        self.err = DecodeWavefrontError::Backend;
         self.unexpected = true;
         Ok(())
     }
 }
 
-fn compatible(lhs: CompatibilityKey, rhs: CompatibilityKey) -> bool { lhs == rhs }
+fn compatible(lhs: CompatibilityKey, rhs: CompatibilityKey) -> bool {
+    lhs == rhs
+}
 
 fn valid_count(event: &EventRun<'_>) -> bool {
     let count = event.lanes.borrow().len();
@@ -276,7 +454,9 @@ fn valid_count(event: &EventRun<'_>) -> bool {
 
 fn all_compatible(event: &EventRun<'_>) -> bool {
     let lanes = event.lanes.borrow();
-    if lanes.is_empty() || lanes.len() > MAX_LANES { return false; }
+    if lanes.is_empty() || lanes.len() > MAX_LANES {
+        return false;
+    }
     let first = lanes[0].key;
     lanes[1..].iter().all(|lane| compatible(first, lane.key))
 }
@@ -284,32 +464,49 @@ fn all_compatible(event: &EventRun<'_>) -> bool {
 fn distinct_writers(event: &EventRun<'_>) -> bool {
     let lanes = event.lanes.borrow();
     for (index, lane) in lanes.iter().enumerate() {
-        if lane.writer_id == 0 { return false; }
-        if lanes[index + 1..].iter().any(|other| other.writer_id == lane.writer_id) { return false; }
+        if lane.writer_id == 0
+            || lanes[index + 1..]
+                .iter()
+                .any(|other| other.writer_id == lane.writer_id)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn distinct_outcomes(event: &EventRun<'_>) -> bool {
+    let lanes = event.lanes.borrow();
+    for (index, lane) in lanes.iter().enumerate() {
+        if lanes[index + 1..]
+            .iter()
+            .any(|other| other.outcome_id == lane.outcome_id)
+        {
+            return false;
+        }
     }
     true
 }
 
 fn dispatch_lane(event: &EventRun<'_>, index: usize) -> Result<(), ()> {
     let mut lanes = event.lanes.borrow_mut();
-    if index >= lanes.len() { return Ok(()); }
+    if index >= lanes.len() {
+        return Err(());
+    }
     let lane = &mut lanes[index];
-    lane.accepted = lane.callback.map_or(false, |callback| callback(lane.key));
-    event.out.borrow_mut().dispatched_lanes = (index + 1) as i32;
+    lane.selected_token = SelectedToken::default();
+    lane.accepted = lane
+        .callback
+        .is_some_and(|callback| callback(lane.key, &mut lane.selected_token));
+    event.out.borrow_mut().dispatched_lanes =
+        i32::try_from(index + 1).expect("bounded lane index fits in i32");
     Ok(())
 }
 
 fn mark_rejected(event: &EventRun<'_>, index: usize) -> Result<(), ()> {
     let mut out = event.out.borrow_mut();
     out.err = DecodeWavefrontError::LaneRejected;
-    out.failed_lane = index as i32;
-    Ok(())
-}
-
-fn commit_done(event: &EventRun<'_>) -> Result<(), ()> {
-    let mut out = event.out.borrow_mut();
-    out.err = DecodeWavefrontError::None;
-    out.failed_lane = NO_FAILED_LANE;
+    out.failed_lane = i32::try_from(index).expect("bounded lane index fits in i32");
     Ok(())
 }
 
@@ -317,8 +514,12 @@ impl TextGeneratorDecodeWavefrontStateMachineContext for TextGeneratorDecodeWave
     fn effect_begin_run(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
         self.err = DecodeWavefrontError::None;
         self.unexpected = false;
-        *event.out.borrow_mut() = DispatchSummary { err: DecodeWavefrontError::None, failed_lane: NO_FAILED_LANE, ..DispatchSummary::default() };
-        for lane in event.lanes.borrow_mut().iter_mut() { lane.accepted = false; }
+        *event.selected_token.borrow_mut() = SelectedToken::default();
+        *event.out.borrow_mut() = DispatchSummary {
+            err: DecodeWavefrontError::None,
+            failed_lane: NO_FAILED_LANE,
+            ..DispatchSummary::default()
+        };
         Ok(())
     }
 
@@ -340,191 +541,501 @@ impl TextGeneratorDecodeWavefrontStateMachineContext for TextGeneratorDecodeWave
         event.out.borrow_mut().err = self.err;
         Ok(())
     }
-    fn effect_reject_parallel_scheduler_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
-        self.err = DecodeWavefrontError::Backend;
-        let mut out = event.out.borrow_mut();
-        out.err = self.err;
-        out.failed_lane = NO_FAILED_LANE;
-        Ok(())
-    }
     fn effect_dispatch_parallel_lanes(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
         let pool = self.pool.unwrap_or_default();
-        let mut all_submitted = pool.submission_ok;
-        let mut lanes = event.lanes.borrow_mut();
-        for lane in lanes.iter_mut() {
-            lane.accepted = if all_submitted { lane.callback.map_or(false, |callback| callback(lane.key)) } else { false };
-            if lane.callback.is_none() { all_submitted = false; }
+        let lane_count;
+        let mut all_submitted = true;
+        {
+            let mut lanes = event.lanes.borrow_mut();
+            lane_count = lanes.len();
+            for (lane_index, lane) in lanes.iter_mut().enumerate() {
+                lane.accepted = false;
+                lane.selected_token = SelectedToken::default();
+                let submitted = pool.submit_lane(
+                    lane_index,
+                    lane.key,
+                    lane.callback,
+                    &mut lane.accepted,
+                    &mut lane.selected_token,
+                );
+                all_submitted &= submitted;
+            }
         }
         let mut out = event.out.borrow_mut();
         out.all_submitted = all_submitted;
-        out.joined = pool.join_ok;
-        out.dispatched_lanes = lanes.len() as i32;
+        out.joined = pool.join();
+        out.dispatched_lanes = i32::try_from(lane_count).expect("bounded lane count fits in i32");
+        Ok(())
+    }
+    fn effect_commit_done_from_state_lane0_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane1_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane2_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane3_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane4_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane5_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane6_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_lane7_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+    fn effect_commit_done_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        commit_done(self, event)
+    }
+
+    fn effect_dispatch_lane_0(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 0)
+    }
+    fn effect_dispatch_lane_1(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 1)
+    }
+    fn effect_dispatch_lane_2(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 2)
+    }
+    fn effect_dispatch_lane_3(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 3)
+    }
+    fn effect_dispatch_lane_4(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 4)
+    }
+    fn effect_dispatch_lane_5(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 5)
+    }
+    fn effect_dispatch_lane_6(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 6)
+    }
+    fn effect_dispatch_lane_7(&mut self, event: &EventRun<'_>) -> Result<(), ()> {
+        dispatch_lane(event, 7)
+    }
+
+    fn effect_mark_lane_rejected_0_from_state_lane0_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 0)
+    }
+    fn effect_mark_lane_rejected_0_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 0)
+    }
+    fn effect_mark_lane_rejected_1_from_state_lane1_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 1)
+    }
+    fn effect_mark_lane_rejected_1_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 1)
+    }
+    fn effect_mark_lane_rejected_2_from_state_lane2_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 2)
+    }
+    fn effect_mark_lane_rejected_2_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 2)
+    }
+    fn effect_mark_lane_rejected_3_from_state_lane3_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 3)
+    }
+    fn effect_mark_lane_rejected_3_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 3)
+    }
+    fn effect_mark_lane_rejected_4_from_state_lane4_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 4)
+    }
+    fn effect_mark_lane_rejected_4_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 4)
+    }
+    fn effect_mark_lane_rejected_5_from_state_lane5_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 5)
+    }
+    fn effect_mark_lane_rejected_5_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 5)
+    }
+    fn effect_mark_lane_rejected_6_from_state_lane6_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 6)
+    }
+    fn effect_mark_lane_rejected_6_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 6)
+    }
+    fn effect_mark_lane_rejected_7_from_state_lane7_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 7)
+    }
+    fn effect_mark_lane_rejected_7_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::LaneRejected;
+        mark_rejected(event, 7)
+    }
+    fn effect_reject_parallel_scheduler_from_state_parallel_decision(
+        &mut self,
+        event: &EventRun<'_>,
+    ) -> Result<(), ()> {
+        self.err = DecodeWavefrontError::Backend;
+        event.out.borrow_mut().err = self.err;
         Ok(())
     }
 
-    fn effect_commit_done_from_state_lane0_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane1_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane2_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane3_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane4_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane5_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane6_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_lane7_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
-    fn effect_commit_done_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::None; commit_done(event) }
+    fn effect_on_unexpected_from_state_group_ready(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_idle(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane0_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane1_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane2_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane3_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane4_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane5_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane6_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_lane7_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_parallel_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
+    fn effect_on_unexpected_from_state_validation_decision(&mut self) -> Result<(), ()> {
+        self.unexpected()
+    }
 
-    fn effect_dispatch_lane_0(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 0) }
-    fn effect_dispatch_lane_1(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 1) }
-    fn effect_dispatch_lane_2(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 2) }
-    fn effect_dispatch_lane_3(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 3) }
-    fn effect_dispatch_lane_4(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 4) }
-    fn effect_dispatch_lane_5(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 5) }
-    fn effect_dispatch_lane_6(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 6) }
-    fn effect_dispatch_lane_7(&mut self, event: &EventRun<'_>) -> Result<(), ()> { dispatch_lane(event, 7) }
-
-    fn effect_mark_lane_rejected_0_from_state_lane0_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 0) }
-    fn effect_mark_lane_rejected_0_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 0) }
-    fn effect_mark_lane_rejected_1_from_state_lane1_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 1) }
-    fn effect_mark_lane_rejected_1_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 1) }
-    fn effect_mark_lane_rejected_2_from_state_lane2_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 2) }
-    fn effect_mark_lane_rejected_2_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 2) }
-    fn effect_mark_lane_rejected_3_from_state_lane3_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 3) }
-    fn effect_mark_lane_rejected_3_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 3) }
-    fn effect_mark_lane_rejected_4_from_state_lane4_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 4) }
-    fn effect_mark_lane_rejected_4_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 4) }
-    fn effect_mark_lane_rejected_5_from_state_lane5_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 5) }
-    fn effect_mark_lane_rejected_5_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 5) }
-    fn effect_mark_lane_rejected_6_from_state_lane6_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 6) }
-    fn effect_mark_lane_rejected_6_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 6) }
-    fn effect_mark_lane_rejected_7_from_state_lane7_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 7) }
-    fn effect_mark_lane_rejected_7_from_state_parallel_decision(&mut self, event: &EventRun<'_>) -> Result<(), ()> { self.err = DecodeWavefrontError::LaneRejected; mark_rejected(event, 7) }
-
-    fn effect_on_unexpected_from_state_group_ready(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_idle(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane0_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane1_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane2_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane3_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane4_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane5_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane6_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_lane7_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_parallel_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-    fn effect_on_unexpected_from_state_validation_decision(&mut self) -> Result<(), ()> { self.unexpected() }
-
-    fn guard_invalid_request(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!valid_count(event)) }
-    fn guard_multi_lane_incompatible(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(valid_count(event) && event.lanes.borrow().len() > 1 && !all_compatible(event)) }
-    fn guard_single_lane(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(valid_count(event) && event.lanes.borrow().len() == 1) }
-    fn guard_multi_lane_compatible(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(valid_count(event) && event.lanes.borrow().len() > 1 && all_compatible(event)) }
+    fn guard_invalid_request(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!valid_count(event))
+    }
+    fn guard_multi_lane_incompatible(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(valid_count(event) && event.lanes.borrow().len() > 1 && !all_compatible(event))
+    }
+    fn guard_multi_lane_compatible(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(valid_count(event) && event.lanes.borrow().len() > 1 && all_compatible(event))
+    }
+    fn guard_single_lane(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(valid_count(event) && event.lanes.borrow().len() == 1)
+    }
     fn guard_serial_dispatch(&self, event: &EventRun<'_>) -> Result<bool, ()> {
         let count = event.lanes.borrow().len();
-        Ok(self.pool.map_or(true, |pool| !pool.parallel_enabled) || count == 1 || !distinct_writers(event))
+        Ok(self.pool.is_none()
+            || count == 1
+            || !distinct_writers(event)
+            || !distinct_outcomes(event))
     }
     fn guard_parallel_dispatch(&self, event: &EventRun<'_>) -> Result<bool, ()> {
         let count = event.lanes.borrow().len();
-        Ok(self.pool.is_some_and(|pool| pool.parallel_enabled) && count > 1 && distinct_writers(event))
+        Ok(self.pool.is_some() && count > 1 && distinct_writers(event) && distinct_outcomes(event))
     }
-    fn guard_lane_rejected_0(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[0].accepted) }
-    fn guard_lane_rejected_1(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[1].accepted) }
-    fn guard_lane_rejected_2(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[2].accepted) }
-    fn guard_lane_rejected_3(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[3].accepted) }
-    fn guard_lane_rejected_4(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[4].accepted) }
-    fn guard_lane_rejected_5(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[5].accepted) }
-    fn guard_lane_rejected_6(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[6].accepted) }
-    fn guard_lane_rejected_7(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.lanes.borrow()[7].accepted) }
-    fn guard_lane_accepted_and_last_0(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[0].accepted && event.lanes.borrow().len() == 1) }
-    fn guard_lane_accepted_and_last_1(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[1].accepted && event.lanes.borrow().len() == 2) }
-    fn guard_lane_accepted_and_last_2(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[2].accepted && event.lanes.borrow().len() == 3) }
-    fn guard_lane_accepted_and_last_3(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[3].accepted && event.lanes.borrow().len() == 4) }
-    fn guard_lane_accepted_and_last_4(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[4].accepted && event.lanes.borrow().len() == 5) }
-    fn guard_lane_accepted_and_last_5(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[5].accepted && event.lanes.borrow().len() == 6) }
-    fn guard_lane_accepted_and_last_6(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[6].accepted && event.lanes.borrow().len() == 7) }
-    fn guard_lane_accepted_and_last_7(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[7].accepted && event.lanes.borrow().len() == 8) }
-    fn guard_lane_accepted_and_more_0(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[0].accepted && event.lanes.borrow().len() > 1) }
-    fn guard_lane_accepted_and_more_1(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[1].accepted && event.lanes.borrow().len() > 2) }
-    fn guard_lane_accepted_and_more_2(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[2].accepted && event.lanes.borrow().len() > 3) }
-    fn guard_lane_accepted_and_more_3(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[3].accepted && event.lanes.borrow().len() > 4) }
-    fn guard_lane_accepted_and_more_4(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[4].accepted && event.lanes.borrow().len() > 5) }
-    fn guard_lane_accepted_and_more_5(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[5].accepted && event.lanes.borrow().len() > 6) }
-    fn guard_lane_accepted_and_more_6(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.lanes.borrow()[6].accepted && event.lanes.borrow().len() > 7) }
-    fn guard_parallel_submission_failed(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(!event.out.borrow().all_submitted) }
-    fn guard_parallel_join_failed(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.out.borrow().all_submitted && !event.out.borrow().joined) }
-    fn guard_parallel_all_lanes_accepted(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(event.out.borrow().all_submitted && event.out.borrow().joined && event.lanes.borrow().iter().all(|lane| lane.accepted)) }
-    fn guard_parallel_lane_rejected_0(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 0)) }
-    fn guard_parallel_lane_rejected_1(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 1)) }
-    fn guard_parallel_lane_rejected_2(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 2)) }
-    fn guard_parallel_lane_rejected_3(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 3)) }
-    fn guard_parallel_lane_rejected_4(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 4)) }
-    fn guard_parallel_lane_rejected_5(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 5)) }
-    fn guard_parallel_lane_rejected_6(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 6)) }
-    fn guard_parallel_lane_rejected_7(&self, event: &EventRun<'_>) -> Result<bool, ()> { Ok(parallel_lane_rejected(event, 7)) }
+    fn guard_lane_rejected_0(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[0].accepted)
+    }
+    fn guard_lane_rejected_1(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[1].accepted)
+    }
+    fn guard_lane_rejected_2(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[2].accepted)
+    }
+    fn guard_lane_rejected_3(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[3].accepted)
+    }
+    fn guard_lane_rejected_4(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[4].accepted)
+    }
+    fn guard_lane_rejected_5(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[5].accepted)
+    }
+    fn guard_lane_rejected_6(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[6].accepted)
+    }
+    fn guard_lane_rejected_7(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.lanes.borrow()[7].accepted)
+    }
+    fn guard_lane_accepted_and_last_0(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[0].accepted && event.lanes.borrow().len() == 1)
+    }
+    fn guard_lane_accepted_and_last_1(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[1].accepted && event.lanes.borrow().len() == 2)
+    }
+    fn guard_lane_accepted_and_last_2(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[2].accepted && event.lanes.borrow().len() == 3)
+    }
+    fn guard_lane_accepted_and_last_3(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[3].accepted && event.lanes.borrow().len() == 4)
+    }
+    fn guard_lane_accepted_and_last_4(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[4].accepted && event.lanes.borrow().len() == 5)
+    }
+    fn guard_lane_accepted_and_last_5(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[5].accepted && event.lanes.borrow().len() == 6)
+    }
+    fn guard_lane_accepted_and_last_6(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[6].accepted && event.lanes.borrow().len() == 7)
+    }
+    fn guard_lane_accepted_and_last_7(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[7].accepted && event.lanes.borrow().len() == 8)
+    }
+    fn guard_lane_accepted_and_more_0(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[0].accepted && event.lanes.borrow().len() > 1)
+    }
+    fn guard_lane_accepted_and_more_1(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[1].accepted && event.lanes.borrow().len() > 2)
+    }
+    fn guard_lane_accepted_and_more_2(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[2].accepted && event.lanes.borrow().len() > 3)
+    }
+    fn guard_lane_accepted_and_more_3(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[3].accepted && event.lanes.borrow().len() > 4)
+    }
+    fn guard_lane_accepted_and_more_4(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[4].accepted && event.lanes.borrow().len() > 5)
+    }
+    fn guard_lane_accepted_and_more_5(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[5].accepted && event.lanes.borrow().len() > 6)
+    }
+    fn guard_lane_accepted_and_more_6(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.lanes.borrow()[6].accepted && event.lanes.borrow().len() > 7)
+    }
+    fn guard_parallel_submission_failed(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(!event.out.borrow().all_submitted)
+    }
+    fn guard_parallel_join_failed(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.out.borrow().all_submitted && !event.out.borrow().joined)
+    }
+    fn guard_parallel_all_lanes_accepted(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(event.out.borrow().all_submitted
+            && event.out.borrow().joined
+            && event.lanes.borrow().iter().all(|lane| lane.accepted))
+    }
+    fn guard_parallel_lane_rejected_0(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 0))
+    }
+    fn guard_parallel_lane_rejected_1(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 1))
+    }
+    fn guard_parallel_lane_rejected_2(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 2))
+    }
+    fn guard_parallel_lane_rejected_3(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 3))
+    }
+    fn guard_parallel_lane_rejected_4(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 4))
+    }
+    fn guard_parallel_lane_rejected_5(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 5))
+    }
+    fn guard_parallel_lane_rejected_6(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 6))
+    }
+    fn guard_parallel_lane_rejected_7(&self, event: &EventRun<'_>) -> Result<bool, ()> {
+        Ok(parallel_lane_rejected(event, 7))
+    }
 }
 
 fn parallel_lane_rejected(event: &EventRun<'_>, index: usize) -> bool {
     let out = event.out.borrow();
-    if !out.all_submitted || !out.joined { return false; }
+    if !out.all_submitted || !out.joined {
+        return false;
+    }
     let lanes = event.lanes.borrow();
     index < lanes.len() && lanes[..index].iter().all(|lane| lane.accepted) && !lanes[index].accepted
 }
 
 /// Public single-writer synchronous actor.
-pub struct TextGeneratorDecodeWavefrontActor<'event> {
+pub struct TextGeneratorDecodeWavefrontActor {
     machine: TextGeneratorDecodeWavefrontStateMachine<TextGeneratorDecodeWavefrontContext>,
 }
 
-impl<'event> Default for TextGeneratorDecodeWavefrontActor<'event> {
-    fn default() -> Self { Self::new() }
+impl Default for TextGeneratorDecodeWavefrontActor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl<'event> TextGeneratorDecodeWavefrontActor<'event> {
+impl TextGeneratorDecodeWavefrontActor {
     /// Creates an actor using serial dispatch unless a pool is supplied.
     #[must_use]
     pub fn new() -> Self {
-        Self { machine: TextGeneratorDecodeWavefrontStateMachine::new(TextGeneratorDecodeWavefrontContext::default()) }
+        Self {
+            machine: TextGeneratorDecodeWavefrontStateMachine::new(
+                TextGeneratorDecodeWavefrontContext::default(),
+            ),
+        }
     }
 
     /// Creates an actor with copied synchronous pool capabilities.
     #[must_use]
     pub fn with_pool(pool: LanePool) -> Self {
-        Self { machine: TextGeneratorDecodeWavefrontStateMachine::new(TextGeneratorDecodeWavefrontContext { pool: Some(pool), ..Default::default() }) }
+        Self {
+            machine: TextGeneratorDecodeWavefrontStateMachine::new(
+                TextGeneratorDecodeWavefrontContext {
+                    pool: Some(pool),
+                    ..Default::default()
+                },
+            ),
+        }
     }
 
     /// Processes one complete bounded request synchronously.
-    pub fn process_event(&mut self, event: EventRun<'event>) -> Result<(), DecodeWavefrontError> {
-        if self.machine.process_event(TextGeneratorDecodeWavefrontEvents::EventRun(event)).is_err() {
+    pub fn process_event(&mut self, event: EventRun<'_>) -> Result<(), DecodeWavefrontError> {
+        if self
+            .machine
+            .process_event(TextGeneratorDecodeWavefrontEvents::EventRun(event))
+            .is_err()
+        {
             self.machine.context_mut().err = DecodeWavefrontError::Unexpected;
             return Err(DecodeWavefrontError::Unexpected);
         }
         let error = self.machine.context().err;
-        if error == DecodeWavefrontError::None { Ok(()) } else { Err(error) }
+        if error == DecodeWavefrontError::None {
+            Ok(())
+        } else {
+            Err(error)
+        }
     }
 
     /// Source-compatible process spelling.
-    pub fn run(&mut self, event: EventRun<'event>) -> Result<(), DecodeWavefrontError> { self.process_event(event) }
+    pub fn run(&mut self, event: EventRun<'_>) -> Result<(), DecodeWavefrontError> {
+        self.process_event(event)
+    }
 
     /// Dispatches the explicit unexpected-event path.
     pub fn process_unexpected(&mut self) -> Result<(), DecodeWavefrontError> {
         let _ = self.machine.context_mut().unexpected();
-        self.machine.set_state(TextGeneratorDecodeWavefrontStates::StateIdle);
+        self.machine.context_mut().err = DecodeWavefrontError::Unexpected;
+        self.machine
+            .set_state(TextGeneratorDecodeWavefrontStates::StateIdle);
         Err(DecodeWavefrontError::Unexpected)
     }
-
-    /// Returns generated state inspection data.
+    /// Returns the generated machine state.
     #[must_use]
-    pub fn state(&self) -> &TextGeneratorDecodeWavefrontStates { self.machine.state() }
+    pub fn state(&self) -> &TextGeneratorDecodeWavefrontStates {
+        self.machine.state()
+    }
 
-    /// Reports whether the actor is in `state`.
+    /// Source-compatible unexpected-event spelling.
+    pub fn process_unexpected_event(&mut self) -> Result<(), DecodeWavefrontError> {
+        self.process_unexpected()
+    }
+
     #[must_use]
-    pub fn is(&self, state: &TextGeneratorDecodeWavefrontStates) -> bool { self.machine.is(state) }
-
+    pub fn is(&self, state: &TextGeneratorDecodeWavefrontStates) -> bool {
+        self.machine.is(state)
+    }
     /// Returns the retained runtime context.
     #[must_use]
-    pub fn context(&self) -> &TextGeneratorDecodeWavefrontContext { self.machine.context() }
+    pub fn context(&self) -> &TextGeneratorDecodeWavefrontContext {
+        self.machine.context()
+    }
 
     /// Returns the last published error.
     #[must_use]
-    pub fn error(&self) -> DecodeWavefrontError { self.machine.context().err }
+    pub fn error(&self) -> DecodeWavefrontError {
+        self.machine.context().err
+    }
 }
 
 /// Short alias matching the maintained C++ actor spelling.
-pub type DecodeWavefront<'event> = TextGeneratorDecodeWavefrontActor<'event>;
-
+pub type DecodeWavefront = TextGeneratorDecodeWavefrontActor;

@@ -1625,6 +1625,27 @@ pub struct EventRollbackSlotsRuntime<'event> {
     pub error_out: Option<&'event RefCell<i32>>,
     pub context: &'event RefCell<RollbackSlotsContext>,
 }
+macro_rules! event_debug {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            impl core::fmt::Debug for $name<'_> {
+                fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    formatter.debug_struct(stringify!($name)).finish()
+                }
+            }
+        )+
+    };
+}
+
+event_debug!(
+    EventAllocateSequenceRuntime,
+    EventAllocateSlotsRuntime,
+    EventBranchSequenceRuntime,
+    EventCaptureViewRuntime,
+    EventFreeSequenceRuntime,
+    EventReserveRuntime,
+    EventRollbackSlotsRuntime,
+);
 
 sml! {
     MemoryKv<'event> {

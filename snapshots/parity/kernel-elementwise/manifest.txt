@@ -14,6 +14,6 @@ case=op_sqr status=ok output_bits=40100000,40800000,3d800000
 case=op_sqrt status=ok output_bits=00000000,40000000,40400000
 case=invalid_shape status=invalid_shape
 reference_tool_sha256=114b9ad8801ee33f839365b4a01aa211447269db7fb6eb87476951c2a6285d03
-rust_observer_sha256=f7243657f3bf240f5aff002d52608e7f1643faa485617f8cea1a13050fe3ded7
+rust_observer_sha256=3840dbb2dd0f85162a12ad4f7bd91b97f69a9919eb907346ef28ce4912defa1c
 config=Release,cxx20,dense-contiguous-f32,public-rust-actor,public-cpp-kernel
 result=match
